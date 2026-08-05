@@ -21,6 +21,7 @@ pedantic = "warn"
 
 [workspace.dependencies]
 chrono = { version = "0.4.44", features = ["serde"] }
+clap = { version = "4.5.53", features = ["derive"] }
 schemars = { version = "0.8.22", features = ["chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

@@ -3,6 +3,7 @@ pub mod contracts;
 pub mod effects;
 pub mod engine;
 pub mod evidence;
+pub mod mission;
 pub mod policy;
 pub mod recovery;
 pub mod strict_json;

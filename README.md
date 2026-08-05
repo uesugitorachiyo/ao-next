@@ -22,4 +22,10 @@ cargo build --workspace --release
 git diff --check
 ```
 
+## Operator CLI
+
+`ao-next run` executes only an explicitly supplied offline scripted plan. `inspect` validates a terminal readback, `verify-evidence` independently audits a sealed run, and `replay` computes a recovery plan without executing pending effects. `evaluate` is reserved for the sealed phase-9 comparison harness. Every command writes one JSON value to stdout and a concise operator summary to stderr.
+
+AO Mission's current canonical terminal-index consumer requires lease, root, and lineage evidence that a single AO Next readback does not contain. [The bounded compatibility proposal](docs/mission-compatibility.md) defines a separate read-only, digest-idempotent importer; this candidate does not change Mission or fabricate the missing artifacts.
+
 Local qualification may establish only `AO_NEXT_READY_FOR_LIVE_EVALUATION`. Live runtime measurements and any replacement decision require separate authorization and evidence.

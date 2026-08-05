@@ -1,0 +1,19 @@
+{
+  "schema_version": "ao.next.mission-compatibility.v1",
+  "current_consumer": "ao.canonical-terminal-index.v1",
+  "candidate_contract": "ao.next.terminal-readback.v1",
+  "status": "bounded_incompatibility",
+  "reasons": [
+    "Mission's current consumer requires lease and root artifacts whose counts are independently recomputed; one AO Next run readback does not contain them",
+    "Mission's current consumer validates ordered lineage across lease, root, and optional terminal artifacts; synthesizing that lineage would fabricate evidence"
+  ],
+  "proposed_importer": "ao.mission.candidate-terminal-readback.v1",
+  "proposal": "Add a distinct read-only importer that retains the exact candidate bytes and digest as provenance; do not reinterpret the readback as a canonical terminal index",
+  "proposal_grants_authority": false,
+  "safety_boundaries": {
+    "approves_work": false,
+    "executes_mission_work": false,
+    "grants_authority": false,
+    "publishes": false
+  }
+}

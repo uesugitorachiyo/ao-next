@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ao-next-core = { path = "../ao-next-core" }
+ao-next-eval = { path = "../ao-next-eval" }
 chrono.workspace = true
 clap.workspace = true
 serde.workspace = true

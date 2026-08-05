@@ -6,6 +6,6 @@ AO Next compares three variants over identical source, objective, workspace seed
 - N4: direct frontier model in its native harness.
 - N7: the same task through AO Next.
 
-The offline harness stores canonical metric rows and rejects missing baselines, unequal hidden tests, incomplete token rows, corpus drift, and identity mismatch. It may determine local readiness but cannot produce `AO_NEXT_LIVE_EVALUATION_PASSED` from scripted fixtures.
+The offline harness stores canonical metric rows and rejects missing baselines, unequal hidden tests, incomplete token rows, corpus drift, identity mismatch, and reported-total manipulation. The ordered three-task fixture is sealed by the canonical digest of its task list. [The decision policy](decision-policy.md) defines every calculated gate. The harness may determine local readiness but cannot produce `AO_NEXT_LIVE_EVALUATION_PASSED` from scripted fixtures.
 
 Provider calls, credentials, network access, remote mutation, publication, release, deployment, AO migration, and superiority claims are outside local qualification authority.

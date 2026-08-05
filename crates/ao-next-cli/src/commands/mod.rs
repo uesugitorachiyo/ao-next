@@ -120,15 +120,6 @@ impl CommandFailure {
             message: message.into(),
         }
     }
-
-    #[must_use]
-    pub fn not_implemented(message: impl Into<String>) -> Self {
-        Self {
-            status: 5,
-            code: "not_implemented",
-            message: message.into(),
-        }
-    }
 }
 
 pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {

@@ -66,6 +66,7 @@ name = "ao-next-cli"
 version = "0.1.0"
 dependencies = [
  "ao-next-core",
+ "ao-next-eval",
  "chrono",
  "clap",
  "serde",
@@ -91,6 +92,8 @@ name = "ao-next-eval"
 version = "0.1.0"
 dependencies = [
  "ao-next-core",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

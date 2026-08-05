@@ -1,3 +1,7 @@
+pub mod comparison;
+pub mod corpus;
+pub mod metrics;
+
 /// Returns the schema family implemented by the evaluation crate.
 #[must_use]
 pub const fn schema_version() -> &'static str {

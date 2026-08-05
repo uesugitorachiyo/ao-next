@@ -128,6 +128,105 @@ fn run_request_json(root: &Path) -> serde_json::Value {
     })
 }
 
+fn ready_comparison_json() -> serde_json::Value {
+    let task = serde_json::json!({
+        "task_id": "cli-evaluation",
+        "task_kind": "bounded_public_defect_repair",
+        "source_digest": ZERO_DIGEST,
+        "objective_digest": ONE_DIGEST,
+        "workspace_seed_digest": ZERO_DIGEST,
+        "visible_fixtures_digest": ONE_DIGEST,
+        "hidden_tests_digest": ZERO_DIGEST,
+        "verifier_profile_digest": ONE_DIGEST,
+        "variant_profiles": [
+            {
+                "variant": "N0",
+                "runtime": "N0",
+                "model_identifier": "fixture-model",
+                "prompt_digest": ONE_DIGEST,
+                "policy_digest": ZERO_DIGEST,
+                "adapter_version": "fixture-v1"
+            },
+            {
+                "variant": "N4",
+                "runtime": "N4",
+                "model_identifier": "fixture-model",
+                "prompt_digest": ONE_DIGEST,
+                "policy_digest": ZERO_DIGEST,
+                "adapter_version": "fixture-v1"
+            },
+            {
+                "variant": "N7",
+                "runtime": "N7",
+                "model_identifier": "fixture-model",
+                "prompt_digest": ONE_DIGEST,
+                "policy_digest": ZERO_DIGEST,
+                "adapter_version": "fixture-v1"
+            }
+        ]
+    });
+    let corpus_digest =
+        ao_next_core::strict_json::canonical_digest(&vec![task.clone()]).expect("corpus digest");
+    let measurement = |variant: &str, tokens: u64, wall_clock_ms: u64| {
+        serde_json::json!({
+            "schema_version": "ao.next.run-measurement.v1",
+            "corpus_digest": corpus_digest,
+            "task_id": "cli-evaluation",
+            "variant": variant,
+            "source_digest": ZERO_DIGEST,
+            "objective_digest": ONE_DIGEST,
+            "workspace_seed_digest": ZERO_DIGEST,
+            "visible_fixtures_digest": ONE_DIGEST,
+            "hidden_tests_digest": ZERO_DIGEST,
+            "verifier_profile_digest": ONE_DIGEST,
+            "runtime": variant,
+            "model_identifier": "fixture-model",
+            "prompt_digest": ONE_DIGEST,
+            "policy_digest": ZERO_DIGEST,
+            "adapter_version": "fixture-v1",
+            "tokens": {
+                "input_tokens": tokens,
+                "cached_input_tokens": 0,
+                "reasoning_tokens": 0,
+                "output_tokens": 0,
+                "reported_total_tokens": tokens
+            },
+            "wall_clock_ms": wall_clock_ms,
+            "model_wait_ms": wall_clock_ms / 2,
+            "worker_turns": 1,
+            "repair_attempts": 0,
+            "operator_interventions": 0,
+            "changed_files": 1,
+            "accepted_changed_files": 1,
+            "task_success": true,
+            "hidden_tests_passed": 10,
+            "hidden_tests_total": 10,
+            "regressions": 0,
+            "unauthorized_effects": 0,
+            "evidence_complete": true,
+            "evidence_digest_valid": true,
+            "recovery_attempted": variant == "N7",
+            "recovery_no_duplicate_effect": true,
+            "cross_runtime_agreement": true,
+            "worker_count": 1,
+            "dynamic_fanout": false
+        })
+    };
+    serde_json::json!({
+        "schema_version": "ao.next.comparison-request.v1",
+        "corpus": {
+            "schema_version": "ao.next.evaluation-corpus.v1",
+            "corpus_digest": corpus_digest,
+            "tasks": [task]
+        },
+        "runs": [
+            measurement("N0", 400, 400),
+            measurement("N4", 100, 200),
+            measurement("N7", 110, 250)
+        ]
+    })
+}
+
 fn scripted_plan(action: &serde_json::Value, passed: bool) -> serde_json::Value {
     serde_json::json!({
         "schema_version": "ao.next.scripted-run-plan.v1",
@@ -219,13 +318,32 @@ fn malformed_inputs_have_stable_json_exit_statuses_for_each_command() {
         "--comparison",
         malformed.to_str().expect("path"),
     ]);
-    assert_json_error(&evaluate, 5, "not_implemented");
+    assert_json_error(&evaluate, 3, "invalid_input");
 }
 
 #[test]
 fn clap_usage_errors_are_also_machine_readable() {
     let output = run(&["inspect"]);
     assert_json_error(&output, 2, "usage");
+}
+
+#[test]
+fn evaluate_emits_a_non_promotional_offline_decision() {
+    let temporary = TempDir::new().expect("temporary");
+    let comparison = temporary.path().join("comparison.json");
+    write_json(&comparison, &ready_comparison_json());
+    let output = run(&[
+        "evaluate",
+        "--comparison",
+        comparison.to_str().expect("path"),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("comparison report");
+    assert_eq!(report["decision"], "AO_NEXT_READY_FOR_LIVE_EVALUATION");
+    assert_eq!(report["promotion_authorized"], false);
+    assert_eq!(report["dynamic_fanout_authorized"], false);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("evaluated"));
 }
 
 #[test]

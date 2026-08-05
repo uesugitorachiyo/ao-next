@@ -14,6 +14,8 @@ The Rust workspace contains:
 
 [Codex and Claude runtime adapters](docs/runtime-adapters.md) are locally contract-tested without provider calls. Their live smoke tests remain ignored behind a separate operator-only authorization gate.
 
+The [offline evaluation policy](docs/evaluation/decision-policy.md) compares sealed N0/N4/N7 rows and can conclude only `AO_NEXT_NOT_YET_SUPERIOR` or `AO_NEXT_READY_FOR_LIVE_EVALUATION`. It cannot authorize promotion, fan-out, or a live-passed result.
+
 ## Local Verification
 
 ```sh

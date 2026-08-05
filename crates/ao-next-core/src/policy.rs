@@ -136,12 +136,16 @@ fn validate_path(
         }
         let canonical_root = std::fs::canonicalize(root)
             .map_err(|_| PolicyDenial::AllowedRootUnavailable(root.clone()))?;
-        let Ok(relative) = path.strip_prefix(root) else {
+        let (base, relative) = if let Ok(relative) = path.strip_prefix(root) {
+            (root.clone(), relative)
+        } else if let Ok(relative) = path.strip_prefix(&canonical_root) {
+            (canonical_root.clone(), relative)
+        } else {
             continue;
         };
 
-        let mut current = root.clone();
-        let mut nearest_existing = root.clone();
+        let mut current = base.clone();
+        let mut nearest_existing = base;
         for component in relative.components() {
             if let Component::Normal(segment) = component {
                 current.push(segment);

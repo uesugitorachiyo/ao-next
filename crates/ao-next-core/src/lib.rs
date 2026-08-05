@@ -2,9 +2,12 @@ pub mod adapter;
 pub mod contracts;
 pub mod effects;
 pub mod engine;
+pub mod evidence;
 pub mod policy;
+pub mod recovery;
 pub mod strict_json;
 pub mod terminal;
+pub mod verifier;
 
 /// Returns the schema family implemented by the core crate.
 #[must_use]

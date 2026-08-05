@@ -34,6 +34,11 @@ impl Digest {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn from_sha256_hex(hex: &str) -> Self {
+        debug_assert!(hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        Self(format!("sha256:{hex}"))
+    }
 }
 
 impl fmt::Display for Digest {

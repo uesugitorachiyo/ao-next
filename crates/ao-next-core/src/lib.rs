@@ -1,7 +1,10 @@
+pub mod adapter;
 pub mod contracts;
 pub mod effects;
+pub mod engine;
 pub mod policy;
 pub mod strict_json;
+pub mod terminal;
 
 /// Returns the schema family implemented by the core crate.
 #[must_use]

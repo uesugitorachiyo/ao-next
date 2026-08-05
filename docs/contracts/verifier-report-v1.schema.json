@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "VerifierResult": {
+      "additionalProperties": false,
+      "properties": {
+        "exit_status": { "format": "int32", "type": ["integer", "null"] },
+        "message": { "type": "string" },
+        "output_digest": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "verifier_id": { "type": "string" }
+      },
+      "required": ["message", "output_digest", "passed", "verifier_id"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "completed_at": { "format": "date-time", "type": "string" },
+    "passed": { "type": "boolean" },
+    "results": { "items": { "$ref": "#/definitions/VerifierResult" }, "type": "array" },
+    "run_id": { "type": "string" },
+    "schema_version": { "type": "string" },
+    "started_at": { "format": "date-time", "type": "string" },
+    "verifier_profile_digest": { "type": "string" }
+  },
+  "required": ["completed_at", "passed", "results", "run_id", "schema_version", "started_at", "verifier_profile_digest"],
+  "title": "VerifierReport",
+  "type": "object"
+}

@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuthorityEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_network_hosts": { "items": { "type": "string" }, "type": "array", "uniqueItems": true },
+        "allowed_programs": { "items": { "type": "string" }, "type": "array", "uniqueItems": true },
+        "allowed_roots": { "items": { "type": "string" }, "type": "array" },
+        "capabilities": { "items": { "$ref": "#/definitions/Capability" }, "type": "array", "uniqueItems": true },
+        "expires_at": { "format": "date-time", "type": "string" },
+        "external_effects": { "$ref": "#/definitions/ExternalEffectPolicy" },
+        "issued_at": { "format": "date-time", "type": "string" },
+        "issued_by": { "type": "string" },
+        "network": { "$ref": "#/definitions/NetworkPolicy" },
+        "schema_version": { "type": "string" }
+      },
+      "required": ["allowed_network_hosts", "allowed_programs", "allowed_roots", "capabilities", "expires_at", "external_effects", "issued_at", "issued_by", "network", "schema_version"],
+      "type": "object"
+    },
+    "Capability": {
+      "enum": ["read_workspace", "write_workspace", "run_local_program", "network_access", "credential_access", "remote_mutation", "release", "deployment", "publication"],
+      "type": "string"
+    },
+    "ExternalEffectPolicy": { "enum": ["denied", "authorized_capabilities_only"], "type": "string" },
+    "ModelProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_version": { "type": "string" },
+        "context_limit": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "model_identifier": { "type": "string" },
+        "output_limit": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "reasoning_effort": { "type": "string" },
+        "runtime": { "type": "string" },
+        "system_prompt_digest": { "type": "string" },
+        "tool_contract_digest": { "type": "string" }
+      },
+      "required": ["adapter_version", "context_limit", "model_identifier", "output_limit", "reasoning_effort", "runtime", "system_prompt_digest", "tool_contract_digest"],
+      "type": "object"
+    },
+    "NetworkPolicy": { "enum": ["denied", "loopback_only", "allowlisted"], "type": "string" },
+    "RunLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_effect_timeout_ms": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "max_input_bytes": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "max_output_bytes": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "max_repair_attempts": { "format": "uint32", "minimum": 0.0, "type": "integer" },
+        "max_run_ms": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "max_tokens": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "max_turns": { "format": "uint32", "minimum": 0.0, "type": "integer" }
+      },
+      "required": ["max_effect_timeout_ms", "max_input_bytes", "max_output_bytes", "max_repair_attempts", "max_run_ms", "max_tokens", "max_turns"],
+      "type": "object"
+    },
+    "SourceIdentity": {
+      "additionalProperties": false,
+      "properties": { "head": { "type": "string" }, "repository": { "type": "string" } },
+      "required": ["head", "repository"],
+      "type": "object"
+    },
+    "StructuredCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "args": { "items": { "type": "string" }, "type": "array" },
+        "program": { "type": "string" },
+        "timeout_ms": { "format": "uint64", "minimum": 0.0, "type": "integer" }
+      },
+      "required": ["args", "program", "timeout_ms"],
+      "type": "object"
+    },
+    "VerifierProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": { "items": { "$ref": "#/definitions/StructuredCommand" }, "type": "array" },
+        "profile_digest": { "type": "string" },
+        "profile_id": { "type": "string" },
+        "required_artifacts": { "items": { "type": "string" }, "type": "array" }
+      },
+      "required": ["commands", "profile_digest", "profile_id", "required_artifacts"],
+      "type": "object"
+    },
+    "WorkspaceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string" },
+        "seed_digest": { "type": "string" },
+        "workspace_id": { "type": "string" }
+      },
+      "required": ["root", "seed_digest", "workspace_id"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "authority": { "$ref": "#/definitions/AuthorityEnvelope" },
+    "limits": { "$ref": "#/definitions/RunLimits" },
+    "model_profile": { "$ref": "#/definitions/ModelProfile" },
+    "objective": { "type": "string" },
+    "policy_digest": { "type": "string" },
+    "run_id": { "type": "string" },
+    "schema_version": { "type": "string" },
+    "source": { "$ref": "#/definitions/SourceIdentity" },
+    "verifier_profile": { "$ref": "#/definitions/VerifierProfile" },
+    "workspace": { "$ref": "#/definitions/WorkspaceIdentity" }
+  },
+  "required": ["authority", "limits", "model_profile", "objective", "policy_digest", "run_id", "schema_version", "source", "verifier_profile", "workspace"],
+  "title": "RunRequest",
+  "type": "object"
+}

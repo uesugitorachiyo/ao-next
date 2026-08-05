@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "EffectDecision": { "enum": ["admitted", "denied"], "type": "string" },
+    "EffectKind": {
+      "enum": ["read_file", "write_file", "run_program", "network", "credential", "remote_mutation", "release", "deployment", "publication"],
+      "type": "string"
+    },
+    "EffectRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "args": { "items": { "type": "string" }, "type": "array" },
+        "effect_id": { "type": "string" },
+        "input_digest": { "type": "string" },
+        "kind": { "$ref": "#/definitions/EffectKind" },
+        "paths": { "items": { "type": "string" }, "type": "array" },
+        "program": { "type": ["string", "null"] },
+        "run_id": { "type": "string" },
+        "timeout_ms": { "format": "uint64", "minimum": 0.0, "type": "integer" }
+      },
+      "required": ["args", "effect_id", "input_digest", "kind", "paths", "run_id", "timeout_ms"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "decision": { "$ref": "#/definitions/EffectDecision" },
+    "output_digest": { "type": ["string", "null"] },
+    "policy_digest": { "type": "string" },
+    "recorded_at": { "format": "date-time", "type": "string" },
+    "request": { "$ref": "#/definitions/EffectRequest" },
+    "schema_version": { "type": "string" }
+  },
+  "required": ["decision", "policy_digest", "recorded_at", "request", "schema_version"],
+  "title": "EffectEvent",
+  "type": "object"
+}

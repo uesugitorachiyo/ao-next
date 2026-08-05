@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AdapterIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_version": { "type": "string" },
+        "model_identifier": { "type": "string" },
+        "runtime": { "type": "string" },
+        "worker_id": { "type": "string" }
+      },
+      "required": ["adapter_version", "model_identifier", "runtime", "worker_id"],
+      "type": "object"
+    },
+    "RunState": {
+      "enum": ["received", "validated", "running", "verifying", "passed", "failed", "denied", "interrupted"],
+      "type": "string"
+    },
+    "SourceIdentity": {
+      "additionalProperties": false,
+      "properties": { "head": { "type": "string" }, "repository": { "type": "string" } },
+      "required": ["head", "repository"],
+      "type": "object"
+    },
+    "WorkspaceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string" },
+        "seed_digest": { "type": "string" },
+        "workspace_id": { "type": "string" }
+      },
+      "required": ["root", "seed_digest", "workspace_id"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "adapter": { "$ref": "#/definitions/AdapterIdentity" },
+    "artifact_manifest_digest": { "type": "string" },
+    "completed_at": { "format": "date-time", "type": "string" },
+    "exact_next_action": { "type": "string" },
+    "policy_digest": { "type": "string" },
+    "request_digest": { "type": "string" },
+    "run_id": { "type": "string" },
+    "safety_boundaries": { "additionalProperties": { "type": "boolean" }, "type": "object" },
+    "schema_version": { "type": "string" },
+    "source": { "$ref": "#/definitions/SourceIdentity" },
+    "terminal_state": { "$ref": "#/definitions/RunState" },
+    "verifier_report_digest": { "type": "string" },
+    "workspace": { "$ref": "#/definitions/WorkspaceIdentity" }
+  },
+  "required": ["adapter", "artifact_manifest_digest", "completed_at", "exact_next_action", "policy_digest", "request_digest", "run_id", "safety_boundaries", "schema_version", "source", "terminal_state", "verifier_report_digest", "workspace"],
+  "title": "TerminalReadback",
+  "type": "object"
+}

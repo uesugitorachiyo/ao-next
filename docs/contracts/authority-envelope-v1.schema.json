@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Capability": {
+      "enum": ["read_workspace", "write_workspace", "run_local_program", "network_access", "credential_access", "remote_mutation", "release", "deployment", "publication"],
+      "type": "string"
+    },
+    "ExternalEffectPolicy": {
+      "enum": ["denied", "authorized_capabilities_only"],
+      "type": "string"
+    },
+    "NetworkPolicy": {
+      "enum": ["denied", "loopback_only", "allowlisted"],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "allowed_network_hosts": { "items": { "type": "string" }, "type": "array", "uniqueItems": true },
+    "allowed_programs": { "items": { "type": "string" }, "type": "array", "uniqueItems": true },
+    "allowed_roots": { "items": { "type": "string" }, "type": "array" },
+    "capabilities": { "items": { "$ref": "#/definitions/Capability" }, "type": "array", "uniqueItems": true },
+    "expires_at": { "format": "date-time", "type": "string" },
+    "external_effects": { "$ref": "#/definitions/ExternalEffectPolicy" },
+    "issued_at": { "format": "date-time", "type": "string" },
+    "issued_by": { "type": "string" },
+    "network": { "$ref": "#/definitions/NetworkPolicy" },
+    "schema_version": { "type": "string" }
+  },
+  "required": ["allowed_network_hosts", "allowed_programs", "allowed_roots", "capabilities", "expires_at", "external_effects", "issued_at", "issued_by", "network", "schema_version"],
+  "title": "AuthorityEnvelope",
+  "type": "object"
+}

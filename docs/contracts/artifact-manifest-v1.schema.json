@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ArtifactEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": { "type": "string" },
+        "content_ref": { "type": "string" },
+        "digest": { "type": "string" },
+        "input_digests": { "items": { "type": "string" }, "type": "array" },
+        "media_type": { "type": "string" },
+        "original_ref": { "type": "string" },
+        "producer": { "type": "string" },
+        "size_bytes": { "format": "uint64", "minimum": 0.0, "type": "integer" }
+      },
+      "required": ["artifact_id", "content_ref", "digest", "input_digests", "media_type", "original_ref", "producer", "size_bytes"],
+      "type": "object"
+    },
+    "SourceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "head": { "type": "string" },
+        "repository": { "type": "string" }
+      },
+      "required": ["head", "repository"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "entries": { "items": { "$ref": "#/definitions/ArtifactEntry" }, "type": "array" },
+    "run_id": { "type": "string" },
+    "schema_version": { "type": "string" },
+    "source": { "$ref": "#/definitions/SourceIdentity" }
+  },
+  "required": ["entries", "run_id", "schema_version", "source"],
+  "title": "ArtifactManifest",
+  "type": "object"
+}

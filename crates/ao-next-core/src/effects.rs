@@ -55,6 +55,18 @@ pub trait EffectBroker {
         request: &EffectRequest,
         authority: &AuthorityEnvelope,
     ) -> Result<AuthorizedEffect, PolicyDenial>;
+
+    /// Executes a request only after the exact authorized value is returned by
+    /// [`EffectBroker::authorize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EffectBrokerError`] for I/O, timeout, output bounds, or an
+    /// admitted effect kind without a local executor.
+    fn execute_authorized(
+        &self,
+        authorized: &AuthorizedEffect,
+    ) -> Result<EffectOutput, EffectBrokerError>;
 }
 
 #[derive(Clone, Debug)]
@@ -85,10 +97,10 @@ impl LocalEffectBroker {
         authority: &AuthorityEnvelope,
     ) -> Result<EffectOutput, EffectBrokerError> {
         let authorized = self.authorize(request, authority)?;
-        self.execute_authorized(&authorized)
+        <Self as EffectBroker>::execute_authorized(self, &authorized)
     }
 
-    fn execute_authorized(
+    fn run_authorized(
         &self,
         authorized: &AuthorizedEffect,
     ) -> Result<EffectOutput, EffectBrokerError> {
@@ -168,6 +180,13 @@ impl EffectBroker for LocalEffectBroker {
         Ok(AuthorizedEffect {
             request: request.clone(),
         })
+    }
+
+    fn execute_authorized(
+        &self,
+        authorized: &AuthorizedEffect,
+    ) -> Result<EffectOutput, EffectBrokerError> {
+        self.run_authorized(authorized)
     }
 }
 

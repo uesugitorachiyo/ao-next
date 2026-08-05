@@ -4,7 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::{
-    AdapterAction, AdapterIdentity, ControlMutation, RuntimeAdapter, TokenUsage, TurnContext,
+    AdapterAction, AdapterIdentity, ControlMutation, EffectObservation, RuntimeAdapter, TokenUsage,
+    TurnContext,
 };
 use crate::contracts::{Digest, RunRequest, RunState};
 use crate::effects::EffectBroker;
@@ -39,6 +40,7 @@ pub enum EngineEventKind {
     Running,
     AdapterTurn,
     EffectAdmitted(String),
+    EffectCompleted(String),
     EffectDenied(String),
     VerificationPassed(Digest),
     VerificationFailed(Digest),
@@ -137,6 +139,7 @@ where
         };
         let started = Instant::now();
         let maximum_duration = Duration::from_millis(request.limits.max_run_ms);
+        let mut effect_observations = Vec::new();
 
         for turn_index in 0..request.limits.max_turns {
             if started.elapsed() >= maximum_duration {
@@ -172,6 +175,7 @@ where
                 authority_digest: authority_digest.clone(),
                 policy_digest: request.policy_digest.clone(),
                 verifier_profile_digest: request.verifier_profile.profile_digest.clone(),
+                effect_observations: effect_observations.clone(),
             };
             let turn = match adapter.execute_turn(&context) {
                 Ok(turn) => turn,
@@ -244,12 +248,76 @@ where
                 match action {
                     AdapterAction::Effect(effect) => {
                         match self.broker.authorize(&effect, &request.authority) {
-                            Ok(_) => push_event(
-                                &mut events,
-                                &lifecycle,
-                                EngineEventKind::EffectAdmitted(effect.effect_id),
-                                Some(&identity.worker_id),
-                            ),
+                            Ok(authorized) => {
+                                push_event(
+                                    &mut events,
+                                    &lifecycle,
+                                    EngineEventKind::EffectAdmitted(effect.effect_id.clone()),
+                                    Some(&identity.worker_id),
+                                );
+                                let output = match self.broker.execute_authorized(&authorized) {
+                                    Ok(output) => output,
+                                    Err(error) => {
+                                        return transition_and_finish(
+                                            lifecycle,
+                                            identity,
+                                            metrics,
+                                            events,
+                                            verifier_report_digest,
+                                            RunState::Failed,
+                                            "effect_execution_failure",
+                                            &error.to_string(),
+                                        );
+                                    }
+                                };
+                                if output.stdout.len().saturating_add(output.stderr.len())
+                                    > usize::try_from(request.limits.max_output_bytes)
+                                        .unwrap_or(usize::MAX)
+                                {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Failed,
+                                        "effect_output_limit",
+                                        "effect output exceeded the run output bound",
+                                    );
+                                }
+                                let output_digest = match canonical_digest(&(
+                                    output.status,
+                                    &output.stdout,
+                                    &output.stderr,
+                                )) {
+                                    Ok(digest) => digest,
+                                    Err(error) => {
+                                        return transition_and_finish(
+                                            lifecycle,
+                                            identity,
+                                            metrics,
+                                            events,
+                                            verifier_report_digest,
+                                            RunState::Failed,
+                                            "effect_output_digest_failure",
+                                            &error.to_string(),
+                                        );
+                                    }
+                                };
+                                effect_observations.push(EffectObservation {
+                                    effect_id: effect.effect_id.clone(),
+                                    status: output.status,
+                                    stdout: output.stdout,
+                                    stderr: output.stderr,
+                                    output_digest,
+                                });
+                                push_event(
+                                    &mut events,
+                                    &lifecycle,
+                                    EngineEventKind::EffectCompleted(effect.effect_id),
+                                    Some(&identity.worker_id),
+                                );
+                            }
                             Err(denial) => {
                                 push_event(
                                     &mut events,

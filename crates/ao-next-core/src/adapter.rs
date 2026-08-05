@@ -244,6 +244,17 @@ pub struct TurnContext {
     pub authority_digest: Digest,
     pub policy_digest: Digest,
     pub verifier_profile_digest: Digest,
+    pub effect_observations: Vec<EffectObservation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectObservation {
+    pub effect_id: String,
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub output_digest: Digest,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

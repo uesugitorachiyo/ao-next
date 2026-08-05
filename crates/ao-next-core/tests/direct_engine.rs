@@ -6,8 +6,8 @@ use ao_next_core::adapter::{
     AdapterAction, AdapterIdentity, AdapterTurn, ControlMutation, RuntimeAdapter, TokenUsage,
 };
 use ao_next_core::contracts::{
-    AuthorityEnvelope, Digest, EffectKind, EffectRequest, ExternalEffectPolicy, ModelProfile,
-    NetworkPolicy, RunLimits, RunRequest, RunState, SourceIdentity, VerifierProfile,
+    AuthorityEnvelope, Capability, Digest, EffectKind, EffectRequest, ExternalEffectPolicy,
+    ModelProfile, NetworkPolicy, RunLimits, RunRequest, RunState, SourceIdentity, VerifierProfile,
     WorkspaceIdentity,
 };
 use ao_next_core::effects::LocalEffectBroker;
@@ -254,6 +254,101 @@ fn denied_effect_terminates_without_becoming_an_adapter_retry() {
     let outcome = engine.run(&request, &mut adapter, &mut verifier);
 
     assert_eq!(outcome.terminal_state, RunState::Denied);
+    assert_eq!(outcome.metrics.turns, 1);
+    assert_eq!(verifier.calls, 0);
+}
+
+#[test]
+fn admitted_effect_is_executed_before_the_same_worker_continues() {
+    let workspace = TempDir::new().expect("workspace");
+    let marker = workspace.path().join("effect-ran");
+    let mut request = request(workspace.path());
+    request
+        .authority
+        .capabilities
+        .insert(Capability::RunLocalProgram);
+    request
+        .authority
+        .allowed_programs
+        .insert("/usr/bin/touch".into());
+    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let engine = DirectEngine::new(&broker);
+    let effect = EffectRequest {
+        effect_id: "effect-executed".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::RunProgram,
+        program: Some("/usr/bin/touch".into()),
+        args: vec![marker.display().to_string()],
+        paths: vec![marker.clone()],
+        timeout_ms: 100,
+        input_digest: digest(ZERO_DIGEST),
+    };
+    let mut adapter = ScriptedAdapter::new(
+        identity(),
+        [
+            Ok(turn(vec![AdapterAction::Effect(effect)])),
+            Ok(turn(vec![AdapterAction::Verify])),
+        ],
+    );
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome = engine.run(&request, &mut adapter, &mut verifier);
+
+    assert_eq!(outcome.terminal_state, RunState::Passed);
+    assert!(marker.is_file(), "admitted effect must actually execute");
+    assert_eq!(adapter.contexts().len(), 2);
+    let observations = &adapter.contexts()[1].effect_observations;
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].effect_id, "effect-executed");
+    assert_eq!(observations[0].status, 0);
+    assert!(observations[0].stdout.is_empty());
+    assert!(observations[0].stderr.is_empty());
+    assert!(outcome.events.iter().any(|event| matches!(
+        &event.kind,
+        ao_next_core::engine::EngineEventKind::EffectCompleted(effect_id) if effect_id == "effect-executed"
+    )));
+}
+
+#[test]
+fn admitted_effect_execution_failure_cannot_continue_to_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let mut request = request(workspace.path());
+    request
+        .authority
+        .capabilities
+        .insert(Capability::RunLocalProgram);
+    request
+        .authority
+        .allowed_programs
+        .insert("/definitely/missing/ao-next-program".into());
+    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let engine = DirectEngine::new(&broker);
+    let effect = EffectRequest {
+        effect_id: "effect-missing-executable".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::RunProgram,
+        program: Some("/definitely/missing/ao-next-program".into()),
+        args: Vec::new(),
+        paths: vec![workspace.path().to_path_buf()],
+        timeout_ms: 100,
+        input_digest: digest(ZERO_DIGEST),
+    };
+    let mut adapter = ScriptedAdapter::new(
+        identity(),
+        [
+            Ok(turn(vec![AdapterAction::Effect(effect)])),
+            Ok(turn(vec![AdapterAction::Verify])),
+        ],
+    );
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome = engine.run(&request, &mut adapter, &mut verifier);
+
+    assert_eq!(outcome.terminal_state, RunState::Failed);
+    assert_eq!(
+        outcome.failure_code.as_deref(),
+        Some("effect_execution_failure")
+    );
     assert_eq!(outcome.metrics.turns, 1);
     assert_eq!(verifier.calls, 0);
 }

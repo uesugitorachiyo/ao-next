@@ -1,4 +1,6 @@
 pub mod contracts;
+pub mod effects;
+pub mod policy;
 pub mod strict_json;
 
 /// Returns the schema family implemented by the core crate.

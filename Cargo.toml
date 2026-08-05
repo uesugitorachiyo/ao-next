@@ -1,0 +1,20 @@
+[workspace]
+members = [
+  "crates/ao-next-core",
+  "crates/ao-next-cli",
+  "crates/ao-next-eval",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

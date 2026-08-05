@@ -1,0 +1,12 @@
+[package]
+name = "ao-next-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ao-next-core = { path = "../ao-next-core" }
+
+[lints]
+workspace = true

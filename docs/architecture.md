@@ -1,0 +1,20 @@
+# AO Next Architecture
+
+AO Next is a separate Rust modular monolith supervised by AO Mission. Mission retains objective identity, checkpoints, and terminal reconciliation while AO Next owns strict intake, one-worker direct execution, effect admission, product verification, evidence, and recovery.
+
+```text
+operator objective and authority
+        -> strict intake validation
+        -> one runtime adapter and one worker
+        -> structured effect broker
+        -> authorized local workspace effects
+        -> mechanical and product verifiers
+        -> content-addressed evidence
+        -> terminal readback for Mission reconciliation
+```
+
+The deterministic kernel owns capability checks, program and path admission, limits, verifier configuration, evidence retention, checkpoint identity, and terminal classification. The worker may inspect, edit, test, and repair within those boundaries, but cannot alter them.
+
+The launch candidate has no dynamic worker creation, runtime graph growth, permanent planner or reviewer roles, workflow compiler, or generic workflow language. Those remain future questions only if paired evaluation shows the direct candidate repeatedly needs them.
+
+Prompt and tool instructions begin small for each model profile. Instructions are added only after repeated measured failure. Verification, safety, permissions, and evidence remain deterministic harness responsibilities rather than prompt conventions.

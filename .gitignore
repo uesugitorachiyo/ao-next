@@ -1,0 +1,5 @@
+/target/
+/.ao-next/
+/artifacts/
+*.log
+.DS_Store

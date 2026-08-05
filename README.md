@@ -12,6 +12,8 @@ The Rust workspace contains:
 - `ao-next-cli`: operator commands and machine-readable output without policy decisions.
 - `ao-next-eval`: sealed offline comparison records for N0, N4, and N7.
 
+[Codex and Claude runtime adapters](docs/runtime-adapters.md) are locally contract-tested without provider calls. Their live smoke tests remain ignored behind a separate operator-only authorization gate.
+
 ## Local Verification
 
 ```sh

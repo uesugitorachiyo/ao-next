@@ -1,0 +1,17 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "structured_output": {
+    "actions": [{"kind": "verify"}],
+    "usage": {
+      "input_tokens": 11,
+      "cached_input_tokens": 3,
+      "reasoning_tokens": 5,
+      "output_tokens": 2,
+      "output_bytes": 64
+    },
+    "model_claimed_success": false,
+    "control_mutations": []
+  }
+}

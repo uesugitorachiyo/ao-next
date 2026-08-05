@@ -1,0 +1,11 @@
+codex-cli 0.146.0
+Usage: codex exec [OPTIONS] [PROMPT]
+--ephemeral
+--ignore-user-config
+--ignore-rules
+--output-schema <FILE>
+--json
+--sandbox <SANDBOX_MODE>
+--ask-for-approval <APPROVAL_POLICY>
+--model <MODEL>
+--cd <DIR>

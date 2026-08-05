@@ -1,0 +1,14 @@
+2.1.158 (Claude Code)
+Usage: claude [options] [command] [prompt]
+--bare
+--disable-slash-commands
+--no-session-persistence
+--strict-mcp-config
+--mcp-config <configs...>
+--tools <tools...>
+--output-format <format>
+--json-schema <schema>
+--permission-mode <mode>
+--model <model>
+--effort <level>
+--print

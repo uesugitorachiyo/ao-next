@@ -29,6 +29,12 @@ use super::{
 };
 
 const WORKER_ID: &str = "ao-next-live-worker-01";
+const GIT_PROGRAM: &str = "/usr/bin/git";
+const ENV_PROGRAM: &str = "/usr/bin/env";
+const GIT_BRANCH: &str = "ao-next-sealed-seed";
+const GIT_TIMESTAMP: &str = "2000-01-01T00:00:00Z";
+const GIT_OUTPUT_LIMIT: usize = 256 * 1024;
+const GIT_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -108,7 +114,17 @@ struct LiveRunRecord {
     capture_digests: Vec<Digest>,
     raw_capture_index_digest: Digest,
     verifier_report_digest: Option<Digest>,
+    git_workspace: GitWorkspaceIdentity,
     record_digest: Digest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GitWorkspaceIdentity {
+    repository_root: PathBuf,
+    common_dir: PathBuf,
+    head_commit: String,
+    branch: &'static str,
 }
 
 struct ValidatedInput<'a> {
@@ -184,6 +200,11 @@ pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, Command
         LiveVariantArg::N7 => LiveVariant::N7,
     };
     let validated = validate_input(&input, variant, Utc::now())?;
+    let git_workspace = prepare_git_workspace(
+        &input.request.workspace.root,
+        &input.request.authority.allowed_roots,
+        &validated.task.workspace_seed_digest,
+    )?;
     Ok(CommandOutput::new(
         serde_json::json!({
             "schema_version": "ao.next.live-input-preflight.v1",
@@ -198,6 +219,7 @@ pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, Command
             "reasoning_effort": input.request.model_profile.reasoning_effort,
             "runtime": validated.profile.runtime,
             "adapter_version": validated.profile.adapter_version,
+            "git_workspace": git_workspace,
             "provider_calls": 0
         }),
         "validated one provider-free live input",
@@ -219,6 +241,11 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     let started_at = Utc::now();
     let started = Instant::now();
     let validated = validate_input(input, variant, started_at)?;
+    let git_workspace = prepare_git_workspace(
+        &input.request.workspace.root,
+        &input.request.authority.allowed_roots,
+        &validated.task.workspace_seed_digest,
+    )?;
     let cancellation = CancellationToken::new();
     let invocation_limits = invocation_limits(&input.request)?;
     let mut verifier = CommandEngineVerifier::new(
@@ -263,9 +290,10 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     let wall_clock_ms = u64::try_from(started.elapsed().as_millis())
         .unwrap_or(u64::MAX)
         .max(1);
-    let final_files = snapshot_tree(
+    let final_files = snapshot_product_tree(
         &input.request.workspace.root,
         input.request.limits.max_input_bytes,
+        Some(&git_workspace),
     )?;
     let hidden_test_exposure = final_files
         .iter()
@@ -398,6 +426,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         &capture_digests,
         &raw_capture_index_digest,
         &verifier_report_digest,
+        &git_workspace,
     ))
     .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let record = LiveRunRecord {
@@ -408,6 +437,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         capture_digests,
         raw_capture_index_digest,
         verifier_report_digest,
+        git_workspace,
         record_digest,
     };
     let status = match terminal_state {
@@ -1211,7 +1241,315 @@ fn ensure_bounded_regular_under_roots(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the deterministic seed repository contract is intentionally visible in one boundary"
+)]
+fn prepare_git_workspace(
+    root: &Path,
+    allowed_roots: &[PathBuf],
+    seed_digest: &Digest,
+) -> Result<GitWorkspaceIdentity, CommandFailure> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CommandFailure::invalid_input(
+            "workspace is not a regular non-symlink directory",
+        ));
+    }
+    let repository_root = std::fs::canonicalize(root)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let allowed = allowed_roots
+        .iter()
+        .try_fold(false, |matched, allowed_root| {
+            let metadata = std::fs::symlink_metadata(allowed_root)
+                .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(CommandFailure::invalid_input(
+                    "authority root is not a regular non-symlink directory",
+                ));
+            }
+            let allowed_root = std::fs::canonicalize(allowed_root)
+                .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+            Ok(matched || repository_root.starts_with(allowed_root))
+        })?;
+    if !allowed {
+        return Err(CommandFailure::invalid_input(
+            "workspace is outside exact authority roots",
+        ));
+    }
+    reject_git_metadata(&repository_root)?;
+
+    run_git_checked(
+        &repository_root,
+        vec![
+            "init".into(),
+            "--quiet".into(),
+            format!("--initial-branch={GIT_BRANCH}"),
+            "--template=".into(),
+            ".".into(),
+        ],
+        "initialize repository",
+    )?;
+    run_git_checked(
+        &repository_root,
+        vec![
+            "-c".into(),
+            "core.autocrlf=false".into(),
+            "-c".into(),
+            "core.safecrlf=false".into(),
+            "add".into(),
+            "--all".into(),
+            "--".into(),
+            ".".into(),
+        ],
+        "stage sealed seed",
+    )?;
+    run_git_checked(
+        &repository_root,
+        vec![
+            "-c".into(),
+            "user.name=AO Next".into(),
+            "-c".into(),
+            "user.email=ao-next@invalid".into(),
+            "-c".into(),
+            "commit.gpgSign=false".into(),
+            "commit".into(),
+            "--quiet".into(),
+            "--allow-empty".into(),
+            "--no-verify".into(),
+            "--cleanup=verbatim".into(),
+            "--message".into(),
+            format!(
+                "AO Next sealed workspace seed\n\nSeed-Digest: {}",
+                seed_digest.as_str()
+            ),
+        ],
+        "commit sealed seed",
+    )?;
+
+    let common_dir = PathBuf::from(git_text(
+        &repository_root,
+        vec![
+            "rev-parse".into(),
+            "--path-format=absolute".into(),
+            "--git-common-dir".into(),
+        ],
+        "resolve Git common directory",
+    )?);
+    let repository_top = PathBuf::from(git_text(
+        &repository_root,
+        vec![
+            "rev-parse".into(),
+            "--path-format=absolute".into(),
+            "--show-toplevel".into(),
+        ],
+        "resolve Git repository root",
+    )?);
+    let head_commit = git_text(
+        &repository_root,
+        vec!["rev-parse".into(), "HEAD".into()],
+        "resolve Git HEAD",
+    )?;
+    let branch = git_text(
+        &repository_root,
+        vec!["symbolic-ref".into(), "--short".into(), "HEAD".into()],
+        "resolve Git branch",
+    )?;
+    let identity = GitWorkspaceIdentity {
+        repository_root,
+        common_dir,
+        head_commit,
+        branch: GIT_BRANCH,
+    };
+    if branch != GIT_BRANCH
+        || std::fs::canonicalize(&repository_top).ok() != Some(identity.repository_root.clone())
+        || identity.head_commit.len() != 40
+        || !identity
+            .head_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CommandFailure::runtime(
+            "prepared Git repository identity drifted",
+        ));
+    }
+    verify_git_workspace(&identity, true)?;
+    Ok(identity)
+}
+
+fn reject_git_metadata(root: &Path) -> Result<(), CommandFailure> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+        {
+            let path = entry
+                .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+                .path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
+                return Err(CommandFailure::invalid_input(
+                    "workspace contains preexisting or nested Git metadata",
+                ));
+            }
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(CommandFailure::invalid_input(
+                    "workspace contains a symlink",
+                ));
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if !metadata.is_file() {
+                return Err(CommandFailure::invalid_input(
+                    "workspace contains a non-regular entry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn git_environment_args() -> Vec<String> {
+    vec![
+        "-i".into(),
+        "PATH=/usr/bin:/bin".into(),
+        "HOME=/var/empty".into(),
+        "LANG=C".into(),
+        "LC_ALL=C".into(),
+        "TZ=UTC".into(),
+        "GIT_CONFIG_NOSYSTEM=1".into(),
+        "GIT_CONFIG_GLOBAL=/dev/null".into(),
+        "GIT_CONFIG_SYSTEM=/dev/null".into(),
+        "GIT_AUTHOR_NAME=AO Next".into(),
+        "GIT_AUTHOR_EMAIL=ao-next@invalid".into(),
+        format!("GIT_AUTHOR_DATE={GIT_TIMESTAMP}"),
+        "GIT_COMMITTER_NAME=AO Next".into(),
+        "GIT_COMMITTER_EMAIL=ao-next@invalid".into(),
+        format!("GIT_COMMITTER_DATE={GIT_TIMESTAMP}"),
+        GIT_PROGRAM.into(),
+    ]
+}
+
+fn run_git_checked(
+    root: &Path,
+    args: Vec<String>,
+    stage: &str,
+) -> Result<InvocationOutput, CommandFailure> {
+    let mut environment_args = git_environment_args();
+    environment_args.extend(args);
+    let mut runner = BoundedProcessRunner;
+    let output = runner
+        .run(
+            &PreparedInvocation {
+                program: ENV_PROGRAM.into(),
+                args: environment_args,
+                stdin: Vec::new(),
+                cwd: root.to_path_buf(),
+                limits: InvocationLimits {
+                    max_input_bytes: 0,
+                    max_output_bytes: GIT_OUTPUT_LIMIT,
+                    timeout_ms: GIT_TIMEOUT_MS,
+                },
+            },
+            &CancellationToken::new(),
+        )
+        .map_err(|error| CommandFailure::runtime(format!("Git {stage} failed: {error}")))?;
+    if output.status != 0 {
+        let diagnostic = String::from_utf8_lossy(&output.stderr)
+            .replace(&root.display().to_string(), "<workspace>");
+        return Err(CommandFailure::runtime(format!(
+            "Git {stage} exited {}: {}",
+            output.status,
+            diagnostic.trim()
+        )));
+    }
+    Ok(output)
+}
+
+fn git_text(root: &Path, args: Vec<String>, stage: &str) -> Result<String, CommandFailure> {
+    let output = run_git_checked(root, args, stage)?;
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| CommandFailure::runtime(format!("Git {stage} returned non-UTF-8")))?;
+    let text = text.trim_end_matches(['\r', '\n']);
+    if text.is_empty() || text.contains('\0') || text.contains('\n') || text.contains('\r') {
+        return Err(CommandFailure::runtime(format!(
+            "Git {stage} returned malformed output"
+        )));
+    }
+    Ok(text.to_string())
+}
+
+fn verify_git_workspace(
+    identity: &GitWorkspaceIdentity,
+    require_clean: bool,
+) -> Result<(), CommandFailure> {
+    let git_metadata = std::fs::symlink_metadata(identity.repository_root.join(".git"))
+        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
+        return Err(CommandFailure::runtime(
+            "prepared root Git metadata is not an ordinary directory",
+        ));
+    }
+    let common_dir = PathBuf::from(git_text(
+        &identity.repository_root,
+        vec![
+            "rev-parse".into(),
+            "--path-format=absolute".into(),
+            "--git-common-dir".into(),
+        ],
+        "verify common directory",
+    )?);
+    let head = git_text(
+        &identity.repository_root,
+        vec!["rev-parse".into(), "HEAD".into()],
+        "verify HEAD",
+    )?;
+    let branch = git_text(
+        &identity.repository_root,
+        vec!["symbolic-ref".into(), "--short".into(), "HEAD".into()],
+        "verify branch",
+    )?;
+    if std::fs::canonicalize(common_dir).ok() != std::fs::canonicalize(&identity.common_dir).ok()
+        || head != identity.head_commit
+        || branch != identity.branch
+    {
+        return Err(CommandFailure::runtime(
+            "prepared Git workspace identity changed",
+        ));
+    }
+    if require_clean {
+        let status = run_git_checked(
+            &identity.repository_root,
+            vec![
+                "status".into(),
+                "--porcelain=v1".into(),
+                "--untracked-files=all".into(),
+            ],
+            "verify clean workspace",
+        )?;
+        if !status.stdout.is_empty() || !status.stderr.is_empty() {
+            return Err(CommandFailure::runtime(
+                "prepared Git workspace is dirty before provider spawn",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn snapshot_tree(root: &Path, maximum_bytes: u64) -> Result<Vec<SnapshotEntry>, CommandFailure> {
+    snapshot_product_tree(root, maximum_bytes, None)
+}
+
+fn snapshot_product_tree(
+    root: &Path,
+    maximum_bytes: u64,
+    git_workspace: Option<&GitWorkspaceIdentity>,
+) -> Result<Vec<SnapshotEntry>, CommandFailure> {
+    if let Some(identity) = git_workspace {
+        verify_git_workspace(identity, false)?;
+    }
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1230,6 +1568,14 @@ fn snapshot_tree(root: &Path, maximum_bytes: u64) -> Result<Vec<SnapshotEntry>, 
             let path = entry
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
                 .path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
+                if git_workspace.is_some() && directory == canonical_root {
+                    continue;
+                }
+                return Err(CommandFailure::invalid_input(
+                    "product snapshot contains unexpected Git metadata",
+                ));
+            }
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
             if metadata.file_type().is_symlink() {
@@ -1339,6 +1685,7 @@ fn sum_capture_usage(captures: &[RuntimeCapture]) -> ao_next_core::adapter::Toke
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
+    use std::process::Command;
 
     use ao_next_core::adapter::{
         AdapterAction, AdapterTurn, InvocationError, InvocationOutput, PreparedInvocation,
@@ -1389,6 +1736,59 @@ mod tests {
                 std::fs::write(path, bytes).expect("additional fixture write");
             }
             Ok(self.outputs.pop_front().expect("provider fixture output"))
+        }
+    }
+
+    struct GitCheckingN0Runner {
+        adapter_output: InvocationOutput,
+        workspace: PathBuf,
+        product: PathBuf,
+    }
+
+    impl ProcessRunner for GitCheckingN0Runner {
+        fn run(
+            &mut self,
+            invocation: &PreparedInvocation,
+            _: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            match invocation.args.get(1).map(String::as_str) {
+                Some("run") => Ok(self.adapter_output.clone()),
+                Some("patch") if invocation.args.get(2).map(String::as_str) == Some("preview") => {
+                    let output = Command::new("/usr/bin/git")
+                        .args(["rev-parse", "--git-common-dir"])
+                        .current_dir(&self.workspace)
+                        .output()
+                        .expect("real Git preview prerequisite");
+                    if output.status.success() {
+                        Ok(InvocationOutput {
+                            status: 0,
+                            stdout: serde_json::to_vec(&serde_json::json!({
+                                "action_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            }))
+                            .expect("preview JSON"),
+                            stderr: output.stderr,
+                        })
+                    } else {
+                        Ok(InvocationOutput {
+                            status: output.status.code().unwrap_or(-1),
+                            stdout: output.stdout,
+                            stderr: output.stderr,
+                        })
+                    }
+                }
+                Some("patch") if invocation.args.get(2).map(String::as_str) == Some("apply") => {
+                    std::fs::write(&self.product, b"ready\n").expect("applied product");
+                    Ok(InvocationOutput {
+                        status: 0,
+                        stdout: serde_json::to_vec(&serde_json::json!({
+                            "action_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }))
+                        .expect("apply JSON"),
+                        stderr: Vec::new(),
+                    })
+                }
+                _ => panic!("unexpected N0 command: {:?}", invocation.args),
+            }
         }
     }
 
@@ -1724,6 +2124,158 @@ mod tests {
                 stderr: Vec::new(),
             },
         ])
+    }
+
+    #[test]
+    fn n0_prepares_canonical_git_base_before_real_preview_boundary() {
+        let n0 = fixture(LiveVariant::N0);
+        let sandbox = n0.root.path().join("ao2-sandbox-git-check");
+        std::fs::create_dir_all(&sandbox).expect("current-AO sandbox");
+        let adapter_output = current_ao_outputs(&n0.input.request.workspace.root, &sandbox)
+            .pop_front()
+            .expect("adapter output");
+
+        let output = execute_with_runners(
+            &n0.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            GitCheckingN0Runner {
+                adapter_output,
+                workspace: n0.input.request.workspace.root.clone(),
+                product: n0.product.clone(),
+            },
+            BoundedProcessRunner,
+        )
+        .expect("deterministic Git workspace enables real N0 preview boundary");
+
+        assert_eq!(output.status, 0);
+        assert!(n0.input.request.workspace.root.join(".git").is_dir());
+    }
+
+    #[test]
+    fn git_preparation_is_deterministic_seed_bound_and_product_neutral() {
+        let mut identities = Vec::new();
+        for _ in 0..3 {
+            let temporary = TempDir::new().expect("workspace parent");
+            let workspace = temporary.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("workspace");
+            std::fs::write(workspace.join("product.txt"), b"sealed product\n")
+                .expect("sealed product");
+            let before = snapshot_tree(&workspace, 64 * 1024).expect("snapshot before Git");
+            let identity = prepare_git_workspace(
+                &workspace,
+                &[workspace.clone()],
+                &digest_bytes(b"same seed"),
+            )
+            .expect("deterministic Git workspace");
+            let after = snapshot_product_tree(&workspace, 64 * 1024, Some(&identity))
+                .expect("snapshot after Git");
+            assert_eq!(before, after);
+            verify_git_workspace(&identity, true).expect("clean prepared workspace");
+            identities.push((temporary, identity));
+        }
+        assert_eq!(identities[0].1.head_commit, identities[1].1.head_commit);
+        assert_eq!(identities[1].1.head_commit, identities[2].1.head_commit);
+
+        let empty_parent = TempDir::new().expect("empty workspace parent");
+        let empty = empty_parent.path().join("empty");
+        std::fs::create_dir(&empty).expect("empty workspace");
+        let empty_identity =
+            prepare_git_workspace(&empty, &[empty.clone()], &digest_bytes(b"same seed"))
+                .expect("allowed empty seed commit");
+        verify_git_workspace(&empty_identity, true).expect("empty seed is clean");
+
+        let changed_parent = TempDir::new().expect("changed seed parent");
+        let changed = changed_parent.path().join("workspace");
+        std::fs::create_dir(&changed).expect("changed seed workspace");
+        std::fs::write(changed.join("product.txt"), b"sealed product\n").expect("sealed product");
+        let changed_identity = prepare_git_workspace(
+            &changed,
+            &[changed.clone()],
+            &digest_bytes(b"different seed"),
+        )
+        .expect("different seed workspace");
+        assert_ne!(identities[0].1.head_commit, changed_identity.head_commit);
+
+        std::fs::write(
+            identities[0].1.repository_root.join("product.txt"),
+            b"dirty\n",
+        )
+        .expect("dirty seed");
+        let error = verify_git_workspace(&identities[0].1, true).expect_err("dirty seed rejected");
+        assert!(error.message.contains("dirty before provider spawn"));
+    }
+
+    #[test]
+    fn git_preparation_rejects_existing_nested_and_unsafe_metadata() {
+        for kind in ["directory", "file", "nested", "submodule"] {
+            let temporary = TempDir::new().expect("workspace parent");
+            let workspace = temporary.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("workspace");
+            match kind {
+                "directory" => std::fs::create_dir(workspace.join(".git")).expect("Git dir"),
+                "file" => std::fs::write(workspace.join(".git"), b"gitdir: elsewhere\n")
+                    .expect("Git file"),
+                "nested" => {
+                    std::fs::create_dir(workspace.join("nested")).expect("nested");
+                    std::fs::create_dir(workspace.join("nested/.git")).expect("nested Git dir");
+                }
+                "submodule" => {
+                    std::fs::create_dir(workspace.join("nested")).expect("nested");
+                    std::fs::write(workspace.join("nested/.git"), b"gitdir: ../../modules/x\n")
+                        .expect("submodule marker");
+                }
+                _ => unreachable!(),
+            }
+            let error =
+                prepare_git_workspace(&workspace, &[workspace.clone()], &digest_bytes(b"seed"))
+                    .expect_err("unexpected Git metadata rejected");
+            assert!(error.message.contains("Git metadata"));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let temporary = TempDir::new().expect("symlink parent");
+            let workspace = temporary.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("workspace");
+            symlink(temporary.path(), workspace.join("nested-link")).expect("nested symlink");
+            assert!(
+                prepare_git_workspace(&workspace, &[workspace.clone()], &digest_bytes(b"seed"))
+                    .is_err()
+            );
+
+            let link = temporary.path().join("workspace-link");
+            symlink(&workspace, &link).expect("workspace symlink");
+            assert!(prepare_git_workspace(&link, &[workspace], &digest_bytes(b"seed")).is_err());
+        }
+    }
+
+    #[test]
+    fn deterministic_git_environment_clears_host_identity_and_configuration() {
+        let args = git_environment_args();
+        assert_eq!(args.first().map(String::as_str), Some("-i"));
+        for binding in [
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_CONFIG_SYSTEM=/dev/null",
+            "GIT_AUTHOR_NAME=AO Next",
+            "GIT_AUTHOR_EMAIL=ao-next@invalid",
+            "GIT_COMMITTER_NAME=AO Next",
+            "GIT_COMMITTER_EMAIL=ao-next@invalid",
+        ] {
+            assert!(args.iter().any(|argument| argument == binding));
+        }
+        assert!(
+            args.iter()
+                .any(|argument| argument == &format!("GIT_AUTHOR_DATE={GIT_TIMESTAMP}"))
+        );
+        assert!(
+            args.iter()
+                .any(|argument| argument == &format!("GIT_COMMITTER_DATE={GIT_TIMESTAMP}"))
+        );
+        assert_eq!(args.last().map(String::as_str), Some(GIT_PROGRAM));
     }
 
     #[test]

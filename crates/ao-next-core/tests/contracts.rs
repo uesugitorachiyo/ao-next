@@ -311,7 +311,12 @@ fn canonical_digest_uses_sorted_compact_json() {
 #[test]
 fn checked_in_contract_schemas_match_generated_types() {
     let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (file_name, generated) in generated_contract_schemas() {
+    let generated_contracts = generated_contract_schemas();
+    assert!(
+        generated_contracts.contains_key("command-verifier-profile-v1.schema.json"),
+        "live command verifier contract must be checked in"
+    );
+    for (file_name, generated) in generated_contracts {
         let path = repository_root.join("docs/contracts").join(file_name);
         let checked_in: Value = serde_json::from_slice(
             &std::fs::read(&path)

@@ -382,7 +382,7 @@ pub fn validate_intake(
 }
 
 #[must_use]
-/// Generates the six checked-in public JSON Schemas from their Rust types.
+/// Generates the checked-in public JSON Schemas from their Rust types.
 ///
 /// # Panics
 ///
@@ -390,6 +390,11 @@ pub fn validate_intake(
 /// which would indicate a programming error in a derived schema.
 pub fn generated_contract_schemas() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
+        (
+            "command-verifier-profile-v1.schema.json",
+            serde_json::to_value(schema_for!(crate::verifier::CommandVerifierProfile))
+                .expect("schema serialization"),
+        ),
         (
             "run-request-v1.schema.json",
             serde_json::to_value(schema_for!(RunRequest)).expect("schema serialization"),

@@ -370,13 +370,21 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         return Err(error);
     }
     if captures.len() != raw_outputs.len() {
-        let error =
-            CommandFailure::runtime("provider output was retained but could not be normalized");
+        let provider_failed = raw_outputs.iter().any(|output| output.status != 0);
+        let error = CommandFailure::runtime(if provider_failed {
+            "provider output was retained with a nonzero status"
+        } else {
+            "provider output was retained but could not be normalized"
+        });
         record_capture_terminal(
             &input.raw_capture_root,
             &capture_context,
             &error,
-            Some("normalization"),
+            Some(if provider_failed {
+                "provider"
+            } else {
+                "normalization"
+            }),
         )?;
         return Err(error);
     }
@@ -2840,6 +2848,22 @@ mod tests {
             let link = temporary.path().join("workspace-link");
             symlink(&workspace, &link).expect("workspace symlink");
             assert!(prepare_git_workspace(&link, &[workspace], &digest_bytes(b"seed")).is_err());
+
+            let git_symlink_parent = TempDir::new().expect("Git symlink parent");
+            let git_symlink_workspace = git_symlink_parent.path().join("workspace");
+            let git_symlink_target = git_symlink_parent.path().join("Git-target");
+            std::fs::create_dir(&git_symlink_workspace).expect("Git symlink workspace");
+            std::fs::create_dir(&git_symlink_target).expect("Git symlink target");
+            symlink(&git_symlink_target, git_symlink_workspace.join(".git"))
+                .expect("root Git symlink");
+            assert!(
+                prepare_git_workspace(
+                    &git_symlink_workspace,
+                    std::slice::from_ref(&git_symlink_workspace),
+                    &digest_bytes(b"seed")
+                )
+                .is_err()
+            );
         }
     }
 
@@ -3723,5 +3747,44 @@ mod tests {
                 .join("capture-index.json")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn nonzero_provider_status_is_retained_before_classification() {
+        let failed = fixture(LiveVariant::N4);
+        let provider_output = InvocationOutput {
+            status: 7,
+            stdout: b"provider partial output\n".to_vec(),
+            stderr: b"provider failed\n".to_vec(),
+        };
+        let error = execute_with_runners(
+            &failed.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([provider_output.clone()]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("nonzero provider status remains a provider failure");
+        assert_eq!(error.code, "runtime_failure");
+        assert_eq!(
+            std::fs::read(failed.input.raw_capture_root.join("capture-000.stdout"))
+                .expect("retained provider stdout"),
+            provider_output.stdout
+        );
+        assert_eq!(
+            std::fs::read(failed.input.raw_capture_root.join("capture-000.stderr"))
+                .expect("retained provider stderr"),
+            provider_output.stderr
+        );
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(failed.input.raw_capture_root.join("capture-terminal.json"))
+                .expect("capture terminal metadata"),
+        )
+        .expect("capture terminal JSON");
+        assert_eq!(terminal["failure_stage"], "provider");
     }
 }

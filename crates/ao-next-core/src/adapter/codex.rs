@@ -81,6 +81,50 @@ pub fn prepare_invocation(
     })
 }
 
+/// Prepares the separately authorized native Codex baseline. Unlike the AO
+/// adapter, this baseline permits only workspace-local writes through the
+/// Codex sandbox and does not request structured AO actions.
+///
+/// # Errors
+///
+/// Returns [`AdapterContractError`] for unsafe paths, empty identities, an
+/// unsupported effort, or oversized input.
+pub fn prepare_direct_invocation(
+    model: &str,
+    reasoning_effort: &str,
+    workspace: &Path,
+    prompt: &str,
+    limits: InvocationLimits,
+) -> Result<PreparedInvocation, AdapterContractError> {
+    validate_inputs(model, reasoning_effort, workspace, prompt, limits)?;
+    Ok(PreparedInvocation {
+        program: "codex".into(),
+        args: vec![
+            "exec".into(),
+            "--json".into(),
+            "--ephemeral".into(),
+            "--ignore-user-config".into(),
+            "--ignore-rules".into(),
+            "--color".into(),
+            "never".into(),
+            "--sandbox".into(),
+            "workspace-write".into(),
+            "--ask-for-approval".into(),
+            "never".into(),
+            "--model".into(),
+            model.into(),
+            "-c".into(),
+            format!("model_reasoning_effort=\"{reasoning_effort}\""),
+            "-C".into(),
+            workspace.display().to_string(),
+            "-".into(),
+        ],
+        stdin: prompt.as_bytes().to_vec(),
+        cwd: workspace.to_path_buf(),
+        limits,
+    })
+}
+
 /// Normalizes a bounded Codex JSONL event stream into one core adapter turn.
 ///
 /// # Errors

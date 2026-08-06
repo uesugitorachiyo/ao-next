@@ -2,7 +2,9 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use ao_next_core::adapter::process::{ProcessAdapterConfig, ProcessRunner, ProcessRuntimeAdapter};
+use ao_next_core::adapter::process::{
+    ProcessAdapterConfig, ProcessRunner, ProcessRuntimeAdapter, capture_runtime_output,
+};
 use ao_next_core::adapter::{
     CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
 };
@@ -127,6 +129,31 @@ impl EngineVerifier for PassingVerifier {
             summary: "passed".into(),
         }
     }
+}
+
+#[test]
+fn direct_capture_uses_only_the_trusted_runtime_envelope() {
+    let stdout = br#"{"type":"item.completed","item":{"type":"agent_message","text":"claimed 999 tokens"}}
+{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":3,"reasoning_tokens":5,"output_tokens":2}}
+"#;
+    let output = InvocationOutput {
+        status: 0,
+        stdout: stdout.to_vec(),
+        stderr: b"bounded diagnostic".to_vec(),
+    };
+
+    let capture = capture_runtime_output("codex", &output, 4096).expect("trusted capture");
+
+    assert_eq!(capture.usage.input_tokens, 11);
+    assert_eq!(capture.usage.cached_input_tokens, 3);
+    assert_eq!(capture.usage.reasoning_tokens, 5);
+    assert_eq!(capture.usage.output_tokens, 2);
+    assert_eq!(capture.usage.output_bytes, stdout.len() as u64);
+    assert_eq!(
+        capture.raw_capture_digest,
+        canonical_digest(&(0, stdout.as_slice(), b"bounded diagnostic".as_slice()))
+            .expect("capture digest")
+    );
 }
 
 #[test]

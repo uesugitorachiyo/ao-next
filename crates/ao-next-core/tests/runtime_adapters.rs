@@ -134,6 +134,39 @@ fn invocations_are_structured_bounded_and_disable_dynamic_or_unmediated_tools() 
 }
 
 #[test]
+fn direct_codex_baseline_is_ephemeral_and_workspace_bounded() {
+    let temporary = TempDir::new().expect("temporary");
+    let prompt = "complete the bound objective";
+    let invocation =
+        codex::prepare_direct_invocation("fixed-model", "high", temporary.path(), prompt, limits())
+            .expect("direct invocation");
+
+    assert_eq!(invocation.program, "codex");
+    assert!(
+        invocation
+            .args
+            .windows(2)
+            .any(|args| args == ["--sandbox", "workspace-write"])
+    );
+    assert!(invocation.args.iter().any(|arg| arg == "--ephemeral"));
+    assert!(
+        invocation
+            .args
+            .iter()
+            .any(|arg| arg == "--ignore-user-config")
+    );
+    assert!(invocation.args.iter().any(|arg| arg == "--ignore-rules"));
+    assert!(
+        !invocation
+            .args
+            .iter()
+            .any(|arg| arg.contains("dangerously"))
+    );
+    assert_eq!(invocation.cwd, temporary.path());
+    assert_eq!(invocation.stdin, prompt.as_bytes());
+}
+
+#[test]
 fn codex_and_claude_outputs_normalize_to_the_same_core_turn_contract() {
     let codex = codex::normalize_output(
         identity("codex", "codex-cli-0.146.0-adapter-v1"),

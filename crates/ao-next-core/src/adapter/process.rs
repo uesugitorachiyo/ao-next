@@ -148,12 +148,58 @@ impl ProcessAdapterConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RuntimeCapture {
     pub turn_index: u32,
     pub raw_capture_digest: Digest,
     pub usage: TokenUsage,
     pub model_wait_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeEnvelopeCapture {
+    pub raw_capture_digest: Digest,
+    pub usage: TokenUsage,
+}
+
+/// Extracts trusted usage and binds the complete bounded process capture.
+/// Model-authored text is not considered usage evidence.
+///
+/// # Errors
+///
+/// Returns an adapter error for nonzero status, overflow, malformed runtime
+/// envelopes, or missing trusted usage.
+pub fn capture_runtime_output(
+    runtime: &str,
+    output: &InvocationOutput,
+    maximum_bytes: usize,
+) -> Result<RuntimeEnvelopeCapture, AdapterError> {
+    if output.status != 0 {
+        return Err(AdapterError::Runtime(format!(
+            "adapter process exited {}",
+            output.status
+        )));
+    }
+    if output.stdout.len().saturating_add(output.stderr.len()) > maximum_bytes {
+        return Err(AdapterError::Runtime(
+            "adapter process output exceeded its bound".into(),
+        ));
+    }
+    let usage = match runtime {
+        "codex" => codex_usage(&output.stdout, maximum_bytes),
+        "claude" => claude_usage(&output.stdout, maximum_bytes),
+        _ => Err(AdapterError::Runtime("unsupported runtime identity".into())),
+    }?;
+    let usage = TokenUsage {
+        output_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
+        ..usage
+    };
+    let raw_capture_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    Ok(RuntimeEnvelopeCapture {
+        raw_capture_digest,
+        usage,
+    })
 }
 
 pub struct ProcessRuntimeAdapter<R> {
@@ -222,19 +268,11 @@ impl<R: ProcessRunner> RuntimeAdapter for ProcessRuntimeAdapter<R> {
             .run(&invocation, &self.config.cancellation)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
         let model_wait_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if output.status != 0 {
-            return Err(AdapterError::Runtime(format!(
-                "adapter process exited {}",
-                output.status
-            )));
-        }
-        if output.stdout.len().saturating_add(output.stderr.len())
-            > self.config.limits.max_output_bytes
-        {
-            return Err(AdapterError::Runtime(
-                "adapter process output exceeded its bound".into(),
-            ));
-        }
+        let capture = capture_runtime_output(
+            &self.config.identity.runtime,
+            &output,
+            self.config.limits.max_output_bytes,
+        )?;
         let normalized = match self.config.identity.runtime.as_str() {
             "codex" => codex::normalize_output(
                 self.config.identity.clone(),
@@ -252,23 +290,12 @@ impl<R: ProcessRunner> RuntimeAdapter for ProcessRuntimeAdapter<R> {
         if normalized.identity != self.config.identity {
             return Err(AdapterError::Runtime("runtime identity drifted".into()));
         }
-        let usage = match self.config.identity.runtime.as_str() {
-            "codex" => codex_usage(&output.stdout, self.config.limits.max_output_bytes),
-            "claude" => claude_usage(&output.stdout, self.config.limits.max_output_bytes),
-            _ => unreachable!("validated runtime"),
-        }?;
-        let usage = TokenUsage {
-            output_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
-            ..usage
-        };
         let mut turn = normalized.turn;
-        turn.usage = usage.clone();
-        let raw_capture_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
-            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        turn.usage = capture.usage.clone();
         self.captures.push(RuntimeCapture {
             turn_index: context.turn_index,
-            raw_capture_digest,
-            usage,
+            raw_capture_digest: capture.raw_capture_digest,
+            usage: capture.usage,
             model_wait_ms,
         });
         Ok(turn)

@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub mod evaluate;
 pub mod inspect;
+pub mod instantiate_corpus;
 pub mod live;
 pub mod replay;
 pub mod run;
@@ -23,11 +24,15 @@ pub struct Cli {
 enum Command {
     Run(RunArgs),
     RunLive(LiveRunArgs),
+    RunCurrentAoBaseline(LiveRunArgs),
     RunDirectBaseline(LiveRunArgs),
+    PreflightLiveInput(PreflightLiveInputArgs),
     Inspect(InspectArgs),
     VerifyEvidence(VerifyEvidenceArgs),
     Replay(ReplayArgs),
     Evaluate(EvaluateArgs),
+    EvaluateLive(EvaluateArgs),
+    InstantiateCorpus(InstantiateCorpusArgs),
     VerifyCorpus(VerifyCorpusArgs),
 }
 
@@ -35,6 +40,21 @@ enum Command {
 pub struct LiveRunArgs {
     #[arg(long)]
     pub input: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum LiveVariantArg {
+    N0,
+    N4,
+    N7,
+}
+
+#[derive(Debug, Args)]
+pub struct PreflightLiveInputArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_enum, ignore_case = false)]
+    pub variant: LiveVariantArg,
 }
 
 #[derive(Debug, Args)]
@@ -83,6 +103,14 @@ pub struct EvaluateArgs {
 pub struct VerifyCorpusArgs {
     #[arg(long)]
     pub corpus: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct InstantiateCorpusArgs {
+    #[arg(long)]
+    pub corpus: PathBuf,
+    #[arg(long)]
+    pub bindings: PathBuf,
 }
 
 #[derive(Debug)]
@@ -161,11 +189,15 @@ pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
     match cli.command {
         Command::Run(args) => run::execute(&args),
         Command::RunLive(args) => live::execute(&args, live::LiveVariant::N7),
+        Command::RunCurrentAoBaseline(args) => live::execute(&args, live::LiveVariant::N0),
         Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
+        Command::PreflightLiveInput(args) => live::preflight(&args),
         Command::Inspect(args) => inspect::execute(&args),
         Command::VerifyEvidence(args) => verify_evidence::execute(&args),
         Command::Replay(args) => replay::execute(&args),
         Command::Evaluate(args) => evaluate::execute(&args),
+        Command::EvaluateLive(args) => evaluate::execute_live(&args),
+        Command::InstantiateCorpus(args) => instantiate_corpus::execute(&args),
         Command::VerifyCorpus(args) => verify_corpus::execute(&args),
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -7,7 +8,9 @@ use ao_next_core::adapter::process::{
     BoundedProcessRunner, ProcessAdapterConfig, ProcessRunner, ProcessRuntimeAdapter,
     RuntimeCapture, capture_runtime_output,
 };
-use ao_next_core::adapter::{CancellationToken, InvocationLimits};
+use ao_next_core::adapter::{
+    CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
+};
 use ao_next_core::contracts::{Digest, RunRequest, RunState};
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOutcome};
@@ -18,14 +21,19 @@ use ao_next_eval::corpus::{CorpusManifest, EvaluationTask, VariantProfile};
 use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as ShaDigest, Sha256};
 
-use super::{CommandFailure, CommandOutput, LiveRunArgs, decode_file, read_bounded_regular};
+use super::{
+    CommandFailure, CommandOutput, LiveRunArgs, LiveVariantArg, PreflightLiveInputArgs,
+    decode_file, read_bounded_regular,
+};
 
 const WORKER_ID: &str = "ao-next-live-worker-01";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum LiveVariant {
+    N0,
     N4,
     N7,
 }
@@ -33,6 +41,7 @@ pub enum LiveVariant {
 impl LiveVariant {
     const fn execution_variant(self) -> ExecutionVariant {
         match self {
+            Self::N0 => ExecutionVariant::N0,
             Self::N4 => ExecutionVariant::N4,
             Self::N7 => ExecutionVariant::N7,
         }
@@ -54,8 +63,22 @@ struct LiveRunInput {
     visible_fixtures: PathBuf,
     hidden_tests: PathBuf,
     output_schema: PathBuf,
+    raw_capture_root: PathBuf,
     request: RunRequest,
     command_verifier: CommandVerifierProfile,
+    #[serde(default)]
+    current_ao: Option<CurrentAoBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentAoBinding {
+    schema_version: String,
+    ao2_program: PathBuf,
+    ao2_program_digest: Digest,
+    provider_program: PathBuf,
+    provider_program_digest: Digest,
+    adapter_version: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -83,6 +106,7 @@ struct LiveRunRecord {
     terminal_state: RunState,
     measurement: RunMeasurement,
     capture_digests: Vec<Digest>,
+    raw_capture_index_digest: Digest,
     verifier_report_digest: Option<Digest>,
     record_digest: Digest,
 }
@@ -92,6 +116,43 @@ struct ValidatedInput<'a> {
     profile: &'a VariantProfile,
     initial_files: Vec<SnapshotEntry>,
     hidden_file_digests: BTreeSet<Digest>,
+}
+
+type LiveExecution = (
+    RunState,
+    Option<RunOutcome>,
+    Vec<RuntimeCapture>,
+    Vec<InvocationOutput>,
+);
+
+struct SingleProviderProcess<R> {
+    runner: R,
+    started: bool,
+}
+
+impl<R> SingleProviderProcess<R> {
+    const fn new(runner: R) -> Self {
+        Self {
+            runner,
+            started: false,
+        }
+    }
+}
+
+impl<R: ProcessRunner> ProcessRunner for SingleProviderProcess<R> {
+    fn run(
+        &mut self,
+        invocation: &PreparedInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutput, InvocationError> {
+        if self.started {
+            return Err(InvocationError::Io(
+                "single provider process budget exhausted".into(),
+            ));
+        }
+        self.started = true;
+        self.runner.run(invocation, cancellation)
+    }
 }
 
 pub fn execute(args: &LiveRunArgs, variant: LiveVariant) -> Result<CommandOutput, CommandFailure> {
@@ -108,6 +169,40 @@ pub fn execute(args: &LiveRunArgs, variant: LiveVariant) -> Result<CommandOutput
         BoundedProcessRunner,
         BoundedProcessRunner,
     )
+}
+
+pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, CommandFailure> {
+    if std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").is_ok() {
+        return Err(CommandFailure::authorization(
+            "provider authorization must be absent during offline input preflight",
+        ));
+    }
+    let input: LiveRunInput = decode_file(&args.input)?;
+    let variant = match args.variant {
+        LiveVariantArg::N0 => LiveVariant::N0,
+        LiveVariantArg::N4 => LiveVariant::N4,
+        LiveVariantArg::N7 => LiveVariant::N7,
+    };
+    let validated = validate_input(&input, variant, Utc::now())?;
+    Ok(CommandOutput::new(
+        serde_json::json!({
+            "schema_version": "ao.next.live-input-preflight.v1",
+            "corpus_digest": input.corpus.corpus_digest,
+            "task_id": input.task_id,
+            "trial_id": input.trial_id,
+            "trial_index": input.trial_index,
+            "schedule_position": input.schedule_position,
+            "workspace_instance_id": input.workspace_instance_id,
+            "variant": variant,
+            "model_identifier": validated.profile.model_identifier,
+            "reasoning_effort": input.request.model_profile.reasoning_effort,
+            "runtime": validated.profile.runtime,
+            "adapter_version": validated.profile.adapter_version,
+            "provider_calls": 0
+        }),
+        "validated one provider-free live input",
+        0,
+    ))
 }
 
 #[allow(
@@ -135,7 +230,14 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
 
-    let (terminal_state, outcome, captures) = match variant {
+    let (terminal_state, outcome, captures, raw_outputs) = match variant {
+        LiveVariant::N0 => execute_n0(
+            input,
+            provider_runner,
+            &mut verifier,
+            &cancellation,
+            invocation_limits,
+        )?,
         LiveVariant::N7 => execute_n7(
             input,
             provider_runner,
@@ -151,6 +253,13 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
             invocation_limits,
         )?,
     };
+    let raw_capture_index_digest =
+        persist_raw_captures(&input.raw_capture_root, &captures, &raw_outputs)?;
+    if captures.len() != raw_outputs.len() {
+        return Err(CommandFailure::runtime(
+            "provider output was retained but could not be normalized",
+        ));
+    }
     let wall_clock_ms = u64::try_from(started.elapsed().as_millis())
         .unwrap_or(u64::MAX)
         .max(1);
@@ -179,6 +288,11 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         || sum_capture_usage(&captures),
         |value| value.metrics.usage.clone(),
     );
+    if usage.total_tokens() > input.request.limits.max_tokens {
+        return Err(CommandFailure::runtime(
+            "trusted provider usage exceeded the sealed token limit",
+        ));
+    }
     let model_wait_ms = captures
         .iter()
         .fold(0_u64, |total, capture| {
@@ -203,6 +317,23 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         )
         .unwrap_or(u32::MAX)
     });
+    let repair_attempts = outcome
+        .as_ref()
+        .map_or(0, |value| value.metrics.repair_attempts);
+    let completed_effects = outcome.as_ref().map_or_else(Vec::new, |value| {
+        value
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EngineEventKind::EffectCompleted(effect_id) => Some(effect_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    let unique_completed_effects = completed_effects.iter().copied().collect::<BTreeSet<_>>();
+    let recovery_attempted = repair_attempts > 0;
+    let recovery_no_duplicate_effect =
+        recovery_attempted && unique_completed_effects.len() == completed_effects.len();
     let measurement = RunMeasurement {
         schema_version: "ao.next.run-measurement.v2".into(),
         corpus_digest: input.corpus.corpus_digest.clone(),
@@ -241,9 +372,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         wall_clock_ms,
         model_wait_ms,
         worker_turns: u32::try_from(captures.len()).unwrap_or(u32::MAX),
-        repair_attempts: outcome
-            .as_ref()
-            .map_or(0, |value| value.metrics.repair_attempts),
+        repair_attempts,
         operator_interventions: 0,
         changed_files,
         accepted_changed_files: if task_success { changed_files } else { 0 },
@@ -254,8 +383,8 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         unauthorized_effects,
         evidence_complete,
         evidence_digest_valid: evidence_complete,
-        recovery_attempted: false,
-        recovery_no_duplicate_effect: false,
+        recovery_attempted,
+        recovery_no_duplicate_effect,
         cross_runtime_agreement: variant == LiveVariant::N7,
         worker_count: 1,
         dynamic_fanout: false,
@@ -267,6 +396,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         &terminal_state,
         &measurement,
         &capture_digests,
+        &raw_capture_index_digest,
         &verifier_report_digest,
     ))
     .map_err(|error| CommandFailure::evidence(error.to_string()))?;
@@ -276,6 +406,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         terminal_state: terminal_state.clone(),
         measurement,
         capture_digests,
+        raw_capture_index_digest,
         verifier_report_digest,
         record_digest,
     };
@@ -298,13 +429,274 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     ))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the N0 runner keeps one provider call and both digest-bound AO2 patch controls in execution order"
+)]
+fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
+    input: &LiveRunInput,
+    mut process_runner: P,
+    verifier: &mut CommandEngineVerifier<V>,
+    cancellation: &CancellationToken,
+    limits: InvocationLimits,
+) -> Result<LiveExecution, CommandFailure> {
+    let binding = input
+        .current_ao
+        .as_ref()
+        .ok_or_else(|| CommandFailure::invalid_input("N0 current-AO binding is missing"))?;
+    let prompt = current_ao_prompt(input)?;
+    let provider_args = [
+        "exec".to_string(),
+        "--json".to_string(),
+        "--ephemeral".to_string(),
+        "--ignore-user-config".to_string(),
+        "--ignore-rules".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "--sandbox".to_string(),
+        "workspace-write".to_string(),
+        "-c".to_string(),
+        "approval_policy=\"never\"".to_string(),
+        "--model".to_string(),
+        input.request.model_profile.model_identifier.clone(),
+        "-c".to_string(),
+        format!(
+            "model_reasoning_effort=\"{}\"",
+            input.request.model_profile.reasoning_effort
+        ),
+        "--skip-git-repo-check".to_string(),
+        prompt,
+    ];
+    let invocation = PreparedInvocation {
+        program: binding.ao2_program.display().to_string(),
+        args: vec![
+            "adapter".into(),
+            "run".into(),
+            "--provider".into(),
+            "codex".into(),
+            "--target".into(),
+            input.request.workspace.root.display().to_string(),
+            "--command".into(),
+            binding.provider_program.display().to_string(),
+            "--args".into(),
+            provider_args.join("\t"),
+            "--role-id".into(),
+            "ao-next-n0-worker-01".into(),
+            "--keep-sandbox".into(),
+            "--timeout-seconds".into(),
+            input.request.limits.max_run_ms.div_ceil(1_000).to_string(),
+        ],
+        stdin: Vec::new(),
+        cwd: input.request.workspace.root.clone(),
+        limits,
+    };
+    let started = Instant::now();
+    let ao2_output = process_runner
+        .run(&invocation, cancellation)
+        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    let model_wait_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let Ok(run) = decode_current_ao_output(&ao2_output, &input.request.workspace.root, limits)
+    else {
+        return Ok((RunState::Failed, None, Vec::new(), vec![ao2_output]));
+    };
+    let provider_output = InvocationOutput {
+        status: run.exit_code,
+        stdout: run.stdout,
+        stderr: run.stderr,
+    };
+    let Ok(capture) = capture_runtime_output("codex", &provider_output, limits.max_output_bytes)
+    else {
+        return Ok((RunState::Failed, None, Vec::new(), vec![provider_output]));
+    };
+
+    let preview = run_current_ao_control(
+        &mut process_runner,
+        binding,
+        &input.request.workspace.root,
+        &[
+            "adapter",
+            "patch",
+            "preview",
+            "--target",
+            &input.request.workspace.root.display().to_string(),
+            "--sandbox",
+            &run.sandbox_path.display().to_string(),
+        ],
+        cancellation,
+        limits,
+    )?;
+    let digest = preview
+        .get("action_digest")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| CommandFailure::runtime("current-AO patch digest is missing"))?;
+    let applied = run_current_ao_control(
+        &mut process_runner,
+        binding,
+        &input.request.workspace.root,
+        &[
+            "adapter",
+            "patch",
+            "apply",
+            "--target",
+            &input.request.workspace.root.display().to_string(),
+            "--sandbox",
+            &run.sandbox_path.display().to_string(),
+            "--digest",
+            digest,
+            "--approver",
+            "ao-next:bounded-live-evaluation",
+        ],
+        cancellation,
+        limits,
+    )?;
+    if applied
+        .get("action_digest")
+        .and_then(serde_json::Value::as_str)
+        != Some(digest)
+    {
+        return Err(CommandFailure::runtime(
+            "current-AO patch application digest drifted",
+        ));
+    }
+    let verification = verifier.verify(&input.request);
+    let terminal_state = if verification.passed {
+        RunState::Passed
+    } else {
+        RunState::Failed
+    };
+    Ok((
+        terminal_state,
+        None,
+        vec![RuntimeCapture {
+            turn_index: 0,
+            raw_capture_digest: capture.raw_capture_digest,
+            usage: capture.usage,
+            model_wait_ms,
+        }],
+        vec![provider_output],
+    ))
+}
+
+struct CurrentAoOutput {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    sandbox_path: PathBuf,
+}
+
+fn decode_current_ao_output(
+    output: &InvocationOutput,
+    workspace: &Path,
+    limits: InvocationLimits,
+) -> Result<CurrentAoOutput, CommandFailure> {
+    if output.status != 0 {
+        return Err(CommandFailure::runtime(format!(
+            "current-AO adapter exited {}",
+            output.status
+        )));
+    }
+    let value: serde_json::Value = decode_strict_json(&output.stdout, limits.max_output_bytes)
+        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    let target = value
+        .get("target_repo")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CommandFailure::runtime("current-AO target identity is missing"))?;
+    if std::fs::canonicalize(target).ok() != std::fs::canonicalize(workspace).ok() {
+        return Err(CommandFailure::runtime(
+            "current-AO target identity drifted",
+        ));
+    }
+    let sandbox_path = PathBuf::from(
+        value
+            .get("sandbox_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CommandFailure::runtime("current-AO sandbox identity is missing"))?,
+    );
+    let sandbox_metadata = std::fs::symlink_metadata(&sandbox_path)
+        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    if sandbox_metadata.file_type().is_symlink() || !sandbox_metadata.is_dir() {
+        return Err(CommandFailure::runtime(
+            "current-AO sandbox is not a regular directory",
+        ));
+    }
+    let adapter = value
+        .get("adapter")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| CommandFailure::runtime("current-AO adapter result is missing"))?;
+    if adapter.get("provider").and_then(serde_json::Value::as_str) != Some("codex")
+        || adapter.get("role_id").and_then(serde_json::Value::as_str)
+            != Some("ao-next-n0-worker-01")
+        || !adapter
+            .get("blocker")
+            .is_some_and(serde_json::Value::is_null)
+    {
+        return Err(CommandFailure::runtime(
+            "current-AO provider identity or status drifted",
+        ));
+    }
+    let exit_code = adapter
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| CommandFailure::runtime("current-AO provider exit is missing"))?;
+    let stdout = adapter
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CommandFailure::runtime("current-AO provider stdout is missing"))?
+        .as_bytes()
+        .to_vec();
+    let stderr = adapter
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CommandFailure::runtime("current-AO provider stderr is missing"))?
+        .as_bytes()
+        .to_vec();
+    Ok(CurrentAoOutput {
+        exit_code,
+        stdout,
+        stderr,
+        sandbox_path,
+    })
+}
+
+fn run_current_ao_control<P: ProcessRunner>(
+    runner: &mut P,
+    binding: &CurrentAoBinding,
+    workspace: &Path,
+    args: &[&str],
+    cancellation: &CancellationToken,
+    limits: InvocationLimits,
+) -> Result<serde_json::Value, CommandFailure> {
+    let output = runner
+        .run(
+            &PreparedInvocation {
+                program: binding.ao2_program.display().to_string(),
+                args: args.iter().map(|value| (*value).to_string()).collect(),
+                stdin: Vec::new(),
+                cwd: workspace.to_path_buf(),
+                limits,
+            },
+            cancellation,
+        )
+        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    if output.status != 0 {
+        return Err(CommandFailure::runtime(format!(
+            "current-AO control command exited {}",
+            output.status
+        )));
+    }
+    decode_strict_json(&output.stdout, limits.max_output_bytes)
+        .map_err(|error| CommandFailure::runtime(error.to_string()))
+}
+
 fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     input: &LiveRunInput,
     provider_runner: P,
     verifier: &mut CommandEngineVerifier<V>,
     cancellation: CancellationToken,
     limits: InvocationLimits,
-) -> Result<(RunState, Option<RunOutcome>, Vec<RuntimeCapture>), CommandFailure> {
+) -> Result<LiveExecution, CommandFailure> {
     let config = ProcessAdapterConfig::from_request(
         &input.request,
         WORKER_ID,
@@ -313,14 +705,20 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         cancellation,
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    let mut adapter = ProcessRuntimeAdapter::new(config, provider_runner);
+    let mut adapter =
+        ProcessRuntimeAdapter::new(config, SingleProviderProcess::new(provider_runner));
     let broker = LocalEffectBroker::new(
         input.request.limits.max_effect_timeout_ms,
         usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
     );
     let outcome = DirectEngine::new(&broker).run(&input.request, &mut adapter, verifier);
     let terminal_state = outcome.terminal_state.clone();
-    Ok((terminal_state, Some(outcome), adapter.captures().to_vec()))
+    Ok((
+        terminal_state,
+        Some(outcome),
+        adapter.captures().to_vec(),
+        adapter.raw_outputs().to_vec(),
+    ))
 }
 
 fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
@@ -329,7 +727,7 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
     verifier: &mut CommandEngineVerifier<V>,
     cancellation: &CancellationToken,
     limits: InvocationLimits,
-) -> Result<(RunState, Option<RunOutcome>, Vec<RuntimeCapture>), CommandFailure> {
+) -> Result<LiveExecution, CommandFailure> {
     if input.request.model_profile.runtime != "codex" {
         return Err(CommandFailure::invalid_input(
             "N4 native baseline requires the Codex runtime",
@@ -349,8 +747,9 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
         .run(&invocation, cancellation)
         .map_err(|error| CommandFailure::runtime(error.to_string()))?;
     let model_wait_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let capture = capture_runtime_output("codex", &output, limits.max_output_bytes)
-        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    let Ok(capture) = capture_runtime_output("codex", &output, limits.max_output_bytes) else {
+        return Ok((RunState::Failed, None, Vec::new(), vec![output]));
+    };
     let verification = verifier.verify(&input.request);
     let terminal_state = if verification.passed {
         RunState::Passed
@@ -366,6 +765,7 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
             usage: capture.usage,
             model_wait_ms,
         }],
+        vec![output],
     ))
 }
 
@@ -431,6 +831,12 @@ fn validate_input(
         || input.request.model_profile.tool_contract_digest != profile.adapter_digest
         || input.request.model_profile.adapter_version != profile.adapter_version
         || input.request.policy_digest != profile.policy_digest
+        || canonical_digest(&(
+            profile.model_identifier.as_str(),
+            input.request.model_profile.reasoning_effort.as_str(),
+        ))
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+            != profile.model_digest
         || !runtime_matches_profile(
             variant,
             &input.request.model_profile.runtime,
@@ -440,6 +846,20 @@ fn validate_input(
         return Err(CommandFailure::invalid_input(
             "source, workspace, model, prompt, policy, verifier, adapter, or runtime identity drifted",
         ));
+    }
+    match (variant, input.current_ao.as_ref()) {
+        (LiveVariant::N0, Some(binding)) => validate_current_ao_binding(binding, profile)?,
+        (LiveVariant::N0, None) => {
+            return Err(CommandFailure::invalid_input(
+                "N0 current-AO binding is missing",
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(CommandFailure::invalid_input(
+                "current-AO binding is forbidden for N4 and N7",
+            ));
+        }
+        (_, None) => {}
     }
     let objective = read_bounded_regular(&input.objective)?;
     if objective != input.request.objective.as_bytes()
@@ -491,6 +911,10 @@ fn validate_input(
         return Err(CommandFailure::invalid_input("hidden-test fixture drifted"));
     }
     ensure_outside_roots(&input.hidden_tests, &input.request.authority.allowed_roots)?;
+    ensure_private_capture_root(
+        &input.raw_capture_root,
+        &input.request.authority.allowed_roots,
+    )?;
     ensure_bounded_regular_under_roots(
         &input.output_schema,
         &input.request.authority.allowed_roots,
@@ -502,6 +926,123 @@ fn validate_input(
         initial_files,
         hidden_file_digests: hidden.into_iter().map(|entry| entry.sha256).collect(),
     })
+}
+
+fn ensure_private_capture_root(
+    path: &Path,
+    worker_roots: &[PathBuf],
+) -> Result<(), CommandFailure> {
+    ensure_outside_roots(path, worker_roots)?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CommandFailure::invalid_input(
+            "raw capture root is not a regular non-symlink directory",
+        ));
+    }
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if entries
+        .next()
+        .transpose()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+        .is_some()
+    {
+        return Err(CommandFailure::invalid_input(
+            "raw capture root is not empty",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct RawCaptureIndex {
+    schema_version: &'static str,
+    entries: Vec<RawCaptureIndexEntry>,
+}
+
+#[derive(Serialize)]
+struct RawCaptureIndexEntry {
+    turn_index: u32,
+    status: i32,
+    raw_capture_digest: Digest,
+    stdout_path: String,
+    stdout_digest: Digest,
+    stdout_size_bytes: u64,
+    stderr_path: String,
+    stderr_digest: Digest,
+    stderr_size_bytes: u64,
+}
+
+fn persist_raw_captures(
+    root: &Path,
+    captures: &[RuntimeCapture],
+    outputs: &[InvocationOutput],
+) -> Result<Digest, CommandFailure> {
+    if outputs.is_empty() {
+        return Err(CommandFailure::evidence(
+            "raw provider capture coverage is incomplete",
+        ));
+    }
+    let mut entries = Vec::with_capacity(outputs.len());
+    for (index, output) in outputs.iter().enumerate() {
+        let observed = canonical_digest(&(output.status, &output.stdout, &output.stderr))
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        if let Some(capture) = captures.get(index)
+            && observed != capture.raw_capture_digest
+        {
+            return Err(CommandFailure::evidence(
+                "raw provider capture digest drifted before persistence",
+            ));
+        }
+        let turn_index = captures.get(index).map_or_else(
+            || u32::try_from(index).unwrap_or(u32::MAX),
+            |capture| capture.turn_index,
+        );
+        let stem = format!("capture-{turn_index:03}");
+        let stdout_path = format!("{stem}.stdout");
+        let stderr_path = format!("{stem}.stderr");
+        write_private_new(&root.join(&stdout_path), &output.stdout)?;
+        write_private_new(&root.join(&stderr_path), &output.stderr)?;
+        entries.push(RawCaptureIndexEntry {
+            turn_index,
+            status: output.status,
+            raw_capture_digest: observed,
+            stdout_path,
+            stdout_digest: digest_bytes(&output.stdout),
+            stdout_size_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
+            stderr_path,
+            stderr_digest: digest_bytes(&output.stderr),
+            stderr_size_bytes: u64::try_from(output.stderr.len()).unwrap_or(u64::MAX),
+        });
+    }
+    let index = RawCaptureIndex {
+        schema_version: "ao.next.raw-provider-capture-index.v1",
+        entries,
+    };
+    let digest =
+        canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let bytes =
+        serde_json::to_vec(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    write_private_new(&root.join("capture-index.json"), &bytes)?;
+    Ok(digest)
+}
+
+fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), CommandFailure> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    file.write_all(bytes)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    file.sync_all()
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
 fn ensure_outside_roots(path: &Path, roots: &[PathBuf]) -> Result<(), CommandFailure> {
@@ -525,6 +1066,7 @@ fn runtime_matches_profile(
     profile_runtime: &str,
 ) -> bool {
     match variant {
+        LiveVariant::N0 => provider_runtime == "codex" && profile_runtime == "current-ao",
         LiveVariant::N4 => provider_runtime == "codex" && profile_runtime == "codex",
         LiveVariant::N7 => {
             matches!(provider_runtime, "codex" | "claude")
@@ -532,6 +1074,59 @@ fn runtime_matches_profile(
                     || profile_runtime == format!("ao-next-{provider_runtime}"))
         }
     }
+}
+
+fn validate_current_ao_binding(
+    binding: &CurrentAoBinding,
+    profile: &VariantProfile,
+) -> Result<(), CommandFailure> {
+    if binding.schema_version != "ao.next.current-ao-binding.v1"
+        || binding.adapter_version != profile.adapter_version
+        || canonical_digest(binding)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+            != profile.adapter_digest
+    {
+        return Err(CommandFailure::invalid_input(
+            "current-AO adapter binding drifted",
+        ));
+    }
+    for (program, expected) in [
+        (&binding.ao2_program, &binding.ao2_program_digest),
+        (&binding.provider_program, &binding.provider_program_digest),
+    ] {
+        if !program.is_absolute() {
+            return Err(CommandFailure::invalid_input(
+                "current-AO program path is not absolute",
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(program)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > 512 * 1024 * 1024
+        {
+            return Err(CommandFailure::invalid_input(
+                "current-AO program is not a bounded regular non-symlink file",
+            ));
+        }
+        let observed = digest_regular_file(program)?;
+        if &observed != expected {
+            return Err(CommandFailure::invalid_input(
+                "current-AO program digest drifted",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn digest_regular_file(path: &Path) -> Result<Digest, CommandFailure> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    Digest::new(format!("sha256:{:x}", hasher.finalize()))
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))
 }
 
 fn direct_prompt(input: &LiveRunInput) -> Result<String, CommandFailure> {
@@ -548,6 +1143,26 @@ fn direct_prompt(input: &LiveRunInput) -> Result<String, CommandFailure> {
             "dynamic_fanout": false,
             "network": "denied",
             "credentials": "denied"
+        }
+    }))
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))
+}
+
+fn current_ao_prompt(input: &LiveRunInput) -> Result<String, CommandFailure> {
+    serde_json::to_string(&serde_json::json!({
+        "schema_version": "ao.next.current-ao-prompt.v1",
+        "objective": input.request.objective,
+        "run_id": input.request.run_id,
+        "source": input.request.source,
+        "workspace": input.request.workspace,
+        "policy_digest": input.request.policy_digest,
+        "verifier_profile_digest": input.request.verifier_profile.profile_digest,
+        "constraints": {
+            "worker_count": 1,
+            "dynamic_fanout": false,
+            "network": "denied",
+            "credentials": "denied",
+            "external_effects": "denied"
         }
     }))
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))
@@ -752,14 +1367,16 @@ mod tests {
             invocation: &PreparedInvocation,
             _: &CancellationToken,
         ) -> Result<InvocationOutput, InvocationError> {
-            if let Some(path) = self.direct_write.take() {
-                assert!(
-                    invocation
-                        .args
-                        .windows(2)
-                        .any(|args| args == ["--sandbox", "workspace-write"])
-                );
-                std::fs::write(path, b"ready\n").expect("direct fixture write");
+            if invocation.args.first().is_some_and(|arg| arg == "adapter") {
+                assert!(invocation.program.ends_with("true"));
+            } else if invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["--sandbox", "workspace-write"])
+            {
+                if let Some(path) = self.direct_write.take() {
+                    std::fs::write(path, b"ready\n").expect("direct fixture write");
+                }
             } else {
                 assert!(
                     invocation
@@ -776,7 +1393,7 @@ mod tests {
     }
 
     struct Fixture {
-        _root: TempDir,
+        root: TempDir,
         input: LiveRunInput,
         product: PathBuf,
     }
@@ -792,9 +1409,11 @@ mod tests {
         let controls = root.path().join("controls");
         let visible = protected.join("visible");
         let hidden = protected.join("hidden");
+        let raw_capture_root = protected.join("raw-captures");
         std::fs::create_dir_all(&workspace).expect("workspace");
         std::fs::create_dir_all(&visible).expect("visible");
         std::fs::create_dir_all(&hidden).expect("hidden");
+        std::fs::create_dir_all(&raw_capture_root).expect("raw captures");
         std::fs::create_dir_all(&controls).expect("controls");
         std::fs::write(visible.join("example.txt"), b"visible\n").expect("visible fixture");
         std::fs::write(
@@ -851,11 +1470,24 @@ mod tests {
         command_verifier.profile_digest = command_verifier
             .calculated_digest()
             .expect("verifier profile digest");
-        let profiles = [
+        let current_program = PathBuf::from("/usr/bin/true");
+        let current_program_digest =
+            digest_bytes(&std::fs::read(&current_program).expect("current-AO fixture program"));
+        let current_ao = CurrentAoBinding {
+            schema_version: "ao.next.current-ao-binding.v1".into(),
+            ao2_program: current_program.clone(),
+            ao2_program_digest: current_program_digest.clone(),
+            provider_program: current_program,
+            provider_program_digest: current_program_digest,
+            adapter_version: "current-ao-native-v1".into(),
+        };
+        let mut profiles = [
             profile(ExecutionVariant::N0, "current-ao", "current-ao-native-v1"),
             profile(ExecutionVariant::N4, "codex", "native-codex-direct-v1"),
             profile(ExecutionVariant::N7, "ao-next-codex", "ao-next-process-v1"),
         ];
+        profiles[0].adapter_digest =
+            canonical_digest(&current_ao).expect("current-AO binding digest");
         let selected_profile = profiles
             .iter()
             .find(|profile| profile.variant == variant.execution_variant())
@@ -943,6 +1575,7 @@ mod tests {
             },
         };
         let schedule_position = match variant {
+            LiveVariant::N0 => 0,
             LiveVariant::N4 => 1,
             LiveVariant::N7 => 2,
         };
@@ -961,10 +1594,12 @@ mod tests {
                 visible_fixtures: visible,
                 hidden_tests: hidden,
                 output_schema,
+                raw_capture_root,
                 request,
                 command_verifier,
+                current_ao: (variant == LiveVariant::N0).then_some(current_ao),
             },
-            _root: root,
+            root,
         }
     }
 
@@ -974,7 +1609,8 @@ mod tests {
             runtime: runtime.into(),
             runtime_digest: digest_bytes(format!("{runtime}:runtime").as_bytes()),
             model_identifier: "fixed-live-model".into(),
-            model_digest: digest_bytes(format!("{runtime}:model").as_bytes()),
+            model_digest: canonical_digest(&("fixed-live-model", "high"))
+                .expect("model binding digest"),
             prompt_digest: digest_bytes(format!("{runtime}:prompt").as_bytes()),
             policy_digest: digest_bytes(format!("{runtime}:policy").as_bytes()),
             adapter_version: adapter_version.into(),
@@ -1033,12 +1669,88 @@ mod tests {
         }
     }
 
+    fn current_ao_outputs(workspace: &Path, sandbox: &Path) -> VecDeque<InvocationOutput> {
+        let provider = codex_output(None);
+        let adapter = serde_json::json!({
+            "adapter": {
+                "provider": "codex",
+                "role_id": "ao-next-n0-worker-01",
+                "command": "codex exec",
+                "exit_code": 0,
+                "stdout": String::from_utf8(provider.stdout).expect("provider stdout"),
+                "stderr": String::from_utf8(provider.stderr).expect("provider stderr"),
+                "transcript": "",
+                "blocker": null
+            },
+            "target_repo": workspace,
+            "sandbox_path": sandbox,
+            "changed_files": ["product.txt"],
+            "diff_summary": "added product.txt",
+            "transcript_summary": {
+                "changed_files": ["product.txt"],
+                "concerns": [],
+                "blockers": [],
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 2,
+                    "total_tokens": 21
+                },
+                "cost_usd": null,
+                "raw_summary": null,
+                "transcript_ids": []
+            }
+        });
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        VecDeque::from([
+            InvocationOutput {
+                status: 0,
+                stdout: serde_json::to_vec(&adapter).expect("current-AO JSON"),
+                stderr: Vec::new(),
+            },
+            InvocationOutput {
+                status: 0,
+                stdout: serde_json::to_vec(&serde_json::json!({
+                    "action_digest": digest
+                }))
+                .expect("preview JSON"),
+                stderr: Vec::new(),
+            },
+            InvocationOutput {
+                status: 0,
+                stdout: serde_json::to_vec(&serde_json::json!({
+                    "action_digest": digest
+                }))
+                .expect("apply JSON"),
+                stderr: Vec::new(),
+            },
+        ])
+    }
+
     #[test]
-    fn offline_fake_n4_and_n7_execute_without_the_live_environment_gate() {
+    fn offline_fake_n0_n4_and_n7_execute_without_the_live_environment_gate() {
         assert_ne!(
             std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").as_deref(),
             Ok("operator-authorized")
         );
+
+        let n0 = fixture(LiveVariant::N0);
+        let sandbox = n0.root.path().join("ao2-sandbox-fixture");
+        std::fs::create_dir_all(&sandbox).expect("current-AO sandbox");
+        let output = execute_with_runners(
+            &n0.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: current_ao_outputs(&n0.input.request.workspace.root, &sandbox),
+                direct_write: None,
+                additional_write: Some((n0.product.clone(), b"ready\n".to_vec())),
+            },
+            BoundedProcessRunner,
+        )
+        .expect("offline N0");
+        assert_eq!(output.status, 0);
+        assert_eq!(output.value["measurement"]["variant"], "N0");
+        assert_eq!(output.value["measurement"]["tokens"]["input_tokens"], 11);
 
         let n4 = fixture(LiveVariant::N4);
         let output = execute_with_runners(
@@ -1134,6 +1846,43 @@ mod tests {
         .expect_err("policy drift");
         assert_eq!(error.code, "invalid_input");
 
+        let mut effort_drift = fixture(LiveVariant::N7);
+        effort_drift.input.request.model_profile.reasoning_effort = "low".into();
+        let error = execute_with_runners(
+            &effort_drift.input,
+            LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::new(),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("reasoning effort drift");
+        assert_eq!(error.code, "invalid_input");
+
+        let mut current_ao_drift = fixture(LiveVariant::N0);
+        current_ao_drift
+            .input
+            .current_ao
+            .as_mut()
+            .expect("current-AO binding")
+            .provider_program_digest = digest_bytes(b"drifted current-AO provider");
+        let error = execute_with_runners(
+            &current_ao_drift.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::new(),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("current-AO binding drift");
+        assert_eq!(error.code, "invalid_input");
+
         let mut exposed_authority = fixture(LiveVariant::N7);
         exposed_authority
             .input
@@ -1177,5 +1926,65 @@ mod tests {
         assert_ne!(output.status, 0);
         assert_eq!(output.value["measurement"]["hidden_test_exposure"], true);
         assert_eq!(output.value["measurement"]["task_success"], false);
+    }
+
+    #[test]
+    fn n7_rejects_a_second_provider_process_before_spawn() {
+        let n7 = fixture(LiveVariant::N7);
+        let turn = AdapterTurn {
+            actions: Vec::new(),
+            usage: TokenUsage::default(),
+            model_claimed_success: false,
+            control_mutations: Vec::new(),
+        };
+        let output = execute_with_runners(
+            &n7.input,
+            LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(Some(&turn))]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("bounded N7 row");
+        assert_eq!(output.status, 4);
+        assert_eq!(output.value["measurement"]["worker_turns"], 1);
+        assert_eq!(output.value["measurement"]["task_success"], false);
+    }
+
+    #[test]
+    fn malformed_provider_output_is_retained_before_the_run_stops() {
+        let malformed = fixture(LiveVariant::N4);
+        let error = execute_with_runners(
+            &malformed.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([InvocationOutput {
+                    status: 0,
+                    stdout: b"{malformed-provider-output\n".to_vec(),
+                    stderr: b"provider diagnostic".to_vec(),
+                }]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("malformed provider output");
+        assert_eq!(error.code, "runtime_failure");
+        assert_eq!(
+            std::fs::read(malformed.input.raw_capture_root.join("capture-000.stdout"))
+                .expect("retained stdout"),
+            b"{malformed-provider-output\n"
+        );
+        assert!(
+            malformed
+                .input
+                .raw_capture_root
+                .join("capture-index.json")
+                .is_file()
+        );
     }
 }

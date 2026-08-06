@@ -1,6 +1,6 @@
 # Live Evaluation Harness
 
-`run-live` records an N7 trial through the one-worker AO Next engine. `run-direct-baseline` records an N4 trial through native Codex. Neither command runs unless the operator process already contains this exact gate:
+`run-current-ao-baseline` records an N0 trial through AO2's native sandbox adapter and digest-approved patch path. `run-direct-baseline` records an N4 trial through native Codex. `run-live` records an N7 trial through the one-worker AO Next engine. None runs unless the operator process already contains this exact gate:
 
 ```text
 AO_NEXT_LIVE_PROVIDER_CALLS=operator-authorized
@@ -10,19 +10,21 @@ The command checks the gate before reading `--input` or resolving an executable.
 
 ## Input
 
-Both commands accept `--input <path>` pointing to one strict `ao.next.live-run-input.v1` JSON value. Duplicate keys and unknown fields are rejected. The value contains:
+The commands accept `--input <path>` pointing to one strict `ao.next.live-run-input.v1` JSON value. Duplicate keys and unknown fields are rejected. The value contains:
 
 - the complete sealed v2 corpus and selected task, trial index, schedule position, trial ID, and unique workspace instance ID;
 - the exact run request and command-verifier profile;
 - paths to the source snapshot, semantic objective, visible fixtures, hidden-test tree, and adapter-turn output schema.
+- one empty operator-owned raw-capture directory outside every worker authority root;
+- for N0 only, a digest-bound AO2 program and provider program binding.
 
 The run request must bind the corpus source, workspace seed, objective, model, prompt, policy, verifier, adapter, and runtime identities. The workspace must match the sealed source snapshot before process spawn. The objective, visible fixtures, hidden tests, verifier profile, and output schema are re-read under byte and path bounds. Hidden tests must be outside every worker authority root.
 
-N7 supports the existing Codex and Claude structured adapters. Provider processes run read-only; workspace mutation passes through structured effect admission. N4 requires Codex and uses its native workspace-write sandbox. Both variants run the sealed command verifier without a shell.
+N7 supports the existing Codex and Claude structured adapters. Provider processes run read-only; workspace mutation passes through structured effect admission. The live N7 runner admits one provider process per row and rejects a second dispatch before spawn. N4 uses Codex's native workspace-write sandbox. N0 asks AO2 to create its disposable sandbox, invokes one exact Codex process there, previews the patch, and applies only the digest-approved patch to the trial workspace. Every variant runs the sealed command verifier without a shell.
 
 ## Output and status
 
-Each command writes one `ao.next.live-run-record.v1` JSON value to stdout. The record contains the terminal state, one v2 measurement, ordered capture digests, verifier-report digest, and a digest over the record material. Usage comes from the provider envelope. Model-authored token counters are discarded.
+Each command writes one `ao.next.live-run-record.v1` JSON value to stdout. The record contains the terminal state, one v2 measurement, ordered capture digests, private capture-index digest, verifier-report digest, and a digest over the record material. Usage comes from the provider envelope. Model-authored token counters are discarded. Raw stdout and stderr use create-only files with owner-only permissions in the supplied private capture directory.
 
 Exit statuses are stable:
 
@@ -35,4 +37,4 @@ Exit statuses are stable:
 - `7`: evidence or hidden-material failure;
 - `8`: live authority denied.
 
-The harness reports one trial. `evaluate` requires all 27 rows: three tasks, three variants, and three counterbalanced trials. Offline and fake-process records remain ineligible for `AO_NEXT_LIVE_EVALUATION_PASSED`.
+The harness reports one trial. `evaluate-live` requires all 27 provider-origin rows: three tasks, three variants, and three counterbalanced trials. It requires the exact operator gate. `evaluate` remains offline-only and cannot return `AO_NEXT_LIVE_EVALUATION_PASSED`.

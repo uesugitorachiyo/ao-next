@@ -23,7 +23,9 @@ AO Next is not established as superior, production-ready, released, published, d
 - Deny network, credentials, remote mutation, release, deployment, publication, and other external effects unless a later operator-authored authority envelope separately grants the exact capability.
 - Keep provider transcripts, credentials, account identifiers, private paths, and unredacted workspace content out of tracked files.
 - Live provider calls, GitHub publication, releases, deployments, credential changes, AO migration, and production-readiness claims require separate explicit authority.
-- `run-live` and `run-direct-baseline` must check `AO_NEXT_LIVE_PROVIDER_CALLS=operator-authorized` before resolving input or starting a process. Tests use injected fake runners and must not set this gate.
+- `run-current-ao-baseline`, `run-live`, `run-direct-baseline`, and `evaluate-live` must check `AO_NEXT_LIVE_PROVIDER_CALLS=operator-authorized` before resolving input or starting a process. Tests use injected fake runners and must not set this gate.
+- Keep N0 bound to AO2's existing sandbox and digest-approved patch path. Never relabel an N4 or N7 row as current AO.
+- Retain raw provider captures only under the input's empty operator-owned private capture directory outside every worker authority root.
 - Keep sealed hidden tests outside worker workspaces and authority roots. Never copy hidden bytes or paths into prompts, effect observations, logs, or public evidence.
 
 ## Working Method

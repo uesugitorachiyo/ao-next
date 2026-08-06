@@ -206,6 +206,7 @@ pub struct ProcessRuntimeAdapter<R> {
     config: ProcessAdapterConfig,
     runner: R,
     captures: Vec<RuntimeCapture>,
+    raw_outputs: Vec<InvocationOutput>,
 }
 
 impl<R> ProcessRuntimeAdapter<R> {
@@ -215,12 +216,18 @@ impl<R> ProcessRuntimeAdapter<R> {
             config,
             runner,
             captures: Vec::new(),
+            raw_outputs: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn captures(&self) -> &[RuntimeCapture] {
         &self.captures
+    }
+
+    #[must_use]
+    pub fn raw_outputs(&self) -> &[InvocationOutput] {
+        &self.raw_outputs
     }
 }
 
@@ -267,6 +274,7 @@ impl<R: ProcessRunner> RuntimeAdapter for ProcessRuntimeAdapter<R> {
             .runner
             .run(&invocation, &self.config.cancellation)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        self.raw_outputs.push(output.clone());
         let model_wait_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let capture = capture_runtime_output(
             &self.config.identity.runtime,

@@ -88,6 +88,18 @@ fn invocations_are_structured_bounded_and_disable_dynamic_or_unmediated_tools() 
             .any(|args| args == ["--sandbox", "read-only"])
     );
     assert!(
+        codex_invocation
+            .args
+            .windows(2)
+            .any(|args| args == ["-c", "approval_policy=\"never\""])
+    );
+    assert!(
+        !codex_invocation
+            .args
+            .iter()
+            .any(|arg| arg == "--ask-for-approval")
+    );
+    assert!(
         !codex_invocation
             .args
             .iter()
@@ -156,6 +168,18 @@ fn direct_codex_baseline_is_ephemeral_and_workspace_bounded() {
             .any(|arg| arg == "--ignore-user-config")
     );
     assert!(invocation.args.iter().any(|arg| arg == "--ignore-rules"));
+    assert!(
+        invocation
+            .args
+            .windows(2)
+            .any(|args| args == ["-c", "approval_policy=\"never\""])
+    );
+    assert!(
+        !invocation
+            .args
+            .iter()
+            .any(|arg| arg == "--ask-for-approval")
+    );
     assert!(
         !invocation
             .args

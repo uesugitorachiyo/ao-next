@@ -290,6 +290,69 @@ fn corpus_identity_hidden_tests_and_all_exact_bindings_fail_closed() {
         evaluate_offline(&prompt_drift),
         Err(EvaluationError::RunIdentityMismatch { .. })
     ));
+
+    let mut workspace_drift = ready_request();
+    workspace_drift.runs[2].workspace_seed_digest = digest_bytes(b"drifted workspace");
+    assert!(matches!(
+        evaluate_offline(&workspace_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut objective_drift = ready_request();
+    objective_drift.runs[2].objective_digest = digest_bytes(b"drifted objective");
+    assert!(matches!(
+        evaluate_offline(&objective_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut visible_drift = ready_request();
+    visible_drift.runs[2].visible_fixtures_digest = digest_bytes(b"drifted visible fixtures");
+    assert!(matches!(
+        evaluate_offline(&visible_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut verifier_drift = ready_request();
+    verifier_drift.runs[2].verifier_profile_digest = digest_bytes(b"drifted verifier");
+    assert!(matches!(
+        evaluate_offline(&verifier_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut runtime_drift = ready_request();
+    runtime_drift.runs[2].runtime_digest = digest_bytes(b"drifted runtime");
+    assert!(matches!(
+        evaluate_offline(&runtime_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut model_drift = ready_request();
+    model_drift.runs[2].model_digest = digest_bytes(b"drifted model");
+    assert!(matches!(
+        evaluate_offline(&model_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut policy_drift = ready_request();
+    policy_drift.runs[2].policy_digest = digest_bytes(b"drifted policy");
+    assert!(matches!(
+        evaluate_offline(&policy_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut adapter_drift = ready_request();
+    adapter_drift.runs[2].adapter_digest = digest_bytes(b"drifted adapter");
+    assert!(matches!(
+        evaluate_offline(&adapter_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
+
+    let mut task_drift = ready_request();
+    task_drift.runs[2].task_id = "unknown-task".into();
+    assert!(matches!(
+        evaluate_offline(&task_drift),
+        Err(EvaluationError::RunIdentityMismatch { .. })
+    ));
 }
 
 #[test]
@@ -387,6 +450,20 @@ fn raw_capture_integrity_and_runtime_safety_boundaries_fail_closed() {
     n7.dynamic_fanout = true;
     assert!(matches!(
         evaluate_offline(&fanout),
+        Err(EvaluationError::InvalidMetrics { .. })
+    ));
+
+    let mut timing = ready_request();
+    timing.runs[0].model_wait_ms = timing.runs[0].wall_clock_ms + 1;
+    assert!(matches!(
+        evaluate_offline(&timing),
+        Err(EvaluationError::InvalidMetrics { .. })
+    ));
+
+    let mut hidden_exposure = ready_request();
+    hidden_exposure.runs[0].hidden_test_exposure = true;
+    assert!(matches!(
+        evaluate_offline(&hidden_exposure),
         Err(EvaluationError::InvalidMetrics { .. })
     ));
 }

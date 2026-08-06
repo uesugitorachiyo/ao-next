@@ -136,6 +136,7 @@ pub struct CommandFailure {
     pub status: u8,
     pub code: &'static str,
     pub message: String,
+    pub diagnostic: Option<serde_json::Value>,
 }
 
 impl CommandFailure {
@@ -145,6 +146,7 @@ impl CommandFailure {
             status: 2,
             code: "usage",
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -154,6 +156,7 @@ impl CommandFailure {
             status: 3,
             code: "invalid_input",
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -163,6 +166,7 @@ impl CommandFailure {
             status: 7,
             code: "evidence_failure",
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -172,6 +176,7 @@ impl CommandFailure {
             status: 8,
             code: "authorization_denied",
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -181,6 +186,20 @@ impl CommandFailure {
             status: 4,
             code: "runtime_failure",
             message: message.into(),
+            diagnostic: None,
+        }
+    }
+
+    #[must_use]
+    pub fn runtime_with_diagnostic(
+        message: impl Into<String>,
+        diagnostic: serde_json::Value,
+    ) -> Self {
+        Self {
+            status: 4,
+            code: "runtime_failure",
+            message: message.into(),
+            diagnostic: Some(diagnostic),
         }
     }
 }

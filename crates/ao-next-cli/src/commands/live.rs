@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ao_next_core::adapter::codex;
@@ -115,6 +116,7 @@ struct LiveRunRecord {
     raw_capture_index_digest: Digest,
     verifier_report_digest: Option<Digest>,
     git_workspace: GitWorkspaceIdentity,
+    ao2_control_diagnostics: Vec<serde_json::Value>,
     record_digest: Digest,
 }
 
@@ -139,11 +141,52 @@ type LiveExecution = (
     Option<RunOutcome>,
     Vec<RuntimeCapture>,
     Vec<InvocationOutput>,
+    Option<Digest>,
+    Vec<serde_json::Value>,
 );
 
 struct SingleProviderProcess<R> {
     runner: R,
     started: bool,
+}
+
+struct CaptureFirstRunner<R> {
+    runner: R,
+    raw_capture_root: PathBuf,
+    capture_context: CaptureContext,
+    retained_index: Arc<Mutex<Option<Digest>>>,
+}
+
+impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
+    fn run(
+        &mut self,
+        invocation: &PreparedInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutput, InvocationError> {
+        if self
+            .retained_index
+            .lock()
+            .map_err(|error| InvocationError::Io(error.to_string()))?
+            .is_some()
+        {
+            return Err(InvocationError::Io(
+                "duplicate provider capture identity".into(),
+            ));
+        }
+        let output = self.runner.run(invocation, cancellation)?;
+        let digest = persist_raw_captures(
+            &self.raw_capture_root,
+            &self.capture_context,
+            &[],
+            std::slice::from_ref(&output),
+        )
+        .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        *self
+            .retained_index
+            .lock()
+            .map_err(|error| InvocationError::Io(error.to_string()))? = Some(digest);
+        Ok(output)
+    }
 }
 
 impl<R> SingleProviderProcess<R> {
@@ -256,36 +299,86 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         started_at,
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let retained_index = Arc::new(Mutex::new(None));
+    let capture_context = capture_context(input, variant);
 
-    let (terminal_state, outcome, captures, raw_outputs) = match variant {
+    let execution = match variant {
         LiveVariant::N0 => execute_n0(
             input,
             provider_runner,
+            &capture_context,
             &mut verifier,
             &cancellation,
             invocation_limits,
-        )?,
+        ),
         LiveVariant::N7 => execute_n7(
             input,
-            provider_runner,
+            CaptureFirstRunner {
+                runner: provider_runner,
+                raw_capture_root: input.raw_capture_root.clone(),
+                capture_context: capture_context.clone(),
+                retained_index: retained_index.clone(),
+            },
             &mut verifier,
             cancellation.clone(),
             invocation_limits,
-        )?,
+        ),
         LiveVariant::N4 => execute_n4(
             input,
-            provider_runner,
+            CaptureFirstRunner {
+                runner: provider_runner,
+                raw_capture_root: input.raw_capture_root.clone(),
+                capture_context: capture_context.clone(),
+                retained_index: retained_index.clone(),
+            },
             &mut verifier,
             &cancellation,
             invocation_limits,
-        )?,
+        ),
     };
-    let raw_capture_index_digest =
-        persist_raw_captures(&input.raw_capture_root, &captures, &raw_outputs)?;
+    let (
+        terminal_state,
+        outcome,
+        captures,
+        raw_outputs,
+        retained_capture_index,
+        ao2_control_diagnostics,
+    ) = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            if input.raw_capture_root.join("capture-index.json").is_file() {
+                record_capture_terminal(&input.raw_capture_root, &capture_context, &error, None)?;
+            }
+            return Err(error);
+        }
+    };
+    let raw_capture_index_digest = retained_capture_index
+        .or_else(|| retained_index.lock().ok().and_then(|value| value.clone()))
+        .ok_or_else(|| CommandFailure::evidence("raw provider capture coverage is incomplete"))?;
+    if let Err(error) = verify_raw_capture_index(
+        &input.raw_capture_root,
+        &capture_context,
+        &raw_capture_index_digest,
+        input.request.limits.max_output_bytes,
+    ) {
+        record_capture_terminal(
+            &input.raw_capture_root,
+            &capture_context,
+            &error,
+            Some("evidence"),
+        )?;
+        return Err(error);
+    }
     if captures.len() != raw_outputs.len() {
-        return Err(CommandFailure::runtime(
-            "provider output was retained but could not be normalized",
-        ));
+        let error =
+            CommandFailure::runtime("provider output was retained but could not be normalized");
+        record_capture_terminal(
+            &input.raw_capture_root,
+            &capture_context,
+            &error,
+            Some("normalization"),
+        )?;
+        return Err(error);
     }
     let wall_clock_ms = u64::try_from(started.elapsed().as_millis())
         .unwrap_or(u64::MAX)
@@ -334,6 +427,19 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     let raw_capture_digest = canonical_digest(&capture_digests)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let task_success = terminal_state == RunState::Passed && !hidden_test_exposure;
+    if !task_success {
+        let stage = if raw_outputs.iter().any(|output| output.status != 0) {
+            "provider"
+        } else {
+            "verifier"
+        };
+        record_capture_terminal(
+            &input.raw_capture_root,
+            &capture_context,
+            &CommandFailure::runtime(format!("{stage} stage did not pass")),
+            Some(stage),
+        )?;
+    }
     let evidence_complete = task_success && !captures.is_empty() && report.is_some();
     let unauthorized_effects = outcome.as_ref().map_or(0, |value| {
         u32::try_from(
@@ -427,6 +533,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         &raw_capture_index_digest,
         &verifier_report_digest,
         &git_workspace,
+        &ao2_control_diagnostics,
     ))
     .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let record = LiveRunRecord {
@@ -438,6 +545,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         raw_capture_index_digest,
         verifier_report_digest,
         git_workspace,
+        ao2_control_diagnostics,
         record_digest,
     };
     let status = match terminal_state {
@@ -466,6 +574,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
 fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
     input: &LiveRunInput,
     mut process_runner: P,
+    capture_context: &CaptureContext,
     verifier: &mut CommandEngineVerifier<V>,
     cancellation: &CancellationToken,
     limits: InvocationLimits,
@@ -527,22 +636,43 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
     let model_wait_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let Ok(run) = decode_current_ao_output(&ao2_output, &input.request.workspace.root, limits)
     else {
-        return Ok((RunState::Failed, None, Vec::new(), vec![ao2_output]));
+        return Ok((
+            RunState::Failed,
+            None,
+            Vec::new(),
+            vec![ao2_output],
+            None,
+            Vec::new(),
+        ));
     };
     let provider_output = InvocationOutput {
         status: run.exit_code,
         stdout: run.stdout,
         stderr: run.stderr,
     };
+    let retained_capture_index = persist_raw_captures(
+        &input.raw_capture_root,
+        capture_context,
+        &[],
+        std::slice::from_ref(&provider_output),
+    )?;
     let Ok(capture) = capture_runtime_output("codex", &provider_output, limits.max_output_bytes)
     else {
-        return Ok((RunState::Failed, None, Vec::new(), vec![provider_output]));
+        return Ok((
+            RunState::Failed,
+            None,
+            Vec::new(),
+            vec![provider_output],
+            Some(retained_capture_index),
+            Vec::new(),
+        ));
     };
 
     let preview = run_current_ao_control(
         &mut process_runner,
         binding,
         &input.request.workspace.root,
+        "preview",
         &[
             "adapter",
             "patch",
@@ -556,14 +686,18 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         limits,
     )?;
     let digest = preview
+        .value
         .get("action_digest")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| CommandFailure::runtime("current-AO patch digest is missing"))?;
+        .ok_or_else(|| CommandFailure::runtime("current-AO patch digest is missing"))?
+        .to_string();
+    let mut ao2_control_diagnostics = vec![preview.diagnostic];
     let applied = run_current_ao_control(
         &mut process_runner,
         binding,
         &input.request.workspace.root,
+        "apply",
         &[
             "adapter",
             "patch",
@@ -573,7 +707,7 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
             "--sandbox",
             &run.sandbox_path.display().to_string(),
             "--digest",
-            digest,
+            &digest,
             "--approver",
             "ao-next:bounded-live-evaluation",
         ],
@@ -581,14 +715,16 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         limits,
     )?;
     if applied
+        .value
         .get("action_digest")
         .and_then(serde_json::Value::as_str)
-        != Some(digest)
+        != Some(digest.as_str())
     {
         return Err(CommandFailure::runtime(
             "current-AO patch application digest drifted",
         ));
     }
+    ao2_control_diagnostics.push(applied.diagnostic);
     let verification = verifier.verify(&input.request);
     let terminal_state = if verification.passed {
         RunState::Passed
@@ -605,6 +741,8 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
             model_wait_ms,
         }],
         vec![provider_output],
+        Some(retained_capture_index),
+        ao2_control_diagnostics,
     ))
 }
 
@@ -690,34 +828,134 @@ fn decode_current_ao_output(
     })
 }
 
+struct Ao2ControlResult {
+    value: serde_json::Value,
+    diagnostic: serde_json::Value,
+}
+
 fn run_current_ao_control<P: ProcessRunner>(
     runner: &mut P,
     binding: &CurrentAoBinding,
     workspace: &Path,
+    stage: &'static str,
     args: &[&str],
     cancellation: &CancellationToken,
     limits: InvocationLimits,
-) -> Result<serde_json::Value, CommandFailure> {
-    let output = runner
-        .run(
-            &PreparedInvocation {
-                program: binding.ao2_program.display().to_string(),
-                args: args.iter().map(|value| (*value).to_string()).collect(),
-                stdin: Vec::new(),
-                cwd: workspace.to_path_buf(),
-                limits,
-            },
-            cancellation,
-        )
-        .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+) -> Result<Ao2ControlResult, CommandFailure> {
+    let started = Instant::now();
+    let output = match runner.run(
+        &PreparedInvocation {
+            program: binding.ao2_program.display().to_string(),
+            args: args.iter().map(|value| (*value).to_string()).collect(),
+            stdin: Vec::new(),
+            cwd: workspace.to_path_buf(),
+            limits,
+        },
+        cancellation,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            let diagnostic = ao2_control_diagnostic(
+                binding,
+                workspace,
+                stage,
+                args,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                None,
+                Some(&error.to_string()),
+            );
+            return Err(CommandFailure::runtime_with_diagnostic(
+                format!("AO2 {stage} invocation failed"),
+                diagnostic,
+            ));
+        }
+    };
+    let diagnostic = ao2_control_diagnostic(
+        binding,
+        workspace,
+        stage,
+        args,
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        Some(&output),
+        None,
+    );
     if output.status != 0 {
-        return Err(CommandFailure::runtime(format!(
-            "current-AO control command exited {}",
-            output.status
-        )));
+        return Err(CommandFailure::runtime_with_diagnostic(
+            format!("AO2 {stage} exited {}", output.status),
+            diagnostic,
+        ));
     }
-    decode_strict_json(&output.stdout, limits.max_output_bytes)
-        .map_err(|error| CommandFailure::runtime(error.to_string()))
+    let value = decode_strict_json(&output.stdout, limits.max_output_bytes).map_err(|error| {
+        CommandFailure::runtime_with_diagnostic(
+            format!("AO2 {stage} returned malformed control output: {error}"),
+            diagnostic.clone(),
+        )
+    })?;
+    Ok(Ao2ControlResult { value, diagnostic })
+}
+
+fn ao2_control_diagnostic(
+    binding: &CurrentAoBinding,
+    workspace: &Path,
+    stage: &str,
+    args: &[&str],
+    elapsed_ms: u64,
+    output: Option<&InvocationOutput>,
+    invocation_error: Option<&str>,
+) -> serde_json::Value {
+    let sandbox = args
+        .windows(2)
+        .find(|pair| pair[0] == "--sandbox")
+        .map(|pair| PathBuf::from(pair[1]));
+    let workspace_text = workspace.display().to_string();
+    let sandbox_text = sandbox.as_ref().map(|path| path.display().to_string());
+    let sanitize = |bytes: &[u8]| {
+        let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).to_string();
+        text = text.replace(&workspace_text, "<workspace>");
+        if let Some(sandbox) = &sandbox_text {
+            text = text.replace(sandbox, "<sandbox>");
+        }
+        text
+    };
+    let sanitized_command = args
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if *value == workspace_text {
+                "<workspace>".to_string()
+            } else if index > 0 && args[index - 1] == "--sandbox" {
+                "<sandbox>".to_string()
+            } else {
+                (*value).to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    let stdout = output.map_or(&[][..], |value| value.stdout.as_slice());
+    let stderr = output.map_or_else(
+        || invocation_error.unwrap_or_default().as_bytes(),
+        |value| value.stderr.as_slice(),
+    );
+    serde_json::json!({
+        "schema_version": "ao.next.ao2-control-diagnostic.v1",
+        "stage": stage,
+        "program_path": binding.ao2_program,
+        "program_digest": binding.ao2_program_digest,
+        "command": sanitized_command,
+        "target_identity": digest_bytes(workspace_text.as_bytes()),
+        "sandbox_identity": sandbox_text.as_deref().map(|value| digest_bytes(value.as_bytes())),
+        "exit_status": output.map(|value| value.status),
+        "elapsed_ms": elapsed_ms,
+        "stdout": {
+            "digest": digest_bytes(stdout),
+            "byte_count": stdout.len(),
+            "bounded_text": sanitize(stdout),
+        },
+        "stderr": {
+            "digest": digest_bytes(stderr),
+            "byte_count": stderr.len(),
+            "bounded_text": sanitize(stderr),
+        }
+    })
 }
 
 fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
@@ -748,6 +986,8 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         Some(outcome),
         adapter.captures().to_vec(),
         adapter.raw_outputs().to_vec(),
+        None,
+        Vec::new(),
     ))
 }
 
@@ -778,7 +1018,14 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
         .map_err(|error| CommandFailure::runtime(error.to_string()))?;
     let model_wait_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let Ok(capture) = capture_runtime_output("codex", &output, limits.max_output_bytes) else {
-        return Ok((RunState::Failed, None, Vec::new(), vec![output]));
+        return Ok((
+            RunState::Failed,
+            None,
+            Vec::new(),
+            vec![output],
+            None,
+            Vec::new(),
+        ));
     };
     let verification = verifier.verify(&input.request);
     let terminal_state = if verification.passed {
@@ -796,6 +1043,8 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
             model_wait_ms,
         }],
         vec![output],
+        None,
+        Vec::new(),
     ))
 }
 
@@ -970,6 +1219,15 @@ fn ensure_private_capture_root(
             "raw capture root is not a regular non-symlink directory",
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(CommandFailure::invalid_input(
+                "raw capture root permissions are not owner-only",
+            ));
+        }
+    }
     let mut entries = std::fs::read_dir(path)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if entries
@@ -985,14 +1243,64 @@ fn ensure_private_capture_root(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureContext {
+    run_id: String,
+    trial_id: String,
+    workspace_instance_id: String,
+    runtime_identity: CaptureRuntimeIdentity,
+    maximum_output_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureRuntimeIdentity {
+    runtime: String,
+    model_identifier: String,
+    adapter_version: String,
+    worker_id: String,
+}
+
+fn capture_context(input: &LiveRunInput, variant: LiveVariant) -> CaptureContext {
+    CaptureContext {
+        run_id: input.request.run_id.clone(),
+        trial_id: input.trial_id.clone(),
+        workspace_instance_id: input.workspace_instance_id.clone(),
+        runtime_identity: CaptureRuntimeIdentity {
+            runtime: if variant == LiveVariant::N0 {
+                "codex".into()
+            } else {
+                input.request.model_profile.runtime.clone()
+            },
+            model_identifier: input.request.model_profile.model_identifier.clone(),
+            adapter_version: input.request.model_profile.adapter_version.clone(),
+            worker_id: match variant {
+                LiveVariant::N0 => "ao-next-n0-worker-01",
+                LiveVariant::N4 => "ao-next-n4-direct-worker-01",
+                LiveVariant::N7 => WORKER_ID,
+            }
+            .into(),
+        },
+        maximum_output_bytes: input.request.limits.max_output_bytes,
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawCaptureIndex {
-    schema_version: &'static str,
+    schema_version: String,
+    run_id: String,
+    trial_id: String,
+    workspace_instance_id: String,
+    runtime_identity: CaptureRuntimeIdentity,
     entries: Vec<RawCaptureIndexEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawCaptureIndexEntry {
+    capture_order: u32,
     turn_index: u32,
     status: i32,
     raw_capture_digest: Digest,
@@ -1006,12 +1314,21 @@ struct RawCaptureIndexEntry {
 
 fn persist_raw_captures(
     root: &Path,
+    context: &CaptureContext,
     captures: &[RuntimeCapture],
     outputs: &[InvocationOutput],
 ) -> Result<Digest, CommandFailure> {
     if outputs.is_empty() {
         return Err(CommandFailure::evidence(
             "raw provider capture coverage is incomplete",
+        ));
+    }
+    if outputs.iter().any(|output| {
+        u64::try_from(output.stdout.len().saturating_add(output.stderr.len())).unwrap_or(u64::MAX)
+            > context.maximum_output_bytes
+    }) {
+        return Err(CommandFailure::evidence(
+            "raw provider capture exceeds its sealed output bound",
         ));
     }
     let mut entries = Vec::with_capacity(outputs.len());
@@ -1035,6 +1352,7 @@ fn persist_raw_captures(
         write_private_new(&root.join(&stdout_path), &output.stdout)?;
         write_private_new(&root.join(&stderr_path), &output.stderr)?;
         entries.push(RawCaptureIndexEntry {
+            capture_order: u32::try_from(index).unwrap_or(u32::MAX),
             turn_index,
             status: output.status,
             raw_capture_digest: observed,
@@ -1047,15 +1365,169 @@ fn persist_raw_captures(
         });
     }
     let index = RawCaptureIndex {
-        schema_version: "ao.next.raw-provider-capture-index.v1",
+        schema_version: "ao.next.raw-provider-capture-index.v2".into(),
+        run_id: context.run_id.clone(),
+        trial_id: context.trial_id.clone(),
+        workspace_instance_id: context.workspace_instance_id.clone(),
+        runtime_identity: context.runtime_identity.clone(),
         entries,
     };
     let digest =
         canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let bytes =
         serde_json::to_vec(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    write_private_new(&root.join("capture-index.json"), &bytes)?;
+    publish_private_index(root, &bytes, true)?;
     Ok(digest)
+}
+
+fn publish_private_index(root: &Path, bytes: &[u8], publish: bool) -> Result<(), CommandFailure> {
+    let incomplete = root.join("capture-index.json.incomplete");
+    let completed = root.join("capture-index.json");
+    write_private_new(&incomplete, bytes)?;
+    if !publish {
+        return Err(CommandFailure::evidence(
+            "capture index publication was interrupted",
+        ));
+    }
+    std::fs::hard_link(&incomplete, &completed)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    std::fs::File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    std::fs::remove_file(&incomplete)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    std::fs::File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+fn verify_raw_capture_index(
+    root: &Path,
+    context: &CaptureContext,
+    expected_digest: &Digest,
+    maximum_output_bytes: u64,
+) -> Result<(), CommandFailure> {
+    let bytes = read_bounded_path(&root.join("capture-index.json"), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.message))?;
+    let index: RawCaptureIndex = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if index.schema_version != "ao.next.raw-provider-capture-index.v2"
+        || index.run_id != context.run_id
+        || index.trial_id != context.trial_id
+        || index.workspace_instance_id != context.workspace_instance_id
+        || index.runtime_identity != context.runtime_identity
+        || canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?
+            != *expected_digest
+        || index.entries.is_empty()
+    {
+        return Err(CommandFailure::evidence(
+            "raw capture index identity or digest is contradictory",
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    for (capture_order, entry) in index.entries.iter().enumerate() {
+        if entry.capture_order != u32::try_from(capture_order).unwrap_or(u32::MAX) {
+            return Err(CommandFailure::evidence(
+                "raw capture order is contradictory",
+            ));
+        }
+        let stdout_path = checked_capture_path(root, &entry.stdout_path)?;
+        let stderr_path = checked_capture_path(root, &entry.stderr_path)?;
+        if !paths.insert(stdout_path.clone()) || !paths.insert(stderr_path.clone()) {
+            return Err(CommandFailure::evidence("raw capture path is duplicated"));
+        }
+        let stdout = read_bounded_path(&stdout_path, maximum_output_bytes)
+            .map_err(|error| CommandFailure::evidence(error.message))?;
+        let stderr = read_bounded_path(&stderr_path, maximum_output_bytes)
+            .map_err(|error| CommandFailure::evidence(error.message))?;
+        if u64::try_from(stdout.len()).unwrap_or(u64::MAX) != entry.stdout_size_bytes
+            || u64::try_from(stderr.len()).unwrap_or(u64::MAX) != entry.stderr_size_bytes
+            || digest_bytes(&stdout) != entry.stdout_digest
+            || digest_bytes(&stderr) != entry.stderr_digest
+            || canonical_digest(&(entry.status, &stdout, &stderr))
+                .map_err(|error| CommandFailure::evidence(error.to_string()))?
+                != entry.raw_capture_digest
+        {
+            return Err(CommandFailure::evidence(
+                "retained provider capture digest or byte count mismatched",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn record_capture_terminal(
+    root: &Path,
+    context: &CaptureContext,
+    error: &CommandFailure,
+    stage_override: Option<&str>,
+) -> Result<(), CommandFailure> {
+    let index_bytes = read_bounded_path(&root.join("capture-index.json"), 1024 * 1024)
+        .map_err(|failure| CommandFailure::evidence(failure.message))?;
+    let index: RawCaptureIndex = decode_strict_json(&index_bytes, 1024 * 1024)
+        .map_err(|failure| CommandFailure::evidence(failure.to_string()))?;
+    let capture_index_digest = canonical_digest(&index)
+        .map_err(|failure| CommandFailure::evidence(failure.to_string()))?;
+    let failure_stage = stage_override
+        .or_else(|| {
+            error
+                .diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.get("stage"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    if error.message.contains("capture failure") {
+                        Some("capture")
+                    } else if error.message.contains("provider")
+                        || error.message.contains("adapter")
+                    {
+                        Some("provider")
+                    } else if error.code == "evidence_failure" {
+                        Some("evidence")
+                    } else {
+                        Some("control")
+                    }
+                })
+        })
+        .unwrap_or("control");
+    let message = error
+        .message
+        .replace(&context.run_id, "<run>")
+        .chars()
+        .take(1024)
+        .collect::<String>();
+    let terminal = serde_json::json!({
+        "schema_version": "ao.next.raw-provider-capture-terminal.v1",
+        "run_id": context.run_id,
+        "trial_id": context.trial_id,
+        "workspace_instance_id": context.workspace_instance_id,
+        "failure_stage": failure_stage,
+        "error_code": error.code,
+        "message": message,
+        "diagnostic_digest": error.diagnostic.as_ref().map(canonical_digest).transpose()
+            .map_err(|failure| CommandFailure::evidence(failure.to_string()))?,
+        "capture_index_digest": capture_index_digest,
+    });
+    let bytes = serde_json::to_vec(&terminal)
+        .map_err(|failure| CommandFailure::evidence(failure.to_string()))?;
+    write_private_new(&root.join("capture-terminal.json"), &bytes)
+}
+
+fn checked_capture_path(root: &Path, relative: &str) -> Result<PathBuf, CommandFailure> {
+    let path = Path::new(relative);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(CommandFailure::evidence("raw capture path is unsafe"));
+    }
+    let path = root.join(path);
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CommandFailure::evidence(
+            "raw capture is not a regular non-symlink file",
+        ));
+    }
+    Ok(path)
 }
 
 fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), CommandFailure> {
@@ -1069,10 +1541,14 @@ fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), CommandFailure> {
     let mut file = options
         .open(path)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    file.write_all(bytes)
+    write_all_exact(&mut file, bytes)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     file.sync_all()
         .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+fn write_all_exact(writer: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
+    writer.write_all(bytes)
 }
 
 fn ensure_outside_roots(path: &Path, roots: &[PathBuf]) -> Result<(), CommandFailure> {
@@ -1745,6 +2221,26 @@ mod tests {
         product: PathBuf,
     }
 
+    struct CaptureCheckingVerifier {
+        capture_root: PathBuf,
+        inner: BoundedProcessRunner,
+    }
+
+    impl ProcessRunner for CaptureCheckingVerifier {
+        fn run(
+            &mut self,
+            invocation: &PreparedInvocation,
+            cancellation: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            if !self.capture_root.join("capture-index.json").is_file() {
+                return Err(InvocationError::Io(
+                    "capture missing before verifier".into(),
+                ));
+            }
+            self.inner.run(invocation, cancellation)
+        }
+    }
+
     impl ProcessRunner for GitCheckingN0Runner {
         fn run(
             &mut self,
@@ -1814,6 +2310,12 @@ mod tests {
         std::fs::create_dir_all(&visible).expect("visible");
         std::fs::create_dir_all(&hidden).expect("hidden");
         std::fs::create_dir_all(&raw_capture_root).expect("raw captures");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&raw_capture_root, std::fs::Permissions::from_mode(0o700))
+                .expect("private raw captures");
+        }
         std::fs::create_dir_all(&controls).expect("controls");
         std::fs::write(visible.join("example.txt"), b"visible\n").expect("visible fixture");
         std::fs::write(
@@ -2276,6 +2778,388 @@ mod tests {
                 .any(|argument| argument == &format!("GIT_COMMITTER_DATE={GIT_TIMESTAMP}"))
         );
         assert_eq!(args.last().map(String::as_str), Some(GIT_PROGRAM));
+    }
+
+    #[test]
+    fn n0_retains_exact_provider_bytes_before_preview_failure() {
+        let n0 = fixture(LiveVariant::N0);
+        let sandbox = n0.root.path().join("ao2-sandbox-preview-failure");
+        std::fs::create_dir_all(&sandbox).expect("current-AO sandbox");
+        let mut outputs = current_ao_outputs(&n0.input.request.workspace.root, &sandbox);
+        let expected = decode_current_ao_output(
+            outputs.front().expect("adapter output"),
+            &n0.input.request.workspace.root,
+            invocation_limits(&n0.input.request).expect("limits"),
+        )
+        .expect("provider bytes");
+        outputs.get_mut(1).expect("preview output").status = 1;
+        outputs.get_mut(1).expect("preview output").stderr =
+            b"fatal: resolve Git common directory\n".to_vec();
+
+        execute_with_runners(
+            &n0.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs,
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("preview failure remains an infrastructure failure");
+
+        assert_eq!(
+            std::fs::read(n0.input.raw_capture_root.join("capture-000.stdout"))
+                .expect("retained stdout"),
+            expected.stdout
+        );
+        assert_eq!(
+            std::fs::read(n0.input.raw_capture_root.join("capture-000.stderr"))
+                .expect("retained stderr"),
+            expected.stderr
+        );
+        assert!(
+            n0.input
+                .raw_capture_root
+                .join("capture-index.json")
+                .is_file()
+        );
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(n0.input.raw_capture_root.join("capture-terminal.json"))
+                .expect("capture terminal metadata"),
+        )
+        .expect("capture terminal JSON");
+        assert_eq!(terminal["failure_stage"], "preview");
+        assert!(terminal["capture_index_digest"].as_str().is_some());
+        assert_eq!(
+            std::fs::read_dir(&n0.input.raw_capture_root)
+                .expect("capture root")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn n0_preview_failure_exposes_bounded_structured_ao2_diagnostic() {
+        let n0 = fixture(LiveVariant::N0);
+        let sandbox = n0.root.path().join("ao2-sandbox-diagnostic");
+        std::fs::create_dir_all(&sandbox).expect("current-AO sandbox");
+        let mut outputs = current_ao_outputs(&n0.input.request.workspace.root, &sandbox);
+        outputs.get_mut(1).expect("preview output").status = 1;
+        outputs.get_mut(1).expect("preview output").stderr =
+            b"Error: resolve Git common directory\n".to_vec();
+        let expected_program_digest = n0
+            .input
+            .current_ao
+            .as_ref()
+            .expect("current-AO binding")
+            .ao2_program_digest
+            .clone();
+
+        let error = execute_with_runners(
+            &n0.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs,
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("preview failure");
+        let diagnostic = error.diagnostic.expect("structured AO2 diagnostic");
+        assert_eq!(diagnostic["stage"], "preview");
+        assert_eq!(diagnostic["exit_status"], 1);
+        assert_eq!(
+            diagnostic["program_digest"],
+            expected_program_digest.as_str()
+        );
+        assert!(diagnostic["elapsed_ms"].as_u64().is_some());
+        assert!(
+            diagnostic["stderr"]["bounded_text"]
+                .as_str()
+                .is_some_and(|text| text.contains("resolve Git common directory"))
+        );
+        assert!(diagnostic["stderr"]["digest"].as_str().is_some());
+        assert_eq!(diagnostic["command"][0], "adapter");
+        assert!(diagnostic["target_identity"].as_str().is_some());
+        assert!(diagnostic["sandbox_identity"].as_str().is_some());
+    }
+
+    #[test]
+    fn n4_retains_provider_bytes_before_verifier_execution() {
+        let n4 = fixture(LiveVariant::N4);
+        let output = execute_with_runners(
+            &n4.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: Some(n4.product.clone()),
+                additional_write: None,
+            },
+            CaptureCheckingVerifier {
+                capture_root: n4.input.raw_capture_root.clone(),
+                inner: BoundedProcessRunner,
+            },
+        )
+        .expect("capture-first N4 run");
+
+        assert_eq!(output.status, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_index_is_atomic_private_and_identity_bound() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let n4 = fixture(LiveVariant::N4);
+        execute_with_runners(
+            &n4.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: Some(n4.product.clone()),
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("captured N4 run");
+
+        let index_path = n4.input.raw_capture_root.join("capture-index.json");
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index_path).expect("capture index bytes"))
+                .expect("capture index JSON");
+        assert_eq!(index["run_id"], n4.input.request.run_id);
+        assert_eq!(index["trial_id"], n4.input.trial_id);
+        assert_eq!(
+            index["workspace_instance_id"],
+            n4.input.workspace_instance_id
+        );
+        assert_eq!(index["runtime_identity"]["runtime"], "codex");
+        assert_eq!(index["entries"][0]["capture_order"], 0);
+        assert_eq!(index["entries"][0]["status"], 0);
+        assert!(index["entries"][0]["stdout_size_bytes"].as_u64().is_some());
+        assert!(index["entries"][0]["stderr_size_bytes"].as_u64().is_some());
+        for path in [
+            index_path,
+            n4.input.raw_capture_root.join("capture-000.stdout"),
+            n4.input.raw_capture_root.join("capture-000.stderr"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(path)
+                    .expect("capture metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert!(
+            !n4.input
+                .raw_capture_root
+                .join("capture-index.json.incomplete")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn capture_index_verification_rejects_tampered_bytes_and_contradictions() {
+        let tampered = fixture(LiveVariant::N4);
+        let output = execute_with_runners(
+            &tampered.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: Some(tampered.product.clone()),
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("captured N4 run");
+        let expected = Digest::new(
+            output.value["raw_capture_index_digest"]
+                .as_str()
+                .expect("capture index digest"),
+        )
+        .expect("valid digest");
+        let context = capture_context(&tampered.input, LiveVariant::N4);
+        verify_raw_capture_index(
+            &tampered.input.raw_capture_root,
+            &context,
+            &expected,
+            tampered.input.request.limits.max_output_bytes,
+        )
+        .expect("untouched capture verifies");
+        std::fs::write(
+            tampered.input.raw_capture_root.join("capture-000.stdout"),
+            b"tampered",
+        )
+        .expect("tamper retained bytes");
+        assert!(
+            verify_raw_capture_index(
+                &tampered.input.raw_capture_root,
+                &context,
+                &expected,
+                tampered.input.request.limits.max_output_bytes,
+            )
+            .is_err()
+        );
+
+        let contradictory = fixture(LiveVariant::N4);
+        let output = execute_with_runners(
+            &contradictory.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: Some(contradictory.product.clone()),
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("second captured N4 run");
+        let expected = Digest::new(
+            output.value["raw_capture_index_digest"]
+                .as_str()
+                .expect("capture index digest"),
+        )
+        .expect("valid digest");
+        let index_path = contradictory
+            .input
+            .raw_capture_root
+            .join("capture-index.json");
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index_path).expect("index bytes"))
+                .expect("index JSON");
+        index["entries"][0]["stdout_size_bytes"] = serde_json::json!(999_999_u64);
+        std::fs::write(
+            &index_path,
+            serde_json::to_vec(&index).expect("index bytes"),
+        )
+        .expect("contradict index");
+        assert!(
+            verify_raw_capture_index(
+                &contradictory.input.raw_capture_root,
+                &capture_context(&contradictory.input, LiveVariant::N4),
+                &expected,
+                contradictory.input.request.limits.max_output_bytes,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn capture_retention_rejects_interruption_duplicates_bounds_paths_and_short_writes() {
+        struct ZeroWriter;
+        impl std::io::Write for ZeroWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut zero = ZeroWriter;
+        assert_eq!(
+            write_all_exact(&mut zero, b"bytes")
+                .expect_err("zero-length short write")
+                .kind(),
+            std::io::ErrorKind::WriteZero
+        );
+
+        let interrupted = TempDir::new().expect("interrupted capture root");
+        write_private_new(&interrupted.path().join("capture-000.stdout"), b"stdout")
+            .expect("stdout");
+        write_private_new(&interrupted.path().join("capture-000.stderr"), b"stderr")
+            .expect("stderr");
+        assert!(publish_private_index(interrupted.path(), b"{}", false).is_err());
+        assert!(
+            interrupted
+                .path()
+                .join("capture-index.json.incomplete")
+                .is_file()
+        );
+        assert!(!interrupted.path().join("capture-index.json").exists());
+        assert!(interrupted.path().join("capture-000.stdout").is_file());
+
+        let duplicate = fixture(LiveVariant::N4);
+        let context = capture_context(&duplicate.input, LiveVariant::N4);
+        let output = codex_output(None);
+        let first = persist_raw_captures(
+            &duplicate.input.raw_capture_root,
+            &context,
+            &[],
+            std::slice::from_ref(&output),
+        )
+        .expect("first immutable capture");
+        assert!(
+            persist_raw_captures(
+                &duplicate.input.raw_capture_root,
+                &context,
+                &[],
+                std::slice::from_ref(&output),
+            )
+            .is_err()
+        );
+        verify_raw_capture_index(
+            &duplicate.input.raw_capture_root,
+            &context,
+            &first,
+            duplicate.input.request.limits.max_output_bytes,
+        )
+        .expect("first capture unchanged");
+
+        let oversized = fixture(LiveVariant::N4);
+        let mut context = capture_context(&oversized.input, LiveVariant::N4);
+        context.maximum_output_bytes = 1;
+        assert!(
+            persist_raw_captures(
+                &oversized.input.raw_capture_root,
+                &context,
+                &[],
+                &[InvocationOutput {
+                    status: 0,
+                    stdout: b"too large".to_vec(),
+                    stderr: Vec::new(),
+                }],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_dir(&oversized.input.raw_capture_root)
+                .expect("empty oversized root")
+                .count(),
+            0
+        );
+
+        assert!(checked_capture_path(interrupted.path(), "../escape").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let symlink_root = TempDir::new().expect("symlink capture root");
+            let target = symlink_root.path().join("target");
+            std::fs::write(&target, b"target").expect("target");
+            symlink(&target, symlink_root.path().join("capture-000.stdout"))
+                .expect("capture symlink");
+            assert!(checked_capture_path(symlink_root.path(), "capture-000.stdout").is_err());
+
+            use std::os::unix::fs::PermissionsExt as _;
+            let unsafe_root = fixture(LiveVariant::N4);
+            std::fs::set_permissions(
+                &unsafe_root.input.raw_capture_root,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("unsafe permissions");
+            assert!(validate_input(&unsafe_root.input, LiveVariant::N4, Utc::now()).is_err());
+        }
     }
 
     #[test]

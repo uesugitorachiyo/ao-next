@@ -1,4 +1,5 @@
 use ao_next_core::contracts::Digest;
+use ao_next_core::strict_json::canonical_digest;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -42,6 +43,7 @@ pub struct RunMeasurement {
     pub trial_index: u32,
     pub schedule_position: u32,
     pub raw_capture_digest: Digest,
+    pub raw_capture_digests: Vec<Digest>,
     pub workspace_instance_id: String,
     pub task_id: String,
     pub variant: ExecutionVariant,
@@ -117,6 +119,12 @@ pub enum MetricsError {
     HiddenTestExposure,
     #[error("run measurement trusted usage provenance is missing")]
     UntrustedUsage,
+    #[error("run measurement raw-capture manifest is invalid")]
+    RawCaptureMismatch,
+    #[error("run measurement reports an unauthorized effect")]
+    UnauthorizedEffect,
+    #[error("N7 run measurement violates the one-worker no-fan-out boundary")]
+    WorkerBoundary,
 }
 
 /// Calculates all derived metrics from raw counters and rejects supplied-total
@@ -148,6 +156,22 @@ pub fn derive_metrics(measurement: &RunMeasurement) -> Result<MetricRow, Metrics
     }
     if !measurement.provider_usage_trusted {
         return Err(MetricsError::UntrustedUsage);
+    }
+    if measurement.raw_capture_digests.is_empty()
+        || canonical_digest(&measurement.raw_capture_digests)
+            .ok()
+            .as_ref()
+            != Some(&measurement.raw_capture_digest)
+    {
+        return Err(MetricsError::RawCaptureMismatch);
+    }
+    if measurement.unauthorized_effects != 0 {
+        return Err(MetricsError::UnauthorizedEffect);
+    }
+    if measurement.variant == ExecutionVariant::N7
+        && (measurement.worker_count != 1 || measurement.dynamic_fanout)
+    {
+        return Err(MetricsError::WorkerBoundary);
     }
     let tokens = [
         measurement.tokens.input_tokens,

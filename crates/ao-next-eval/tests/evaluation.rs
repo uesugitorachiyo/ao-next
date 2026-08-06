@@ -1,5 +1,5 @@
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::strict_json::decode_strict_json;
+use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
 use ao_next_eval::comparison::{
     ComparisonRequest, EvaluationDecision, EvaluationError, evaluate_live_authorized,
     evaluate_offline,
@@ -71,6 +71,9 @@ fn measurement(
         ExecutionVariant::N4 => (100, 200),
         ExecutionVariant::N7 => (110, 250),
     };
+    let raw_capture_digests = vec![digest_bytes(
+        format!("capture:{}:{variant:?}:{trial_index}", task.task_id).as_bytes(),
+    )];
     RunMeasurement {
         schema_version: "ao.next.run-measurement.v2".into(),
         corpus_digest: corpus.corpus_digest.clone(),
@@ -78,9 +81,8 @@ fn measurement(
         trial_id: format!("trial-{}-{variant:?}-{trial_index}", task.task_id),
         trial_index,
         schedule_position: schedule_position(trial_index, variant),
-        raw_capture_digest: digest_bytes(
-            format!("capture:{}:{variant:?}:{trial_index}", task.task_id).as_bytes(),
-        ),
+        raw_capture_digest: canonical_digest(&raw_capture_digests).expect("capture manifest"),
+        raw_capture_digests,
         workspace_instance_id: format!(
             "workspace-instance-{}-{variant:?}-{trial_index}",
             task.task_id
@@ -345,6 +347,47 @@ fn wrong_schedule_reused_capture_and_workspace_reuse_fail_closed() {
     assert!(matches!(
         evaluate_offline(&reused_workspace),
         Err(EvaluationError::ReusedProvenance)
+    ));
+}
+
+#[test]
+fn raw_capture_integrity_and_runtime_safety_boundaries_fail_closed() {
+    let mut capture_drift = ready_request();
+    capture_drift.runs[0].raw_capture_digest = digest_bytes(b"drifted capture manifest");
+    assert!(matches!(
+        evaluate_offline(&capture_drift),
+        Err(EvaluationError::InvalidMetrics { .. })
+    ));
+
+    let mut unauthorized = ready_request();
+    unauthorized.runs[0].unauthorized_effects = 1;
+    assert!(matches!(
+        evaluate_offline(&unauthorized),
+        Err(EvaluationError::InvalidMetrics { .. })
+    ));
+
+    let mut workers = ready_request();
+    let n7 = workers
+        .runs
+        .iter_mut()
+        .find(|run| run.variant == ExecutionVariant::N7)
+        .expect("N7 row");
+    n7.worker_count = 2;
+    assert!(matches!(
+        evaluate_offline(&workers),
+        Err(EvaluationError::InvalidMetrics { .. })
+    ));
+
+    let mut fanout = ready_request();
+    let n7 = fanout
+        .runs
+        .iter_mut()
+        .find(|run| run.variant == ExecutionVariant::N7)
+        .expect("N7 row");
+    n7.dynamic_fanout = true;
+    assert!(matches!(
+        evaluate_offline(&fanout),
+        Err(EvaluationError::InvalidMetrics { .. })
     ));
 }
 

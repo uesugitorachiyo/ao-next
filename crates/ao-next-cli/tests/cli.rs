@@ -217,6 +217,9 @@ fn comparison_measurement(
         .iter()
         .find(|profile| profile.variant == entry.variant)
         .expect("variant profile");
+    let raw_capture_digests = vec![digest_bytes(
+        format!("cli-capture-{:?}-{}", entry.variant, entry.trial_index).as_bytes(),
+    )];
     RunMeasurement {
         schema_version: "ao.next.run-measurement.v2".into(),
         corpus_digest: corpus.corpus_digest.clone(),
@@ -224,9 +227,9 @@ fn comparison_measurement(
         trial_id: format!("cli-trial-{:?}-{}", entry.variant, entry.trial_index),
         trial_index: entry.trial_index,
         schedule_position: entry.schedule_position,
-        raw_capture_digest: digest_bytes(
-            format!("cli-capture-{:?}-{}", entry.variant, entry.trial_index).as_bytes(),
-        ),
+        raw_capture_digest: ao_next_core::strict_json::canonical_digest(&raw_capture_digests)
+            .expect("capture manifest"),
+        raw_capture_digests,
         workspace_instance_id: format!("cli-workspace-{:?}-{}", entry.variant, entry.trial_index),
         task_id: task.task_id.clone(),
         variant: entry.variant,

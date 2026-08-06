@@ -204,6 +204,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         trial_index: input.trial_index,
         schedule_position: input.schedule_position,
         raw_capture_digest,
+        raw_capture_digests: capture_digests.clone(),
         workspace_instance_id: input.workspace_instance_id.clone(),
         task_id: input.task_id.clone(),
         variant: variant.execution_variant(),

@@ -16,6 +16,7 @@ use crate::contracts::{Digest, EffectRequest, SourceIdentity, WorkspaceIdentity}
 
 pub mod claude;
 pub mod codex;
+pub mod process;
 pub mod scripted;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

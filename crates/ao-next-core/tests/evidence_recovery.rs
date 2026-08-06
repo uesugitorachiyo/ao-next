@@ -462,10 +462,14 @@ fn recovery_events() -> Vec<JournalEvent> {
 }
 
 #[test]
-fn interrupted_resume_skips_committed_effect_and_requires_durable_verifier_events() {
+fn interrupted_n7_resume_skips_committed_effect_and_requires_durable_verifier_events() {
     let workspace = TempDir::new().expect("workspace");
     let recovery = TempDir::new().expect("recovery");
-    let request = request(workspace.path());
+    let mut request = request(workspace.path());
+    request.run_id = "run-n7-recovery-01".into();
+    request.model_profile.runtime = "codex".into();
+    request.model_profile.model_identifier = "fixed-live-model".into();
+    request.model_profile.adapter_version = "ao-next-process-v1".into();
     let identity = CheckpointIdentity::from_request(&request).expect("checkpoint identity");
     let events_path = recovery.path().join("events.jsonl");
     let events_digest =

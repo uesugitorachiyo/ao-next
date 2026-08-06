@@ -300,6 +300,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let retained_index = Arc::new(Mutex::new(None));
     let capture_context = capture_context(input, variant);
+    verify_git_workspace(&git_workspace, true)?;
 
     let execution = match variant {
         LiveVariant::N0 => execute_n0(
@@ -1912,9 +1913,18 @@ fn run_git_checked(
     args: Vec<String>,
     stage: &str,
 ) -> Result<InvocationOutput, CommandFailure> {
+    let mut runner = BoundedProcessRunner;
+    run_git_checked_with_runner(root, args, stage, &mut runner)
+}
+
+fn run_git_checked_with_runner<R: ProcessRunner>(
+    root: &Path,
+    args: Vec<String>,
+    stage: &str,
+    runner: &mut R,
+) -> Result<InvocationOutput, CommandFailure> {
     let mut environment_args = git_environment_args();
     environment_args.extend(args);
-    let mut runner = BoundedProcessRunner;
     let output = runner
         .run(
             &PreparedInvocation {
@@ -1931,6 +1941,11 @@ fn run_git_checked(
             &CancellationToken::new(),
         )
         .map_err(|error| CommandFailure::runtime(format!("Git {stage} failed: {error}")))?;
+    if output.stdout.len().saturating_add(output.stderr.len()) > GIT_OUTPUT_LIMIT {
+        return Err(CommandFailure::runtime(format!(
+            "Git {stage} output exceeds bounded limit"
+        )));
+    }
     if output.status != 0 {
         let diagnostic = String::from_utf8_lossy(&output.stderr)
             .replace(&root.display().to_string(), "<workspace>");
@@ -2223,6 +2238,71 @@ mod tests {
     struct CaptureCheckingVerifier {
         capture_root: PathBuf,
         inner: BoundedProcessRunner,
+    }
+
+    struct ProviderFreeRunner {
+        program: PathBuf,
+        inner: BoundedProcessRunner,
+    }
+
+    struct FixedProcessResult {
+        result: Option<Result<InvocationOutput, InvocationError>>,
+    }
+
+    impl ProcessRunner for FixedProcessResult {
+        fn run(
+            &mut self,
+            _: &PreparedInvocation,
+            _: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            self.result.take().expect("one fixed process result")
+        }
+    }
+
+    impl ProviderFreeRunner {
+        fn from_environment() -> Result<Self, String> {
+            let program = PathBuf::from(
+                std::env::var_os("AO_NEXT_PROVIDER_FREE_PROGRAM")
+                    .ok_or("AO_NEXT_PROVIDER_FREE_PROGRAM is missing")?,
+            );
+            if !program.is_absolute() {
+                return Err("provider-free program is not absolute".into());
+            }
+            let metadata =
+                std::fs::symlink_metadata(&program).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("provider-free program is not a regular non-symlink file".into());
+            }
+            let expected = Digest::new(
+                std::env::var("AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST")
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            if digest_regular_file(&program).map_err(|error| error.message)? != expected {
+                return Err("provider-free program digest drifted".into());
+            }
+            Ok(Self {
+                program,
+                inner: BoundedProcessRunner,
+            })
+        }
+    }
+
+    impl ProcessRunner for ProviderFreeRunner {
+        fn run(
+            &mut self,
+            invocation: &PreparedInvocation,
+            cancellation: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            if invocation.program != "codex" {
+                return Err(InvocationError::Io(
+                    "provider-free runner received an unexpected program".into(),
+                ));
+            }
+            let mut prepared = invocation.clone();
+            prepared.program = self.program.display().to_string();
+            self.inner.run(&prepared, cancellation)
+        }
     }
 
     impl ProcessRunner for CaptureCheckingVerifier {
@@ -2790,6 +2870,53 @@ mod tests {
     }
 
     #[test]
+    fn git_process_failures_timeouts_and_oversized_output_fail_closed() {
+        let mut failed = FixedProcessResult {
+            result: Some(Ok(InvocationOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"fatal: injected Git failure\n".to_vec(),
+            })),
+        };
+        let error = run_git_checked_with_runner(
+            Path::new("/"),
+            Vec::new(),
+            "injected failure",
+            &mut failed,
+        )
+        .expect_err("nonzero Git exit rejected");
+        assert!(error.message.contains("injected Git failure"));
+
+        let mut timed_out = FixedProcessResult {
+            result: Some(Err(InvocationError::TimedOut)),
+        };
+        let error = run_git_checked_with_runner(
+            Path::new("/"),
+            Vec::new(),
+            "injected timeout",
+            &mut timed_out,
+        )
+        .expect_err("Git timeout rejected");
+        assert!(error.message.contains("timed out"));
+
+        let mut oversized = FixedProcessResult {
+            result: Some(Ok(InvocationOutput {
+                status: 0,
+                stdout: vec![b'x'; GIT_OUTPUT_LIMIT + 1],
+                stderr: Vec::new(),
+            })),
+        };
+        let error = run_git_checked_with_runner(
+            Path::new("/"),
+            Vec::new(),
+            "injected oversized output",
+            &mut oversized,
+        )
+        .expect_err("oversized Git output rejected");
+        assert!(error.message.contains("output exceeds"));
+    }
+
+    #[test]
     fn n0_retains_exact_provider_bytes_before_preview_failure() {
         let n0 = fixture(LiveVariant::N0);
         let sandbox = n0.root.path().join("ao2-sandbox-preview-failure");
@@ -2898,6 +3025,60 @@ mod tests {
     }
 
     #[test]
+    fn n0_retains_provider_bytes_and_diagnostics_before_apply_failure() {
+        let n0 = fixture(LiveVariant::N0);
+        let sandbox = n0.root.path().join("ao2-sandbox-apply-failure");
+        std::fs::create_dir_all(&sandbox).expect("current-AO sandbox");
+        let mut outputs = current_ao_outputs(&n0.input.request.workspace.root, &sandbox);
+        let expected = decode_current_ao_output(
+            outputs.front().expect("adapter output"),
+            &n0.input.request.workspace.root,
+            invocation_limits(&n0.input.request).expect("limits"),
+        )
+        .expect("provider bytes");
+        outputs.get_mut(2).expect("apply output").status = 1;
+        outputs.get_mut(2).expect("apply output").stderr = b"apply rejected\n".to_vec();
+
+        let error = execute_with_runners(
+            &n0.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs,
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("apply failure remains an infrastructure failure");
+        assert_eq!(
+            std::fs::read(n0.input.raw_capture_root.join("capture-000.stdout"))
+                .expect("retained stdout"),
+            expected.stdout
+        );
+        assert_eq!(
+            error
+                .diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic["stage"].as_str()),
+            Some("apply")
+        );
+        assert!(
+            error
+                .diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic["stderr"]["bounded_text"].as_str())
+                .is_some_and(|text| text.contains("apply rejected"))
+        );
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(n0.input.raw_capture_root.join("capture-terminal.json"))
+                .expect("capture terminal metadata"),
+        )
+        .expect("capture terminal JSON");
+        assert_eq!(terminal["failure_stage"], "apply");
+    }
+
+    #[test]
     fn n4_retains_provider_bytes_before_verifier_execution() {
         let n4 = fixture(LiveVariant::N4);
         let output = execute_with_runners(
@@ -2917,6 +3098,62 @@ mod tests {
         .expect("capture-first N4 run");
 
         assert_eq!(output.status, 0);
+    }
+
+    #[test]
+    fn n4_retains_provider_bytes_when_verifier_fails() {
+        let n4 = fixture(LiveVariant::N4);
+        let output = execute_with_runners(
+            &n4.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("verifier failure remains a measured failed fixture");
+        assert_eq!(output.status, 5);
+        assert_eq!(output.value["measurement"]["task_success"], false);
+        assert!(
+            n4.input
+                .raw_capture_root
+                .join("capture-index.json")
+                .is_file()
+        );
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(n4.input.raw_capture_root.join("capture-terminal.json"))
+                .expect("capture terminal metadata"),
+        )
+        .expect("capture terminal JSON");
+        assert_eq!(terminal["failure_stage"], "verifier");
+    }
+
+    #[test]
+    fn invalid_input_starts_no_provider_and_creates_no_capture() {
+        let mut invalid = fixture(LiveVariant::N4);
+        invalid.input.request.policy_digest = digest_bytes(b"drifted policy");
+        let error = execute_with_runners(
+            &invalid.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::new(),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("invalid input rejected before provider spawn");
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(
+            std::fs::read_dir(&invalid.input.raw_capture_root)
+                .expect("capture root")
+                .count(),
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -3285,13 +3522,22 @@ mod tests {
             _ => panic!("AO_NEXT_PROVIDER_FREE_VARIANT must be N0, N4, or N7"),
         };
         let input: LiveRunInput = decode_file(Path::new(&input_path)).expect("bound offline input");
-        let output = execute_with_runners(
-            &input,
-            variant,
-            MeasurementOrigin::OfflineFixture,
-            BoundedProcessRunner,
-            BoundedProcessRunner,
-        )
+        let output = match variant {
+            LiveVariant::N0 => execute_with_runners(
+                &input,
+                variant,
+                MeasurementOrigin::OfflineFixture,
+                BoundedProcessRunner,
+                BoundedProcessRunner,
+            ),
+            LiveVariant::N4 | LiveVariant::N7 => execute_with_runners(
+                &input,
+                variant,
+                MeasurementOrigin::OfflineFixture,
+                ProviderFreeRunner::from_environment().expect("bound provider-free program"),
+                BoundedProcessRunner,
+            ),
+        }
         .expect("real provider-free control path");
         assert_eq!(output.status, 0);
         assert_eq!(

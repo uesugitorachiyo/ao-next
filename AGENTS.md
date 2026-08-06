@@ -32,6 +32,8 @@ AO Next is not established as superior, production-ready, released, published, d
 
 - Use test-driven development: observe the focused test fail for the intended missing behavior, implement the minimum change, and re-run focused and workspace tests.
 - Preserve exact request, source, workspace, model, prompt, tool, policy, effect, verifier, artifact, checkpoint, and terminal digests.
+- For live-harness workspaces, validate sealed product bytes before creating one ordinary deterministic root Git repository. Bind and recheck the canonical root, common directory, branch, seed `HEAD`, and clean status immediately before provider spawn; exclude only that separately validated root `.git` directory from product snapshots.
+- Retain exact bounded provider stdout and stderr in the operator-owned private capture root and atomically publish and verify one immutable capture index before normalization, AO2 preview/apply, verification, or public evidence assembly. Preserve private failure-stage metadata without treating retained output as a successful measurement.
 - Reject duplicate keys, unknown contract fields, oversized input, stale authority, unsafe paths, symlinks, non-regular files, identity drift, digest mismatch, and terminal contradictions.
 - Store retained evidence beneath digest-addressed paths and preserve the original locator separately.
 - Keep `target/`, `.ao-next/`, artifacts, logs, evaluation output, and local transcripts out of source changes.

@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 pub mod evaluate;
 pub mod inspect;
+pub mod live;
 pub mod replay;
 pub mod run;
 pub mod verify_evidence;
@@ -20,10 +21,18 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Run(RunArgs),
+    RunLive(LiveRunArgs),
+    RunDirectBaseline(LiveRunArgs),
     Inspect(InspectArgs),
     VerifyEvidence(VerifyEvidenceArgs),
     Replay(ReplayArgs),
     Evaluate(EvaluateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LiveRunArgs {
+    #[arg(long)]
+    pub input: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -120,11 +129,22 @@ impl CommandFailure {
             message: message.into(),
         }
     }
+
+    #[must_use]
+    pub fn authorization(message: impl Into<String>) -> Self {
+        Self {
+            status: 8,
+            code: "authorization_denied",
+            message: message.into(),
+        }
+    }
 }
 
 pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
     match cli.command {
         Command::Run(args) => run::execute(&args),
+        Command::RunLive(args) => live::execute(&args, live::LiveVariant::N7),
+        Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
         Command::Inspect(args) => inspect::execute(&args),
         Command::VerifyEvidence(args) => verify_evidence::execute(&args),
         Command::Replay(args) => replay::execute(&args),

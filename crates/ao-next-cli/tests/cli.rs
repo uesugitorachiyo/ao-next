@@ -63,6 +63,20 @@ fn run(args: &[&str]) -> Output {
         .expect("run ao-next")
 }
 
+fn run_with_live_environment(args: &[&str], path: &Path, gate: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ao-next"));
+    command.args(args).env("PATH", path);
+    match gate {
+        Some(value) => {
+            command.env("AO_NEXT_LIVE_PROVIDER_CALLS", value);
+        }
+        None => {
+            command.env_remove("AO_NEXT_LIVE_PROVIDER_CALLS");
+        }
+    }
+    command.output().expect("run ao-next")
+}
+
 fn write_json(path: &Path, value: &impl serde::Serialize) {
     std::fs::write(path, serde_json::to_vec(value).expect("fixture JSON")).expect("write fixture");
 }
@@ -428,4 +442,39 @@ fn run_maps_success_denial_failure_interruption_and_evidence_failure() {
         "2026-08-05T12:00:00Z",
     ]);
     assert_json_error(&output, 7, "evidence_failure");
+}
+
+#[test]
+fn live_commands_deny_before_input_or_process_resolution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = TempDir::new().expect("temporary");
+    let marker = temporary.path().join("fake-provider-started");
+    let executable = temporary.path().join("codex");
+    std::fs::write(
+        &executable,
+        format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+    )
+    .expect("fake executable");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("fake executable metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("fake executable permissions");
+    let missing_input = temporary.path().join("missing-live-input.json");
+
+    for command in ["run-live", "run-direct-baseline"] {
+        for gate in [None, Some("wrong")] {
+            let output = run_with_live_environment(
+                &[command, "--input", missing_input.to_str().expect("path")],
+                temporary.path(),
+                gate,
+            );
+            assert_json_error(&output, 8, "authorization_denied");
+            assert!(
+                !marker.exists(),
+                "unauthorized live command started a child"
+            );
+        }
+    }
 }

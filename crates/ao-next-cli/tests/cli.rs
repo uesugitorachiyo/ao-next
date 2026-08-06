@@ -5,6 +5,13 @@ use std::process::{Command, Output};
 use ao_next_core::contracts::{
     AdapterIdentity, Digest, RunState, SourceIdentity, TerminalReadback, WorkspaceIdentity,
 };
+use ao_next_core::evidence::digest_bytes;
+use ao_next_eval::comparison::ComparisonRequest;
+use ao_next_eval::corpus::{
+    CorpusKind, CorpusManifest, EvaluationTask, ScheduleEntry, VariantProfile,
+    counterbalanced_schedule,
+};
+use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
 use chrono::{DateTime, Utc};
 use tempfile::TempDir;
 
@@ -143,102 +150,130 @@ fn run_request_json(root: &Path) -> serde_json::Value {
 }
 
 fn ready_comparison_json() -> serde_json::Value {
-    let task = serde_json::json!({
-        "task_id": "cli-evaluation",
-        "task_kind": "bounded_public_defect_repair",
-        "source_digest": ZERO_DIGEST,
-        "objective_digest": ONE_DIGEST,
-        "workspace_seed_digest": ZERO_DIGEST,
-        "visible_fixtures_digest": ONE_DIGEST,
-        "hidden_tests_digest": ZERO_DIGEST,
-        "verifier_profile_digest": ONE_DIGEST,
-        "variant_profiles": [
-            {
-                "variant": "N0",
-                "runtime": "N0",
-                "model_identifier": "fixture-model",
-                "prompt_digest": ONE_DIGEST,
-                "policy_digest": ZERO_DIGEST,
-                "adapter_version": "fixture-v1"
-            },
-            {
-                "variant": "N4",
-                "runtime": "N4",
-                "model_identifier": "fixture-model",
-                "prompt_digest": ONE_DIGEST,
-                "policy_digest": ZERO_DIGEST,
-                "adapter_version": "fixture-v1"
-            },
-            {
-                "variant": "N7",
-                "runtime": "N7",
-                "model_identifier": "fixture-model",
-                "prompt_digest": ONE_DIGEST,
-                "policy_digest": ZERO_DIGEST,
-                "adapter_version": "fixture-v1"
-            }
-        ]
-    });
-    let corpus_digest =
-        ao_next_core::strict_json::canonical_digest(&vec![task.clone()]).expect("corpus digest");
-    let measurement = |variant: &str, tokens: u64, wall_clock_ms: u64| {
-        serde_json::json!({
-            "schema_version": "ao.next.run-measurement.v1",
-            "corpus_digest": corpus_digest,
-            "task_id": "cli-evaluation",
-            "variant": variant,
-            "source_digest": ZERO_DIGEST,
-            "objective_digest": ONE_DIGEST,
-            "workspace_seed_digest": ZERO_DIGEST,
-            "visible_fixtures_digest": ONE_DIGEST,
-            "hidden_tests_digest": ZERO_DIGEST,
-            "verifier_profile_digest": ONE_DIGEST,
-            "runtime": variant,
-            "model_identifier": "fixture-model",
-            "prompt_digest": ONE_DIGEST,
-            "policy_digest": ZERO_DIGEST,
-            "adapter_version": "fixture-v1",
-            "tokens": {
-                "input_tokens": tokens,
-                "cached_input_tokens": 0,
-                "reasoning_tokens": 0,
-                "output_tokens": 0,
-                "reported_total_tokens": tokens
-            },
-            "wall_clock_ms": wall_clock_ms,
-            "model_wait_ms": wall_clock_ms / 2,
-            "worker_turns": 1,
-            "repair_attempts": 0,
-            "operator_interventions": 0,
-            "changed_files": 1,
-            "accepted_changed_files": 1,
-            "task_success": true,
-            "hidden_tests_passed": 10,
-            "hidden_tests_total": 10,
-            "regressions": 0,
-            "unauthorized_effects": 0,
-            "evidence_complete": true,
-            "evidence_digest_valid": true,
-            "recovery_attempted": variant == "N7",
-            "recovery_no_duplicate_effect": true,
-            "cross_runtime_agreement": true,
-            "worker_count": 1,
-            "dynamic_fanout": false
-        })
-    };
-    serde_json::json!({
-        "schema_version": "ao.next.comparison-request.v1",
-        "corpus": {
-            "schema_version": "ao.next.evaluation-corpus.v1",
-            "corpus_digest": corpus_digest,
-            "tasks": [task]
-        },
-        "runs": [
-            measurement("N0", 400, 400),
-            measurement("N4", 100, 200),
-            measurement("N7", 110, 250)
-        ]
+    let profiles = [
+        (ExecutionVariant::N0, "N0"),
+        (ExecutionVariant::N4, "N4"),
+        (ExecutionVariant::N7, "N7"),
+    ]
+    .into_iter()
+    .map(|(variant, runtime)| VariantProfile {
+        variant,
+        runtime: runtime.into(),
+        runtime_digest: digest_bytes(format!("{runtime}:runtime").as_bytes()),
+        model_identifier: "fixture-model".into(),
+        model_digest: digest_bytes(format!("{runtime}:model").as_bytes()),
+        prompt_digest: digest(ONE_DIGEST),
+        policy_digest: digest(ZERO_DIGEST),
+        adapter_version: "fixture-v1".into(),
+        adapter_digest: digest_bytes(format!("{runtime}:adapter").as_bytes()),
     })
+    .collect::<Vec<_>>();
+    let task = EvaluationTask {
+        task_id: "cli-evaluation".into(),
+        task_kind: "bounded_public_defect_repair".into(),
+        source_digest: digest(ZERO_DIGEST),
+        objective_digest: digest(ONE_DIGEST),
+        workspace_seed_digest: digest(ZERO_DIGEST),
+        visible_fixtures_digest: digest(ONE_DIGEST),
+        hidden_tests_digest: digest(ZERO_DIGEST),
+        verifier_profile_digest: digest(ONE_DIGEST),
+        variant_profiles: profiles,
+    };
+    let mut corpus = CorpusManifest {
+        schema_version: "ao.next.evaluation-corpus.v2".into(),
+        corpus_kind: CorpusKind::SyntheticUnitTest,
+        corpus_digest: digest(ZERO_DIGEST),
+        required_trial_count: 3,
+        schedule: counterbalanced_schedule(),
+        tasks: vec![task],
+    };
+    corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
+    let task = &corpus.tasks[0];
+    let runs = corpus
+        .schedule
+        .iter()
+        .map(|entry| comparison_measurement(&corpus, task, entry))
+        .collect();
+    serde_json::to_value(ComparisonRequest {
+        schema_version: "ao.next.comparison-request.v2".into(),
+        corpus,
+        runs,
+    })
+    .expect("comparison JSON")
+}
+
+fn comparison_measurement(
+    corpus: &CorpusManifest,
+    task: &EvaluationTask,
+    entry: &ScheduleEntry,
+) -> RunMeasurement {
+    let (tokens, wall_clock_ms) = match entry.variant {
+        ExecutionVariant::N0 => (400, 400),
+        ExecutionVariant::N4 => (100, 200),
+        ExecutionVariant::N7 => (110, 250),
+    };
+    let profile = task
+        .variant_profiles
+        .iter()
+        .find(|profile| profile.variant == entry.variant)
+        .expect("variant profile");
+    RunMeasurement {
+        schema_version: "ao.next.run-measurement.v2".into(),
+        corpus_digest: corpus.corpus_digest.clone(),
+        run_id: format!("cli-run-{:?}-{}", entry.variant, entry.trial_index),
+        trial_id: format!("cli-trial-{:?}-{}", entry.variant, entry.trial_index),
+        trial_index: entry.trial_index,
+        schedule_position: entry.schedule_position,
+        raw_capture_digest: digest_bytes(
+            format!("cli-capture-{:?}-{}", entry.variant, entry.trial_index).as_bytes(),
+        ),
+        workspace_instance_id: format!("cli-workspace-{:?}-{}", entry.variant, entry.trial_index),
+        task_id: task.task_id.clone(),
+        variant: entry.variant,
+        source_digest: task.source_digest.clone(),
+        objective_digest: task.objective_digest.clone(),
+        workspace_seed_digest: task.workspace_seed_digest.clone(),
+        visible_fixtures_digest: task.visible_fixtures_digest.clone(),
+        hidden_tests_digest: task.hidden_tests_digest.clone(),
+        verifier_profile_digest: task.verifier_profile_digest.clone(),
+        runtime: profile.runtime.clone(),
+        runtime_digest: profile.runtime_digest.clone(),
+        model_identifier: profile.model_identifier.clone(),
+        model_digest: profile.model_digest.clone(),
+        prompt_digest: profile.prompt_digest.clone(),
+        policy_digest: profile.policy_digest.clone(),
+        adapter_version: profile.adapter_version.clone(),
+        adapter_digest: profile.adapter_digest.clone(),
+        measurement_origin: MeasurementOrigin::OfflineFixture,
+        provider_usage_trusted: true,
+        tokens: TokenRow {
+            input_tokens: Some(tokens),
+            cached_input_tokens: Some(0),
+            reasoning_tokens: Some(0),
+            output_tokens: Some(0),
+            reported_total_tokens: tokens,
+        },
+        wall_clock_ms,
+        model_wait_ms: wall_clock_ms / 2,
+        worker_turns: 1,
+        repair_attempts: 0,
+        operator_interventions: 0,
+        changed_files: 1,
+        accepted_changed_files: 1,
+        task_success: true,
+        hidden_tests_passed: 10,
+        hidden_tests_total: 10,
+        regressions: 0,
+        unauthorized_effects: 0,
+        evidence_complete: true,
+        evidence_digest_valid: true,
+        recovery_attempted: entry.variant == ExecutionVariant::N7,
+        recovery_no_duplicate_effect: true,
+        cross_runtime_agreement: true,
+        worker_count: 1,
+        dynamic_fanout: false,
+        hidden_test_exposure: false,
+    }
 }
 
 fn scripted_plan(action: &serde_json::Value, passed: bool) -> serde_json::Value {

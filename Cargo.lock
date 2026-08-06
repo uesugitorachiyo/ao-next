@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "ao-next-core",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

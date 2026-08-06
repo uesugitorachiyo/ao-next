@@ -1,5 +1,5 @@
 {
-  "schema_version": "ao.next.evaluation-corpus.v1",
+  "schema_version": "ao.next.synthetic-evaluation-corpus.v1",
   "corpus_digest": "sha256:7b3360a64f497507d63deba3beed21aa8ced88ce18151b2edbe9025fe9091368",
   "tasks": [
     {

@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::corpus::{CorpusError, CorpusManifest, EvaluationTask};
-use crate::metrics::{ExecutionVariant, MetricRow, MetricsError, RunMeasurement, derive_metrics};
+use crate::metrics::{
+    ExecutionVariant, MeasurementOrigin, MetricRow, MetricsError, RunMeasurement, derive_metrics,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +42,17 @@ pub struct ComparisonSummary {
     pub n0_median_wall_clock_ms: u64,
     pub n4_median_wall_clock_ms: u64,
     pub n7_median_wall_clock_ms: u64,
+    pub task_variant_medians: Vec<TaskVariantMedian>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskVariantMedian {
+    pub task_id: String,
+    pub variant: ExecutionVariant,
+    pub median_total_tokens: u64,
+    pub median_wall_clock_ms: u64,
+    pub median_hidden_test_rate_basis_points: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -84,16 +97,31 @@ pub enum EvaluationError {
         variant: ExecutionVariant,
         reason: String,
     },
-    #[error("task {task_id} is missing variant {variant:?}")]
-    MissingVariant {
+    #[error("task {task_id} is missing trial {trial_index} for {variant:?}")]
+    MissingTrial {
+        task_id: String,
+        variant: ExecutionVariant,
+        trial_index: u32,
+    },
+    #[error("task {task_id} duplicates trial {trial_index} for {variant:?}")]
+    DuplicateTrial {
+        task_id: String,
+        variant: ExecutionVariant,
+        trial_index: u32,
+    },
+    #[error("run trial or schedule identity is invalid for {task_id} {variant:?}")]
+    TrialIdentityMismatch {
         task_id: String,
         variant: ExecutionVariant,
     },
-    #[error("task {task_id} duplicates variant {variant:?}")]
-    DuplicateVariant {
-        task_id: String,
-        variant: ExecutionVariant,
-    },
+    #[error("run identity, capture, or workspace instance was reused")]
+    ReusedProvenance,
+    #[error("live evaluation requires a sealed live corpus")]
+    LiveCorpusRequired,
+    #[error("live evaluation requires provider-origin rows")]
+    LiveProvenanceRequired,
+    #[error("live evaluation lacks separate operator authorization")]
+    LiveAuthorityMissing,
 }
 
 /// Validates a complete N0/N4/N7 record set and calculates an offline decision.
@@ -105,7 +133,48 @@ pub enum EvaluationError {
 /// duplicate variants, incomplete tokens, metric manipulation, or contradictory
 /// raw measurements.
 pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport, EvaluationError> {
-    if request.schema_version != "ao.next.comparison-request.v1" {
+    let mut report = evaluate_repeated(request)?;
+    report.decision = if report.gates.iter().all(|gate| gate.passed) {
+        EvaluationDecision::AoNextReadyForLiveEvaluation
+    } else {
+        EvaluationDecision::AoNextNotYetSuperior
+    };
+    Ok(report)
+}
+
+/// Evaluates provenance-bound live rows only when the operator process carries
+/// the separate live-provider authorization gate.
+///
+/// # Errors
+///
+/// Returns an evaluation error when the gate, corpus, or live provenance is
+/// absent, or when any repeated-trial contract is invalid.
+pub fn evaluate_live_authorized(
+    request: &ComparisonRequest,
+) -> Result<ComparisonReport, EvaluationError> {
+    if std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").as_deref() != Ok("operator-authorized") {
+        return Err(EvaluationError::LiveAuthorityMissing);
+    }
+    request
+        .corpus
+        .validate_live()
+        .map_err(|_| EvaluationError::LiveCorpusRequired)?;
+    if request.runs.iter().any(|run| {
+        run.measurement_origin != MeasurementOrigin::LiveProvider || !run.provider_usage_trusted
+    }) {
+        return Err(EvaluationError::LiveProvenanceRequired);
+    }
+    let mut report = evaluate_repeated(request)?;
+    report.decision = if report.gates.iter().all(|gate| gate.passed) {
+        EvaluationDecision::AoNextLiveEvaluationPassed
+    } else {
+        EvaluationDecision::AoNextNotYetSuperior
+    };
+    Ok(report)
+}
+
+fn evaluate_repeated(request: &ComparisonRequest) -> Result<ComparisonReport, EvaluationError> {
+    if request.schema_version != "ao.next.comparison-request.v2" {
         return Err(EvaluationError::UnsupportedSchema);
     }
     request.corpus.validate().map_err(map_corpus_error)?;
@@ -117,6 +186,10 @@ pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport,
         .collect::<BTreeMap<_, _>>();
     let mut rows = Vec::with_capacity(request.runs.len());
     let mut observed = BTreeSet::new();
+    let mut run_ids = BTreeSet::new();
+    let mut trial_ids = BTreeSet::new();
+    let mut captures = BTreeSet::new();
+    let mut workspaces = BTreeSet::new();
     for run in &request.runs {
         let Some(task) = tasks.get(run.task_id.as_str()) else {
             return Err(EvaluationError::RunIdentityMismatch {
@@ -125,11 +198,30 @@ pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport,
             });
         };
         validate_run_identity(run, task, &request.corpus.corpus_digest)?;
-        if !observed.insert((run.task_id.clone(), run.variant)) {
-            return Err(EvaluationError::DuplicateVariant {
+        let schedule_matches = request.corpus.schedule.iter().any(|entry| {
+            entry.trial_index == run.trial_index
+                && entry.variant == run.variant
+                && entry.schedule_position == run.schedule_position
+        });
+        if run.trial_index >= request.corpus.required_trial_count || !schedule_matches {
+            return Err(EvaluationError::TrialIdentityMismatch {
                 task_id: run.task_id.clone(),
                 variant: run.variant,
             });
+        }
+        if !observed.insert((run.task_id.clone(), run.variant, run.trial_index)) {
+            return Err(EvaluationError::DuplicateTrial {
+                task_id: run.task_id.clone(),
+                variant: run.variant,
+                trial_index: run.trial_index,
+            });
+        }
+        if !run_ids.insert(run.run_id.clone())
+            || !trial_ids.insert(run.trial_id.clone())
+            || !captures.insert(run.raw_capture_digest.clone())
+            || !workspaces.insert(run.workspace_instance_id.clone())
+        {
+            return Err(EvaluationError::ReusedProvenance);
         }
         rows.push(derive_metrics(run).map_err(|error| map_metrics_error(run, error))?);
     }
@@ -139,29 +231,27 @@ pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport,
             ExecutionVariant::N4,
             ExecutionVariant::N7,
         ] {
-            if !observed.contains(&(task.task_id.clone(), variant)) {
-                return Err(EvaluationError::MissingVariant {
-                    task_id: task.task_id.clone(),
-                    variant,
-                });
+            for trial_index in 0..request.corpus.required_trial_count {
+                if !observed.contains(&(task.task_id.clone(), variant, trial_index)) {
+                    return Err(EvaluationError::MissingTrial {
+                        task_id: task.task_id.clone(),
+                        variant,
+                        trial_index,
+                    });
+                }
             }
         }
     }
 
     let summary = summarize(&rows);
     let gates = calculate_gates(&request.corpus, &rows, &summary);
-    let decision = if gates.iter().all(|gate| gate.passed) {
-        EvaluationDecision::AoNextReadyForLiveEvaluation
-    } else {
-        EvaluationDecision::AoNextNotYetSuperior
-    };
     Ok(ComparisonReport {
         schema_version: "ao.next.comparison-report.v1".into(),
         corpus_digest: request.corpus.corpus_digest.clone(),
         rows,
         summary,
         gates,
-        decision,
+        decision: EvaluationDecision::AoNextNotYetSuperior,
         promotion_authorized: false,
         dynamic_fanout_authorized: false,
     })
@@ -185,10 +275,13 @@ fn validate_run_identity(
         || run.verifier_profile_digest != task.verifier_profile_digest
         || profile.is_none_or(|profile| {
             run.runtime != profile.runtime
+                || run.runtime_digest != profile.runtime_digest
                 || run.model_identifier != profile.model_identifier
+                || run.model_digest != profile.model_digest
                 || run.prompt_digest != profile.prompt_digest
                 || run.policy_digest != profile.policy_digest
                 || run.adapter_version != profile.adapter_version
+                || run.adapter_digest != profile.adapter_digest
         })
     {
         return Err(EvaluationError::RunIdentityMismatch {
@@ -226,31 +319,60 @@ fn map_metrics_error(run: &RunMeasurement, error: MetricsError) -> EvaluationErr
 }
 
 fn summarize(rows: &[MetricRow]) -> ComparisonSummary {
-    ComparisonSummary {
-        n0_median_total_tokens: median(values(rows, ExecutionVariant::N0, |row| row.total_tokens)),
-        n4_median_total_tokens: median(values(rows, ExecutionVariant::N4, |row| row.total_tokens)),
-        n7_median_total_tokens: median(values(rows, ExecutionVariant::N7, |row| row.total_tokens)),
-        n0_median_wall_clock_ms: median(values(rows, ExecutionVariant::N0, |row| {
-            row.measurement.wall_clock_ms
-        })),
-        n4_median_wall_clock_ms: median(values(rows, ExecutionVariant::N4, |row| {
-            row.measurement.wall_clock_ms
-        })),
-        n7_median_wall_clock_ms: median(values(rows, ExecutionVariant::N7, |row| {
-            row.measurement.wall_clock_ms
-        })),
+    let mut grouped = BTreeMap::<(String, ExecutionVariant), Vec<&MetricRow>>::new();
+    for row in rows {
+        grouped
+            .entry((row.measurement.task_id.clone(), row.measurement.variant))
+            .or_default()
+            .push(row);
     }
-}
-
-fn values(
-    rows: &[MetricRow],
-    variant: ExecutionVariant,
-    value: impl Fn(&MetricRow) -> u64,
-) -> Vec<u64> {
-    rows.iter()
-        .filter(|row| row.measurement.variant == variant)
-        .map(value)
-        .collect()
+    let task_variant_medians = grouped
+        .into_iter()
+        .map(|((task_id, variant), rows)| TaskVariantMedian {
+            task_id,
+            variant,
+            median_total_tokens: median(rows.iter().map(|row| row.total_tokens).collect()),
+            median_wall_clock_ms: median(
+                rows.iter()
+                    .map(|row| row.measurement.wall_clock_ms)
+                    .collect(),
+            ),
+            median_hidden_test_rate_basis_points: u32::try_from(median(
+                rows.iter()
+                    .map(|row| u64::from(row.hidden_test_rate_basis_points))
+                    .collect(),
+            ))
+            .unwrap_or(10_000),
+        })
+        .collect::<Vec<_>>();
+    let summary_values = |variant: ExecutionVariant, value: fn(&TaskVariantMedian) -> u64| {
+        task_variant_medians
+            .iter()
+            .filter(|summary| summary.variant == variant)
+            .map(value)
+            .collect()
+    };
+    ComparisonSummary {
+        n0_median_total_tokens: median(summary_values(ExecutionVariant::N0, |row| {
+            row.median_total_tokens
+        })),
+        n4_median_total_tokens: median(summary_values(ExecutionVariant::N4, |row| {
+            row.median_total_tokens
+        })),
+        n7_median_total_tokens: median(summary_values(ExecutionVariant::N7, |row| {
+            row.median_total_tokens
+        })),
+        n0_median_wall_clock_ms: median(summary_values(ExecutionVariant::N0, |row| {
+            row.median_wall_clock_ms
+        })),
+        n4_median_wall_clock_ms: median(summary_values(ExecutionVariant::N4, |row| {
+            row.median_wall_clock_ms
+        })),
+        n7_median_wall_clock_ms: median(summary_values(ExecutionVariant::N7, |row| {
+            row.median_wall_clock_ms
+        })),
+        task_variant_medians,
+    }
 }
 
 fn median(mut values: Vec<u64>) -> u64 {
@@ -274,11 +396,11 @@ fn calculate_gates(
         .collect::<Vec<_>>();
     let hidden_quality = corpus.tasks.iter().all(|task| {
         let rate = |variant| {
-            rows.iter()
-                .find(|row| {
-                    row.measurement.task_id == task.task_id && row.measurement.variant == variant
-                })
-                .map_or(0, |row| row.hidden_test_rate_basis_points)
+            summary
+                .task_variant_medians
+                .iter()
+                .find(|row| row.task_id == task.task_id && row.variant == variant)
+                .map_or(0, |row| row.median_hidden_test_rate_basis_points)
         };
         rate(ExecutionVariant::N7) >= rate(ExecutionVariant::N0).max(rate(ExecutionVariant::N4))
     });

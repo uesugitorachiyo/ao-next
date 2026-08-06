@@ -7,15 +7,33 @@ use thiserror::Error;
 
 use crate::metrics::ExecutionVariant;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusKind {
+    SyntheticUnitTest,
+    SealedLive,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleEntry {
+    pub trial_index: u32,
+    pub schedule_position: u32,
+    pub variant: ExecutionVariant,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantProfile {
     pub variant: ExecutionVariant,
     pub runtime: String,
+    pub runtime_digest: Digest,
     pub model_identifier: String,
+    pub model_digest: Digest,
     pub prompt_digest: Digest,
     pub policy_digest: Digest,
     pub adapter_version: String,
+    pub adapter_digest: Digest,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,7 +54,10 @@ pub struct EvaluationTask {
 #[serde(deny_unknown_fields)]
 pub struct CorpusManifest {
     pub schema_version: String,
+    pub corpus_kind: CorpusKind,
     pub corpus_digest: Digest,
+    pub required_trial_count: u32,
+    pub schedule: Vec<ScheduleEntry>,
     pub tasks: Vec<EvaluationTask>,
 }
 
@@ -52,6 +73,10 @@ pub enum CorpusError {
     EmptyTaskKind(String),
     #[error("evaluation corpus task has incomplete or duplicate variant profiles: {0}")]
     InvalidVariantProfiles(String),
+    #[error("evaluation corpus trial schedule is invalid")]
+    InvalidSchedule,
+    #[error("live evaluation corpus contains a placeholder identity: {0}")]
+    PlaceholderIdentity(String),
     #[error("evaluation corpus digest mismatch: expected {expected}, observed {observed}")]
     DigestMismatch { expected: Digest, observed: Digest },
     #[error("strict JSON failure: {0}")]
@@ -59,6 +84,21 @@ pub enum CorpusError {
 }
 
 impl CorpusManifest {
+    /// Calculates the digest over the corpus classification, trial schedule,
+    /// and ordered task list.
+    ///
+    /// # Errors
+    ///
+    /// Returns a strict JSON error when canonical serialization fails.
+    pub fn calculated_digest(&self) -> Result<Digest, CorpusError> {
+        Ok(canonical_digest(&(
+            self.corpus_kind,
+            self.required_trial_count,
+            &self.schedule,
+            &self.tasks,
+        ))?)
+    }
+
     /// Verifies the schema, task identities, and exact digest of the ordered
     /// sealed task list.
     ///
@@ -67,11 +107,14 @@ impl CorpusManifest {
     /// Returns [`CorpusError`] for schema drift, empty/duplicate tasks, or a
     /// changed corpus digest.
     pub fn validate(&self) -> Result<(), CorpusError> {
-        if self.schema_version != "ao.next.evaluation-corpus.v1" {
+        if self.schema_version != "ao.next.evaluation-corpus.v2" {
             return Err(CorpusError::UnsupportedSchema);
         }
         if self.tasks.is_empty() {
             return Err(CorpusError::Empty);
+        }
+        if self.required_trial_count != 3 || self.schedule != counterbalanced_schedule() {
+            return Err(CorpusError::InvalidSchedule);
         }
         let mut ids = BTreeSet::new();
         for task in &self.tasks {
@@ -102,7 +145,7 @@ impl CorpusManifest {
                 return Err(CorpusError::InvalidVariantProfiles(task.task_id.clone()));
             }
         }
-        let observed = canonical_digest(&self.tasks)?;
+        let observed = self.calculated_digest()?;
         if observed != self.corpus_digest {
             return Err(CorpusError::DigestMismatch {
                 expected: self.corpus_digest.clone(),
@@ -111,4 +154,98 @@ impl CorpusManifest {
         }
         Ok(())
     }
+
+    /// Applies the stricter corpus rules required before a live-passed
+    /// evaluation is even considered.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corpus error for a non-live corpus, placeholder digests or
+    /// fixture identities, or a task set other than the three sealed tasks.
+    pub fn validate_live(&self) -> Result<(), CorpusError> {
+        self.validate()?;
+        let expected_tasks = BTreeSet::from([
+            "artifact-reconciliation",
+            "bounded-defect-repair",
+            "greenfield-engineering-app",
+        ]);
+        let observed_tasks = self
+            .tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if self.corpus_kind != CorpusKind::SealedLive || observed_tasks != expected_tasks {
+            return Err(CorpusError::PlaceholderIdentity(
+                "corpus classification".into(),
+            ));
+        }
+        for task in &self.tasks {
+            let task_digests = [
+                &task.source_digest,
+                &task.objective_digest,
+                &task.workspace_seed_digest,
+                &task.visible_fixtures_digest,
+                &task.hidden_tests_digest,
+                &task.verifier_profile_digest,
+            ];
+            if task_digests.into_iter().any(is_placeholder_digest) {
+                return Err(CorpusError::PlaceholderIdentity(task.task_id.clone()));
+            }
+            for profile in &task.variant_profiles {
+                if profile.runtime.contains("fixture")
+                    || profile.model_identifier.contains("fixture")
+                    || profile.adapter_version.contains("fixture")
+                    || [
+                        &profile.runtime_digest,
+                        &profile.model_digest,
+                        &profile.prompt_digest,
+                        &profile.policy_digest,
+                        &profile.adapter_digest,
+                    ]
+                    .into_iter()
+                    .any(is_placeholder_digest)
+                {
+                    return Err(CorpusError::PlaceholderIdentity(format!(
+                        "{}:{:?}",
+                        task.task_id, profile.variant
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[must_use]
+pub fn counterbalanced_schedule() -> Vec<ScheduleEntry> {
+    vec![
+        schedule_entry(0, 0, ExecutionVariant::N0),
+        schedule_entry(0, 1, ExecutionVariant::N4),
+        schedule_entry(0, 2, ExecutionVariant::N7),
+        schedule_entry(1, 3, ExecutionVariant::N4),
+        schedule_entry(1, 4, ExecutionVariant::N7),
+        schedule_entry(1, 5, ExecutionVariant::N0),
+        schedule_entry(2, 6, ExecutionVariant::N7),
+        schedule_entry(2, 7, ExecutionVariant::N0),
+        schedule_entry(2, 8, ExecutionVariant::N4),
+    ]
+}
+
+const fn schedule_entry(
+    trial_index: u32,
+    schedule_position: u32,
+    variant: ExecutionVariant,
+) -> ScheduleEntry {
+    ScheduleEntry {
+        trial_index,
+        schedule_position,
+        variant,
+    }
+}
+
+fn is_placeholder_digest(digest: &Digest) -> bool {
+    let bytes = &digest.as_str().as_bytes()[7..];
+    bytes
+        .first()
+        .is_some_and(|first| bytes.iter().all(|byte| byte == first))
 }

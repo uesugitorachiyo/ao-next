@@ -23,6 +23,8 @@ AO Next is not established as superior, production-ready, released, published, d
 - Deny network, credentials, remote mutation, release, deployment, publication, and other external effects unless a later operator-authored authority envelope separately grants the exact capability.
 - Keep provider transcripts, credentials, account identifiers, private paths, and unredacted workspace content out of tracked files.
 - Live provider calls, GitHub publication, releases, deployments, credential changes, AO migration, and production-readiness claims require separate explicit authority.
+- `run-live` and `run-direct-baseline` must check `AO_NEXT_LIVE_PROVIDER_CALLS=operator-authorized` before resolving input or starting a process. Tests use injected fake runners and must not set this gate.
+- Keep sealed hidden tests outside worker workspaces and authority roots. Never copy hidden bytes or paths into prompts, effect observations, logs, or public evidence.
 
 ## Working Method
 
@@ -49,4 +51,4 @@ Run schema drift, deterministic replay, recovery, Mission compatibility, and ind
 
 ## Completion
 
-Local completion requires every local contract, negative fixture, verifier, evidence, recovery, CLI, adapter, evaluation, manifest, and reconciliation gate to pass at one exact source head. The honest local terminal state is `AO_NEXT_READY_FOR_LIVE_EVALUATION`; it does not imply superiority or live evaluation success.
+Local harness completion requires every local contract, negative fixture, verifier, evidence, recovery, CLI, adapter, corpus, repeated-trial, manifest, and reconciliation gate to pass at one exact source head. The terminal state `AO_NEXT_LIVE_HARNESS_READY` means only that a separately authorized live pilot can begin. It does not imply superiority, promotion, production readiness, or a live evaluation result.

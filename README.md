@@ -12,9 +12,9 @@ The Rust workspace contains:
 - `ao-next-cli`: operator commands and machine-readable output without policy decisions.
 - `ao-next-eval`: sealed offline comparison records for N0, N4, and N7.
 
-[Codex and Claude runtime adapters](docs/runtime-adapters.md) are locally contract-tested without provider calls. Their live smoke tests remain ignored behind a separate operator-only authorization gate.
+[Codex and Claude runtime adapters](docs/runtime-adapters.md) are locally contract-tested without provider calls. `run-live` executes N7 through the one-worker engine; `run-direct-baseline` executes N4 through native Codex. Both commands stop before input resolution or process spawn unless `AO_NEXT_LIVE_PROVIDER_CALLS` is exactly `operator-authorized` in the operator process.
 
-The [offline evaluation policy](docs/evaluation/decision-policy.md) compares sealed N0/N4/N7 rows and can conclude only `AO_NEXT_NOT_YET_SUPERIOR` or `AO_NEXT_READY_FOR_LIVE_EVALUATION`. It cannot authorize promotion, fan-out, or a live-passed result.
+The [offline evaluation policy](docs/evaluation/decision-policy.md) compares three trials per task and variant. Offline and fake-process records can conclude only `AO_NEXT_NOT_YET_SUPERIOR` or `AO_NEXT_READY_FOR_LIVE_EVALUATION`. They cannot authorize promotion, fan-out, or a live-passed result.
 
 ## Local Verification
 
@@ -28,8 +28,10 @@ git diff --check
 
 ## Operator CLI
 
-`ao-next run` executes only an explicitly supplied offline scripted plan. `inspect` validates a terminal readback, `verify-evidence` independently audits a sealed run, and `replay` computes a recovery plan without executing pending effects. `evaluate` is reserved for the sealed phase-9 comparison harness. Every command writes one JSON value to stdout and a concise operator summary to stderr.
+`ao-next run` executes only an explicitly supplied offline scripted plan. `inspect` validates a terminal readback, `verify-evidence` independently audits a sealed run, and `replay` computes a recovery plan without executing pending effects. `verify-corpus` checks the strict live-corpus identity and digest. `evaluate` validates a complete repeated-trial comparison but cannot emit a live-passed decision.
+
+The provider-gated `run-live` and `run-direct-baseline` commands accept one [strict sealed-trial input](docs/live-evaluation-harness.md). They write one digest-bound run record to stdout and a concise summary to stderr. Tests call the internal execution path with injected fake runners; they never set the live-provider gate.
 
 AO Mission's current canonical terminal-index consumer requires lease, root, and lineage evidence that a single AO Next readback does not contain. [The bounded compatibility proposal](docs/mission-compatibility.md) defines a separate read-only, digest-idempotent importer; this candidate does not change Mission or fabricate the missing artifacts.
 
-Local qualification may establish only `AO_NEXT_READY_FOR_LIVE_EVALUATION`. Live runtime measurements and any replacement decision require separate authorization and evidence.
+Offline harness qualification may establish `AO_NEXT_LIVE_HARNESS_READY`. This means the harness is ready for a separately authorized pilot. It is not a live result, a superiority finding, or permission to replace current AO.

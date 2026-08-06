@@ -101,7 +101,13 @@ pub fn execute(args: &LiveRunArgs, variant: LiveVariant) -> Result<CommandOutput
         ));
     }
     let input: LiveRunInput = decode_file(&args.input)?;
-    execute_with_runners(&input, variant, BoundedProcessRunner, BoundedProcessRunner)
+    execute_with_runners(
+        &input,
+        variant,
+        MeasurementOrigin::LiveProvider,
+        BoundedProcessRunner,
+        BoundedProcessRunner,
+    )
 }
 
 #[allow(
@@ -111,6 +117,7 @@ pub fn execute(args: &LiveRunArgs, variant: LiveVariant) -> Result<CommandOutput
 fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     input: &LiveRunInput,
     variant: LiveVariant,
+    measurement_origin: MeasurementOrigin,
     provider_runner: P,
     verifier_runner: V,
 ) -> Result<CommandOutput, CommandFailure> {
@@ -222,7 +229,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         policy_digest: validated.profile.policy_digest.clone(),
         adapter_version: validated.profile.adapter_version.clone(),
         adapter_digest: validated.profile.adapter_digest.clone(),
-        measurement_origin: MeasurementOrigin::LiveProvider,
+        measurement_origin,
         provider_usage_trusted: !captures.is_empty(),
         tokens: TokenRow {
             input_tokens: Some(usage.input_tokens),
@@ -1037,6 +1044,7 @@ mod tests {
         let output = execute_with_runners(
             &n4.input,
             LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
             FakeProvider {
                 outputs: VecDeque::from([codex_output(None)]),
                 direct_write: Some(n4.product.clone()),
@@ -1049,6 +1057,10 @@ mod tests {
         assert_eq!(output.value["terminal_state"], "passed");
         assert_eq!(output.value["measurement"]["variant"], "N4");
         assert_eq!(output.value["measurement"]["provider_usage_trusted"], true);
+        assert_eq!(
+            output.value["measurement"]["measurement_origin"],
+            "offline_fixture"
+        );
         assert_eq!(output.value["measurement"]["hidden_tests_passed"], 1);
         assert_eq!(output.value["measurement"]["worker_count"], 1);
         assert_eq!(output.value["measurement"]["dynamic_fanout"], false);
@@ -1085,6 +1097,7 @@ mod tests {
         let output = execute_with_runners(
             &n7.input,
             LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
             FakeProvider {
                 outputs: VecDeque::from([codex_output(Some(&turn))]),
                 direct_write: None,
@@ -1110,6 +1123,7 @@ mod tests {
         let error = execute_with_runners(
             &drift.input,
             LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
             FakeProvider {
                 outputs: VecDeque::new(),
                 direct_write: None,
@@ -1130,6 +1144,7 @@ mod tests {
         let error = execute_with_runners(
             &exposed_authority.input,
             LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
             FakeProvider {
                 outputs: VecDeque::new(),
                 direct_write: None,
@@ -1147,6 +1162,7 @@ mod tests {
         let output = execute_with_runners(
             &leaked.input,
             LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
             FakeProvider {
                 outputs: VecDeque::from([codex_output(None)]),
                 direct_write: Some(leaked.product.clone()),

@@ -482,6 +482,7 @@ fn validate_input(
     {
         return Err(CommandFailure::invalid_input("hidden-test fixture drifted"));
     }
+    ensure_outside_roots(&input.hidden_tests, &input.request.authority.allowed_roots)?;
     ensure_bounded_regular_under_roots(
         &input.output_schema,
         &input.request.authority.allowed_roots,
@@ -493,6 +494,21 @@ fn validate_input(
         initial_files,
         hidden_file_digests: hidden.into_iter().map(|entry| entry.sha256).collect(),
     })
+}
+
+fn ensure_outside_roots(path: &Path, roots: &[PathBuf]) -> Result<(), CommandFailure> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    for root in roots {
+        let canonical_root = std::fs::canonicalize(root)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if canonical.starts_with(canonical_root) {
+            return Err(CommandFailure::invalid_input(
+                "hidden-test root is reachable through worker authority",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn runtime_matches_profile(
@@ -764,12 +780,14 @@ mod tests {
     fn fixture(variant: LiveVariant) -> Fixture {
         let root = TempDir::new().expect("temporary");
         let workspace = root.path().join("workspace");
+        let protected = root.path().join("protected");
         let controls = root.path().join("controls");
-        let visible = controls.join("visible");
-        let hidden = controls.join("hidden");
+        let visible = protected.join("visible");
+        let hidden = protected.join("hidden");
         std::fs::create_dir_all(&workspace).expect("workspace");
         std::fs::create_dir_all(&visible).expect("visible");
         std::fs::create_dir_all(&hidden).expect("hidden");
+        std::fs::create_dir_all(&controls).expect("controls");
         std::fs::write(visible.join("example.txt"), b"visible\n").expect("visible fixture");
         std::fs::write(
             hidden.join("test_product.py"),
@@ -777,7 +795,7 @@ mod tests {
         )
         .expect("hidden fixture");
         let objective_text = "Create product.txt containing ready followed by a newline.";
-        let objective_path = controls.join("objective.md");
+        let objective_path = protected.join("objective.md");
         std::fs::write(&objective_path, objective_text).expect("objective");
         let output_schema = controls.join("turn.schema.json");
         std::fs::write(&output_schema, b"{\"type\":\"object\"}").expect("schema");
@@ -791,7 +809,7 @@ mod tests {
             files: workspace_files,
         };
         let source_digest = canonical_digest(&source_snapshot).expect("source digest");
-        let source_path = controls.join("source-snapshot.json");
+        let source_path = protected.join("source-snapshot.json");
         std::fs::write(
             &source_path,
             serde_json::to_vec(&source_snapshot).expect("source JSON"),
@@ -1100,6 +1118,27 @@ mod tests {
         )
         .expect_err("policy drift");
         assert_eq!(error.code, "invalid_input");
+
+        let mut exposed_authority = fixture(LiveVariant::N7);
+        exposed_authority
+            .input
+            .request
+            .authority
+            .allowed_roots
+            .push(exposed_authority.input.hidden_tests.clone());
+        let error = execute_with_runners(
+            &exposed_authority.input,
+            LiveVariant::N7,
+            FakeProvider {
+                outputs: VecDeque::new(),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect_err("hidden authority exposure");
+        assert_eq!(error.code, "invalid_input");
+        assert!(error.message.contains("hidden-test root"));
 
         let leaked = fixture(LiveVariant::N4);
         let hidden_bytes =

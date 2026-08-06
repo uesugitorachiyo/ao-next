@@ -3273,6 +3273,53 @@ mod tests {
     }
 
     #[test]
+    fn real_provider_free_ao2_qualification_from_bound_input() {
+        let Some(input_path) = std::env::var_os("AO_NEXT_PROVIDER_FREE_INPUT") else {
+            return;
+        };
+        assert!(std::env::var_os("AO_NEXT_LIVE_PROVIDER_CALLS").is_none());
+        let variant = match std::env::var("AO_NEXT_PROVIDER_FREE_VARIANT").as_deref() {
+            Ok("N0") => LiveVariant::N0,
+            Ok("N4") => LiveVariant::N4,
+            Ok("N7") => LiveVariant::N7,
+            _ => panic!("AO_NEXT_PROVIDER_FREE_VARIANT must be N0, N4, or N7"),
+        };
+        let input: LiveRunInput = decode_file(Path::new(&input_path)).expect("bound offline input");
+        let output = execute_with_runners(
+            &input,
+            variant,
+            MeasurementOrigin::OfflineFixture,
+            BoundedProcessRunner,
+            BoundedProcessRunner,
+        )
+        .expect("real provider-free control path");
+        assert_eq!(output.status, 0);
+        assert_eq!(
+            output.value["measurement"]["measurement_origin"],
+            "offline_fixture"
+        );
+        assert_eq!(output.value["measurement"]["task_success"], true);
+        assert_eq!(output.value["measurement"]["worker_count"], 1);
+        assert_eq!(output.value["measurement"]["dynamic_fanout"], false);
+        assert_eq!(
+            output.value["capture_digests"].as_array().map(Vec::len),
+            Some(1)
+        );
+        if variant == LiveVariant::N0 {
+            assert_eq!(
+                output.value["ao2_control_diagnostics"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(2)
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string(&output.value).expect("qualification record")
+        );
+    }
+
+    #[test]
     fn drift_and_hidden_material_copy_fail_closed() {
         let mut drift = fixture(LiveVariant::N7);
         drift.input.request.policy_digest = digest_bytes(b"drifted policy");

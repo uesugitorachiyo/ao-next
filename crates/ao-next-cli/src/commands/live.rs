@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -2666,7 +2665,7 @@ mod tests {
             let before = snapshot_tree(&workspace, 64 * 1024).expect("snapshot before Git");
             let identity = prepare_git_workspace(
                 &workspace,
-                &[workspace.clone()],
+                std::slice::from_ref(&workspace),
                 &digest_bytes(b"same seed"),
             )
             .expect("deterministic Git workspace");
@@ -2682,9 +2681,12 @@ mod tests {
         let empty_parent = TempDir::new().expect("empty workspace parent");
         let empty = empty_parent.path().join("empty");
         std::fs::create_dir(&empty).expect("empty workspace");
-        let empty_identity =
-            prepare_git_workspace(&empty, &[empty.clone()], &digest_bytes(b"same seed"))
-                .expect("allowed empty seed commit");
+        let empty_identity = prepare_git_workspace(
+            &empty,
+            std::slice::from_ref(&empty),
+            &digest_bytes(b"same seed"),
+        )
+        .expect("allowed empty seed commit");
         verify_git_workspace(&empty_identity, true).expect("empty seed is clean");
 
         let changed_parent = TempDir::new().expect("changed seed parent");
@@ -2693,7 +2695,7 @@ mod tests {
         std::fs::write(changed.join("product.txt"), b"sealed product\n").expect("sealed product");
         let changed_identity = prepare_git_workspace(
             &changed,
-            &[changed.clone()],
+            std::slice::from_ref(&changed),
             &digest_bytes(b"different seed"),
         )
         .expect("different seed workspace");
@@ -2729,9 +2731,12 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let error =
-                prepare_git_workspace(&workspace, &[workspace.clone()], &digest_bytes(b"seed"))
-                    .expect_err("unexpected Git metadata rejected");
+            let error = prepare_git_workspace(
+                &workspace,
+                std::slice::from_ref(&workspace),
+                &digest_bytes(b"seed"),
+            )
+            .expect_err("unexpected Git metadata rejected");
             assert!(error.message.contains("Git metadata"));
         }
 
@@ -2744,8 +2749,12 @@ mod tests {
             std::fs::create_dir(&workspace).expect("workspace");
             symlink(temporary.path(), workspace.join("nested-link")).expect("nested symlink");
             assert!(
-                prepare_git_workspace(&workspace, &[workspace.clone()], &digest_bytes(b"seed"))
-                    .is_err()
+                prepare_git_workspace(
+                    &workspace,
+                    std::slice::from_ref(&workspace),
+                    &digest_bytes(b"seed")
+                )
+                .is_err()
             );
 
             let link = temporary.path().join("workspace-link");
@@ -3142,7 +3151,7 @@ mod tests {
         assert!(checked_capture_path(interrupted.path(), "../escape").is_err());
         #[cfg(unix)]
         {
-            use std::os::unix::fs::symlink;
+            use std::os::unix::fs::{PermissionsExt as _, symlink};
 
             let symlink_root = TempDir::new().expect("symlink capture root");
             let target = symlink_root.path().join("target");
@@ -3151,7 +3160,6 @@ mod tests {
                 .expect("capture symlink");
             assert!(checked_capture_path(symlink_root.path(), "capture-000.stdout").is_err());
 
-            use std::os::unix::fs::PermissionsExt as _;
             let unsafe_root = fixture(LiveVariant::N4);
             std::fs::set_permissions(
                 &unsafe_root.input.raw_capture_root,

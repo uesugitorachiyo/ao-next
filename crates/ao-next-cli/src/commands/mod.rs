@@ -7,6 +7,7 @@ pub mod inspect;
 pub mod live;
 pub mod replay;
 pub mod run;
+pub mod verify_corpus;
 pub mod verify_evidence;
 
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
@@ -27,6 +28,7 @@ enum Command {
     VerifyEvidence(VerifyEvidenceArgs),
     Replay(ReplayArgs),
     Evaluate(EvaluateArgs),
+    VerifyCorpus(VerifyCorpusArgs),
 }
 
 #[derive(Debug, Args)]
@@ -75,6 +77,12 @@ pub struct ReplayArgs {
 pub struct EvaluateArgs {
     #[arg(long)]
     pub comparison: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyCorpusArgs {
+    #[arg(long)]
+    pub corpus: PathBuf,
 }
 
 #[derive(Debug)]
@@ -149,6 +157,7 @@ pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
         Command::VerifyEvidence(args) => verify_evidence::execute(&args),
         Command::Replay(args) => replay::execute(&args),
         Command::Evaluate(args) => evaluate::execute(&args),
+        Command::VerifyCorpus(args) => verify_corpus::execute(&args),
     }
 }
 

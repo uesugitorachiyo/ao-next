@@ -513,3 +513,65 @@ fn live_commands_deny_before_input_or_process_resolution() {
         }
     }
 }
+
+#[test]
+fn verify_corpus_accepts_a_digest_bound_live_manifest() {
+    let temporary = TempDir::new().expect("temporary");
+    let variants = [
+        (ExecutionVariant::N0, "current-ao", "current-ao-native-v1"),
+        (ExecutionVariant::N4, "codex", "native-codex-direct-v1"),
+        (ExecutionVariant::N7, "ao-next-codex", "ao-next-process-v1"),
+    ];
+    let tasks = [
+        "greenfield-engineering-app",
+        "bounded-defect-repair",
+        "artifact-reconciliation",
+    ]
+    .into_iter()
+    .map(|task_id| EvaluationTask {
+        task_id: task_id.into(),
+        task_kind: "sealed-local-task".into(),
+        source_digest: digest_bytes(format!("{task_id}:source").as_bytes()),
+        objective_digest: digest_bytes(format!("{task_id}:objective").as_bytes()),
+        workspace_seed_digest: digest_bytes(format!("{task_id}:seed").as_bytes()),
+        visible_fixtures_digest: digest_bytes(format!("{task_id}:visible").as_bytes()),
+        hidden_tests_digest: digest_bytes(format!("{task_id}:hidden").as_bytes()),
+        verifier_profile_digest: digest_bytes(format!("{task_id}:verifier").as_bytes()),
+        variant_profiles: variants
+            .iter()
+            .map(|(variant, runtime, adapter)| VariantProfile {
+                variant: *variant,
+                runtime: (*runtime).into(),
+                runtime_digest: digest_bytes(format!("{task_id}:{runtime}:runtime").as_bytes()),
+                model_identifier: "operator-selected-live-model".into(),
+                model_digest: digest_bytes(format!("{task_id}:{runtime}:model").as_bytes()),
+                prompt_digest: digest_bytes(format!("{task_id}:{runtime}:prompt").as_bytes()),
+                policy_digest: digest_bytes(format!("{task_id}:{runtime}:policy").as_bytes()),
+                adapter_version: (*adapter).into(),
+                adapter_digest: digest_bytes(format!("{task_id}:{runtime}:adapter").as_bytes()),
+            })
+            .collect(),
+    })
+    .collect();
+    let mut corpus = CorpusManifest {
+        schema_version: "ao.next.evaluation-corpus.v2".into(),
+        corpus_kind: CorpusKind::SealedLive,
+        corpus_digest: digest_bytes(b"unsealed-live-corpus"),
+        required_trial_count: 3,
+        schedule: counterbalanced_schedule(),
+        tasks,
+    };
+    corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
+    let path = temporary.path().join("corpus.json");
+    write_json(&path, &corpus);
+
+    let output = run(&["verify-corpus", "--corpus", path.to_str().expect("path")]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("machine JSON output");
+    assert_eq!(value["schema_version"], "ao.next.corpus-verification.v1");
+    assert_eq!(value["corpus_digest"], corpus.corpus_digest.as_str());
+    assert_eq!(value["task_count"], 3);
+    assert_eq!(value["required_trial_count"], 3);
+    assert_eq!(value["live_eligible"], true);
+}

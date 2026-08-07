@@ -7,6 +7,7 @@ use ao_next_core::adapter::process::{
 };
 use ao_next_core::adapter::{
     CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
+    TokenUsage,
 };
 use ao_next_core::contracts::{
     AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile, NetworkPolicy,
@@ -154,6 +155,53 @@ fn direct_capture_uses_only_the_trusted_runtime_envelope() {
         canonical_digest(&(0, stdout.as_slice(), b"bounded diagnostic".as_slice()))
             .expect("capture digest")
     );
+}
+
+#[test]
+fn four_counter_trusted_usage_total_uses_checked_arithmetic() {
+    let observed = TokenUsage {
+        input_tokens: 225_206,
+        cached_input_tokens: 193_792,
+        reasoning_tokens: 0,
+        output_tokens: 6_100,
+        output_bytes: 0,
+    };
+    assert_eq!(observed.checked_total_tokens(), Some(425_098));
+
+    let addition_overflow = TokenUsage {
+        input_tokens: u64::MAX,
+        cached_input_tokens: 1,
+        reasoning_tokens: 0,
+        output_tokens: 0,
+        output_bytes: 0,
+    };
+    assert_eq!(addition_overflow.checked_total_tokens(), None);
+}
+
+#[test]
+fn malformed_or_incomplete_trusted_usage_remains_rejected() {
+    let invalid = [
+        r#"{"type":"turn.completed","usage":{"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":-1,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":1.5,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":18446744073709551616,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"input_tokens":2,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}"#,
+        r#"{"type":"item.completed","item":{}}"#,
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1}}",
+    ];
+    for stdout in invalid {
+        let output = InvocationOutput {
+            status: 0,
+            stdout: format!("{stdout}\n").into_bytes(),
+            stderr: Vec::new(),
+        };
+        assert!(
+            capture_runtime_output("codex", &output, 4096).is_err(),
+            "invalid trusted usage was accepted: {stdout}"
+        );
+    }
 }
 
 #[test]

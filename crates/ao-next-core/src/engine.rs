@@ -193,7 +193,18 @@ where
                 }
             };
             metrics.turns = metrics.turns.saturating_add(1);
-            metrics.usage.accumulate(&turn.usage);
+            if metrics.usage.checked_accumulate(&turn.usage).is_none() {
+                return transition_and_finish(
+                    lifecycle,
+                    identity,
+                    metrics,
+                    events,
+                    verifier_report_digest,
+                    RunState::Failed,
+                    "token_limit",
+                    "adapter token usage overflowed",
+                );
+            }
             push_event(
                 &mut events,
                 &lifecycle,
@@ -201,7 +212,19 @@ where
                 Some(&identity.worker_id),
             );
 
-            if metrics.usage.total_tokens() > request.limits.max_tokens {
+            let Some(total_tokens) = metrics.usage.checked_total_tokens() else {
+                return transition_and_finish(
+                    lifecycle,
+                    identity,
+                    metrics,
+                    events,
+                    verifier_report_digest,
+                    RunState::Failed,
+                    "token_limit",
+                    "adapter token usage overflowed",
+                );
+            };
+            if total_tokens > request.limits.max_tokens {
                 return transition_and_finish(
                     lifecycle,
                     identity,

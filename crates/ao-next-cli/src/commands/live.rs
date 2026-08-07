@@ -6,10 +6,11 @@ use std::time::Instant;
 use ao_next_core::adapter::codex;
 use ao_next_core::adapter::process::{
     BoundedProcessRunner, ProcessAdapterConfig, ProcessRunner, ProcessRuntimeAdapter,
-    RuntimeCapture, capture_runtime_output,
+    RuntimeCapture, RuntimeEnvelopeCapture, capture_runtime_output,
 };
 use ao_next_core::adapter::{
     CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
+    TokenUsage,
 };
 use ao_next_core::contracts::{Digest, RunRequest, RunState};
 use ao_next_core::effects::LocalEffectBroker;
@@ -154,6 +155,9 @@ struct CaptureFirstRunner<R> {
     raw_capture_root: PathBuf,
     capture_context: CaptureContext,
     retained_index: Arc<Mutex<Option<Digest>>>,
+    retained_failure: Arc<Mutex<Option<CommandFailure>>>,
+    runtime: String,
+    max_tokens: u64,
 }
 
 impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
@@ -184,6 +188,28 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
             .retained_index
             .lock()
             .map_err(|error| InvocationError::Io(error.to_string()))? = Some(digest);
+        let expected_digest = self
+            .retained_index
+            .lock()
+            .map_err(|error| InvocationError::Io(error.to_string()))?
+            .clone()
+            .ok_or_else(|| InvocationError::Io("retained capture index is missing".into()))?;
+        if let Err(error) = verify_and_gate_capture(
+            &self.raw_capture_root,
+            &self.capture_context,
+            &expected_digest,
+            &self.runtime,
+            &output,
+            self.max_tokens,
+        ) {
+            *self
+                .retained_failure
+                .lock()
+                .map_err(|lock_error| InvocationError::Io(lock_error.to_string()))? = Some(error);
+            return Err(InvocationError::Io(
+                "retained provider capture failed the pre-control gate".into(),
+            ));
+        }
         Ok(output)
     }
 }
@@ -269,6 +295,150 @@ pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, Command
     ))
 }
 
+fn required_live_token_envelope(
+    context_limit: u64,
+    output_limit: u64,
+) -> Result<u64, CommandFailure> {
+    if context_limit == 0 || output_limit == 0 {
+        return Err(CommandFailure::invalid_input(
+            "live model context and output limits must be nonzero",
+        ));
+    }
+    context_limit
+        .checked_mul(2)
+        .and_then(|context| {
+            output_limit
+                .checked_mul(2)
+                .and_then(|output| context.checked_add(output))
+        })
+        .ok_or_else(|| CommandFailure::invalid_input("live token envelope overflowed"))
+}
+
+fn validate_live_token_envelope(request: &RunRequest) -> Result<(), CommandFailure> {
+    let required = required_live_token_envelope(
+        request.model_profile.context_limit,
+        request.model_profile.output_limit,
+    )?;
+    if request.limits.max_tokens < required {
+        return Err(CommandFailure::invalid_input(format!(
+            "sealed max_tokens {} is below the required live envelope {required}",
+            request.limits.max_tokens
+        )));
+    }
+    Ok(())
+}
+
+fn validate_trusted_usage(
+    usage: &TokenUsage,
+    max_tokens: u64,
+    capture_digest: &Digest,
+) -> Result<u64, CommandFailure> {
+    let failure = |reason: &str, message: &str, total_tokens: Option<u64>| {
+        CommandFailure::runtime_with_diagnostic(
+            message,
+            serde_json::json!({
+                "schema_version": "ao.next.trusted-usage-gate-diagnostic.v1",
+                "stage": "token-envelope",
+                "reason": reason,
+                "capture_digest": capture_digest,
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "cached_input_tokens": usage.cached_input_tokens,
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "total_tokens": total_tokens,
+                    "max_tokens": max_tokens,
+                }
+            }),
+        )
+    };
+    let Some(total_tokens) = usage.checked_total_tokens() else {
+        return Err(failure(
+            "arithmetic-overflow",
+            "trusted provider usage overflowed",
+            None,
+        ));
+    };
+    if usage.cached_input_tokens > usage.input_tokens {
+        return Err(failure(
+            "cached-input-exceeds-input",
+            "trusted cached input usage exceeds input usage",
+            Some(total_tokens),
+        ));
+    }
+    if usage.reasoning_tokens > usage.output_tokens {
+        return Err(failure(
+            "reasoning-exceeds-output",
+            "trusted reasoning usage exceeds output usage",
+            Some(total_tokens),
+        ));
+    }
+    if total_tokens > max_tokens {
+        return Err(failure(
+            "over-limit",
+            "trusted provider usage exceeded the sealed token limit",
+            Some(total_tokens),
+        ));
+    }
+    Ok(total_tokens)
+}
+
+fn verify_and_gate_capture(
+    root: &Path,
+    context: &CaptureContext,
+    expected_index_digest: &Digest,
+    runtime: &str,
+    output: &InvocationOutput,
+    max_tokens: u64,
+) -> Result<RuntimeEnvelopeCapture, CommandFailure> {
+    if let Err(error) = verify_raw_capture_index(
+        root,
+        context,
+        expected_index_digest,
+        context.maximum_output_bytes,
+    ) {
+        record_capture_terminal(root, context, &error, Some("evidence"))?;
+        return Err(error);
+    }
+    if output.status != 0 {
+        let error = CommandFailure::runtime(format!(
+            "provider output was retained with status {}",
+            output.status
+        ));
+        record_capture_terminal(root, context, &error, Some("provider"))?;
+        return Err(error);
+    }
+    let raw_capture_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let capture = match capture_runtime_output(
+        runtime,
+        output,
+        usize::try_from(context.maximum_output_bytes).unwrap_or(usize::MAX),
+    ) {
+        Ok(capture) => capture,
+        Err(adapter_error) => {
+            let error = CommandFailure::runtime_with_diagnostic(
+                "trusted provider usage envelope is invalid",
+                serde_json::json!({
+                    "schema_version": "ao.next.trusted-usage-gate-diagnostic.v1",
+                    "stage": "token-envelope",
+                    "reason": "malformed",
+                    "capture_digest": raw_capture_digest,
+                    "usage": null,
+                    "normalization_error": adapter_error.to_string(),
+                }),
+            );
+            record_capture_terminal(root, context, &error, Some("token-envelope"))?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_trusted_usage(&capture.usage, max_tokens, &raw_capture_digest) {
+        record_capture_terminal(root, context, &error, Some("token-envelope"))?;
+        return Err(error);
+    }
+    Ok(capture)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the run record is assembled once so every measured field remains visibly source-bound"
@@ -299,6 +469,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let retained_index = Arc::new(Mutex::new(None));
+    let retained_failure = Arc::new(Mutex::new(None));
     let capture_context = capture_context(input, variant);
     verify_git_workspace(&git_workspace, true)?;
 
@@ -318,6 +489,9 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
                 raw_capture_root: input.raw_capture_root.clone(),
                 capture_context: capture_context.clone(),
                 retained_index: retained_index.clone(),
+                retained_failure: retained_failure.clone(),
+                runtime: input.request.model_profile.runtime.clone(),
+                max_tokens: input.request.limits.max_tokens,
             },
             &mut verifier,
             cancellation.clone(),
@@ -330,6 +504,9 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
                 raw_capture_root: input.raw_capture_root.clone(),
                 capture_context: capture_context.clone(),
                 retained_index: retained_index.clone(),
+                retained_failure: retained_failure.clone(),
+                runtime: input.request.model_profile.runtime.clone(),
+                max_tokens: input.request.limits.max_tokens,
             },
             &mut verifier,
             &cancellation,
@@ -346,12 +523,29 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     ) = match execution {
         Ok(execution) => execution,
         Err(error) => {
-            if input.raw_capture_root.join("capture-index.json").is_file() {
+            let error = retained_failure
+                .lock()
+                .ok()
+                .and_then(|mut failure| failure.take())
+                .unwrap_or(error);
+            if input.raw_capture_root.join("capture-index.json").is_file()
+                && !input
+                    .raw_capture_root
+                    .join("capture-terminal.json")
+                    .exists()
+            {
                 record_capture_terminal(&input.raw_capture_root, &capture_context, &error, None)?;
             }
             return Err(error);
         }
     };
+    if let Some(error) = retained_failure
+        .lock()
+        .ok()
+        .and_then(|mut failure| failure.take())
+    {
+        return Err(error);
+    }
     let raw_capture_index_digest = retained_capture_index
         .or_else(|| retained_index.lock().ok().and_then(|value| value.clone()))
         .ok_or_else(|| CommandFailure::evidence("raw provider capture coverage is incomplete"))?;
@@ -413,13 +607,18 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         )
         .unwrap_or(u32::MAX)
     });
-    let usage = outcome.as_ref().map_or_else(
-        || sum_capture_usage(&captures),
-        |value| value.metrics.usage.clone(),
-    );
-    if usage.total_tokens() > input.request.limits.max_tokens {
-        return Err(CommandFailure::runtime(
-            "trusted provider usage exceeded the sealed token limit",
+    let usage = if let Some(outcome) = &outcome {
+        outcome.metrics.usage.clone()
+    } else {
+        checked_sum_capture_usage(&captures)
+            .ok_or_else(|| CommandFailure::runtime("trusted provider usage overflowed"))?
+    };
+    let total_tokens = usage
+        .checked_total_tokens()
+        .ok_or_else(|| CommandFailure::runtime("trusted provider usage overflowed"))?;
+    if total_tokens > input.request.limits.max_tokens {
+        return Err(CommandFailure::evidence(
+            "trusted provider usage changed after the pre-control gate",
         ));
     }
     let model_wait_ms = captures
@@ -509,7 +708,7 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
             cached_input_tokens: Some(usage.cached_input_tokens),
             reasoning_tokens: Some(usage.reasoning_tokens),
             output_tokens: Some(usage.output_tokens),
-            reported_total_tokens: usage.total_tokens(),
+            reported_total_tokens: total_tokens,
         },
         wall_clock_ms,
         model_wait_ms,
@@ -664,17 +863,14 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         &[],
         std::slice::from_ref(&provider_output),
     )?;
-    let Ok(capture) = capture_runtime_output("codex", &provider_output, limits.max_output_bytes)
-    else {
-        return Ok((
-            RunState::Failed,
-            None,
-            Vec::new(),
-            vec![provider_output],
-            Some(retained_capture_index),
-            Vec::new(),
-        ));
-    };
+    let capture = verify_and_gate_capture(
+        &input.raw_capture_root,
+        capture_context,
+        &retained_capture_index,
+        "codex",
+        &provider_output,
+        input.request.limits.max_tokens,
+    )?;
 
     let preview = run_current_ao_control(
         &mut process_runner,
@@ -1074,6 +1270,7 @@ fn validate_input(
             "live run input identity is invalid",
         ));
     }
+    validate_live_token_envelope(&input.request)?;
     input
         .corpus
         .validate_live()
@@ -1504,6 +1701,9 @@ fn record_capture_terminal(
         .chars()
         .take(1024)
         .collect::<String>();
+    let token_envelope = error.diagnostic.as_ref().filter(|diagnostic| {
+        diagnostic.get("stage").and_then(serde_json::Value::as_str) == Some("token-envelope")
+    });
     let terminal = serde_json::json!({
         "schema_version": "ao.next.raw-provider-capture-terminal.v1",
         "run_id": context.run_id,
@@ -1514,6 +1714,7 @@ fn record_capture_terminal(
         "message": message,
         "diagnostic_digest": error.diagnostic.as_ref().map(canonical_digest).transpose()
             .map_err(|failure| CommandFailure::evidence(failure.to_string()))?,
+        "token_envelope": token_envelope,
         "capture_index_digest": capture_index_digest,
     });
     let bytes = serde_json::to_vec(&terminal)
@@ -2156,42 +2357,39 @@ fn count_changed_files(before: &[SnapshotEntry], after: &[SnapshotEntry]) -> u32
     .unwrap_or(u32::MAX)
 }
 
-fn sum_capture_usage(captures: &[RuntimeCapture]) -> ao_next_core::adapter::TokenUsage {
-    captures.iter().fold(
-        ao_next_core::adapter::TokenUsage::default(),
-        |mut total, capture| {
-            total.input_tokens = total
-                .input_tokens
-                .saturating_add(capture.usage.input_tokens);
+fn checked_sum_capture_usage(captures: &[RuntimeCapture]) -> Option<TokenUsage> {
+    captures
+        .iter()
+        .try_fold(TokenUsage::default(), |mut total, capture| {
+            total.input_tokens = total.input_tokens.checked_add(capture.usage.input_tokens)?;
             total.cached_input_tokens = total
                 .cached_input_tokens
-                .saturating_add(capture.usage.cached_input_tokens);
+                .checked_add(capture.usage.cached_input_tokens)?;
             total.reasoning_tokens = total
                 .reasoning_tokens
-                .saturating_add(capture.usage.reasoning_tokens);
+                .checked_add(capture.usage.reasoning_tokens)?;
             total.output_tokens = total
                 .output_tokens
-                .saturating_add(capture.usage.output_tokens);
-            total.output_bytes = total
-                .output_bytes
-                .saturating_add(capture.usage.output_bytes);
-            total
-        },
-    )
+                .checked_add(capture.usage.output_tokens)?;
+            total.output_bytes = total.output_bytes.checked_add(capture.usage.output_bytes)?;
+            Some(total)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
     use std::process::Command;
+    use std::sync::{Arc, Mutex};
 
     use ao_next_core::adapter::{
         AdapterAction, AdapterTurn, InvocationError, InvocationOutput, PreparedInvocation,
         TokenUsage,
     };
     use ao_next_core::contracts::{
-        AuthorityEnvelope, Capability, ExternalEffectPolicy, ModelProfile, NetworkPolicy,
-        RunLimits, SourceIdentity, StructuredCommand, VerifierProfile, WorkspaceIdentity,
+        AuthorityEnvelope, Capability, EffectKind, EffectRequest, ExternalEffectPolicy,
+        ModelProfile, NetworkPolicy, RunLimits, SourceIdentity, StructuredCommand, VerifierProfile,
+        WorkspaceIdentity,
     };
     use ao_next_core::verifier::CommandVerifierEntry;
     use ao_next_eval::corpus::{CorpusKind, counterbalanced_schedule};
@@ -2248,6 +2446,24 @@ mod tests {
         inner: BoundedProcessRunner,
     }
 
+    #[derive(Default)]
+    struct InvocationCounts {
+        provider: u32,
+        preview: u32,
+        apply: u32,
+        verifier: u32,
+    }
+
+    struct CountingN0Runner {
+        outputs: VecDeque<InvocationOutput>,
+        counts: Arc<Mutex<InvocationCounts>>,
+        apply_product: Option<PathBuf>,
+    }
+
+    struct CountingVerifierRunner {
+        counts: Arc<Mutex<InvocationCounts>>,
+    }
+
     struct ProviderFreeRunner {
         program: PathBuf,
         inner: BoundedProcessRunner,
@@ -2264,6 +2480,44 @@ mod tests {
             _: &CancellationToken,
         ) -> Result<InvocationOutput, InvocationError> {
             self.result.take().expect("one fixed process result")
+        }
+    }
+
+    impl ProcessRunner for CountingN0Runner {
+        fn run(
+            &mut self,
+            invocation: &PreparedInvocation,
+            _: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            match invocation.args.get(1).map(String::as_str) {
+                Some("run") => self.counts.lock().expect("invocation counts").provider += 1,
+                Some("patch") if invocation.args.get(2).map(String::as_str) == Some("preview") => {
+                    self.counts.lock().expect("invocation counts").preview += 1;
+                }
+                Some("patch") if invocation.args.get(2).map(String::as_str) == Some("apply") => {
+                    self.counts.lock().expect("invocation counts").apply += 1;
+                    if let Some(product) = self.apply_product.take() {
+                        std::fs::write(product, b"ready\n").expect("applied product");
+                    }
+                }
+                _ => panic!("unexpected N0 invocation: {:?}", invocation.args),
+            }
+            Ok(self.outputs.pop_front().expect("N0 fixture output"))
+        }
+    }
+
+    impl ProcessRunner for CountingVerifierRunner {
+        fn run(
+            &mut self,
+            _: &PreparedInvocation,
+            _: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            self.counts.lock().expect("invocation counts").verifier += 1;
+            Ok(InvocationOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
         }
     }
 
@@ -2560,7 +2814,7 @@ mod tests {
                 max_run_ms: 10_000,
                 max_effect_timeout_ms: 5_000,
                 max_output_bytes: 64 * 1024,
-                max_tokens: 10_000,
+                max_tokens: 72_000,
             },
         };
         let schedule_position = match variant {
@@ -2626,6 +2880,16 @@ mod tests {
     }
 
     fn codex_output(turn: Option<&AdapterTurn>) -> InvocationOutput {
+        codex_output_with_usage(turn, 11, 3, 2, 2)
+    }
+
+    fn codex_output_with_usage(
+        turn: Option<&AdapterTurn>,
+        input_tokens: u64,
+        cached_input_tokens: u64,
+        reasoning_tokens: u64,
+        output_tokens: u64,
+    ) -> InvocationOutput {
         let mut lines = Vec::new();
         if let Some(turn) = turn {
             lines.push(
@@ -2643,10 +2907,10 @@ mod tests {
             serde_json::to_string(&serde_json::json!({
                 "type": "turn.completed",
                 "usage": {
-                    "input_tokens": 11,
-                    "cached_input_tokens": 3,
-                    "reasoning_tokens": 5,
-                    "output_tokens": 2
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "output_tokens": output_tokens
                 }
             }))
             .expect("usage JSON"),
@@ -2659,7 +2923,14 @@ mod tests {
     }
 
     fn current_ao_outputs(workspace: &Path, sandbox: &Path) -> VecDeque<InvocationOutput> {
-        let provider = codex_output(None);
+        current_ao_outputs_with_provider(workspace, sandbox, codex_output(None))
+    }
+
+    fn current_ao_outputs_with_provider(
+        workspace: &Path,
+        sandbox: &Path,
+        provider: InvocationOutput,
+    ) -> VecDeque<InvocationOutput> {
         let adapter = serde_json::json!({
             "adapter": {
                 "provider": "codex",
@@ -2680,9 +2951,9 @@ mod tests {
                 "concerns": [],
                 "blockers": [],
                 "usage": {
-                    "input_tokens": 11,
-                    "output_tokens": 2,
-                    "total_tokens": 21
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0
                 },
                 "cost_usd": null,
                 "raw_summary": null,
@@ -2713,6 +2984,369 @@ mod tests {
                 stderr: Vec::new(),
             },
         ])
+    }
+
+    fn counting_verifier(
+        input: &LiveRunInput,
+        counts: Arc<Mutex<InvocationCounts>>,
+        cancellation: CancellationToken,
+    ) -> CommandEngineVerifier<CountingVerifierRunner> {
+        CommandEngineVerifier::new(
+            &input.request,
+            input.command_verifier.clone(),
+            CountingVerifierRunner { counts },
+            cancellation,
+            Utc::now(),
+        )
+        .expect("counting verifier")
+    }
+
+    #[test]
+    fn live_preflight_envelope_is_checked_before_workspace_preparation() {
+        assert!(std::env::var_os("AO_NEXT_LIVE_PROVIDER_CALLS").is_none());
+        assert!(std::env::var_os("AO_NEXT_LIVE_ADAPTER_TESTS").is_none());
+
+        let mut rejected = fixture(LiveVariant::N4);
+        rejected.input.request.model_profile.context_limit = 262_144;
+        rejected.input.request.model_profile.output_limit = 20_000;
+        rejected.input.request.limits.max_tokens = 20_000;
+        let Err(error) = validate_input(&rejected.input, LiveVariant::N4, Utc::now()) else {
+            panic!("impossible live token envelope must fail preflight");
+        };
+        assert_eq!(error.code, "invalid_input");
+        assert!(!rejected.input.request.workspace.root.join(".git").exists());
+
+        let mut accepted = fixture(LiveVariant::N4);
+        accepted.input.request.model_profile.context_limit = 262_144;
+        accepted.input.request.model_profile.output_limit = 20_000;
+        accepted.input.request.limits.max_tokens = 564_288;
+        validate_input(&accepted.input, LiveVariant::N4, Utc::now())
+            .expect("live-compatible envelope passes provider-free validation");
+        assert!(!accepted.input.request.workspace.root.join(".git").exists());
+
+        let mut multiplication_overflow = fixture(LiveVariant::N4);
+        multiplication_overflow
+            .input
+            .request
+            .model_profile
+            .context_limit = u64::MAX;
+        multiplication_overflow
+            .input
+            .request
+            .model_profile
+            .output_limit = 1;
+        multiplication_overflow.input.request.limits.max_tokens = u64::MAX;
+        assert!(
+            validate_input(&multiplication_overflow.input, LiveVariant::N4, Utc::now()).is_err()
+        );
+
+        let mut addition_overflow = fixture(LiveVariant::N4);
+        addition_overflow.input.request.model_profile.context_limit = u64::MAX / 2;
+        addition_overflow.input.request.model_profile.output_limit = u64::MAX / 2;
+        addition_overflow.input.request.limits.max_tokens = u64::MAX;
+        assert!(validate_input(&addition_overflow.input, LiveVariant::N4, Utc::now()).is_err());
+    }
+
+    #[test]
+    fn live_envelope_derivation_and_observed_usage_boundaries_are_exact() {
+        assert_eq!(
+            required_live_token_envelope(262_144, 20_000)
+                .expect("checked live envelope derivation"),
+            564_288
+        );
+        assert!(required_live_token_envelope(u64::MAX, 1).is_err());
+        assert!(required_live_token_envelope(u64::MAX / 2, u64::MAX / 2).is_err());
+
+        let usage = TokenUsage {
+            input_tokens: 225_206,
+            cached_input_tokens: 193_792,
+            reasoning_tokens: 0,
+            output_tokens: 6_100,
+            output_bytes: 0,
+        };
+        let capture_digest = digest_bytes(b"observed retained capture");
+        let error = validate_trusted_usage(&usage, 425_097, &capture_digest)
+            .expect_err("observed usage exceeds 425097");
+        assert_eq!(
+            error.diagnostic.as_ref().expect("diagnostic")["usage"]["total_tokens"],
+            425_098
+        );
+        assert_eq!(
+            validate_trusted_usage(&usage, 425_098, &capture_digest)
+                .expect("observed usage passes exact boundary"),
+            425_098
+        );
+
+        let cached_contradiction = TokenUsage {
+            cached_input_tokens: usage.input_tokens + 1,
+            ..usage.clone()
+        };
+        assert!(validate_trusted_usage(&cached_contradiction, u64::MAX, &capture_digest).is_err());
+        let reasoning_contradiction = TokenUsage {
+            reasoning_tokens: usage.output_tokens + 1,
+            ..usage.clone()
+        };
+        assert!(
+            validate_trusted_usage(&reasoning_contradiction, u64::MAX, &capture_digest).is_err()
+        );
+        let overflow = TokenUsage {
+            input_tokens: u64::MAX,
+            cached_input_tokens: 1,
+            reasoning_tokens: 0,
+            output_tokens: 0,
+            output_bytes: 0,
+        };
+        assert!(validate_trusted_usage(&overflow, u64::MAX, &capture_digest).is_err());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression binds the rejected and exact-boundary N0 control counts"
+    )]
+    fn observed_n0_usage_is_gated_before_preview_apply_and_verifier() {
+        let mut rejected = fixture(LiveVariant::N0);
+        rejected.input.request.limits.max_tokens = 425_097;
+        let sandbox = rejected.root.path().join("ao2-observed-over-limit");
+        std::fs::create_dir(&sandbox).expect("current-AO sandbox");
+        let mut provider = codex_output_with_usage(None, 225_206, 193_792, 0, 6_100);
+        provider.stderr = b"private provider text must remain private".to_vec();
+        let counts = Arc::new(Mutex::new(InvocationCounts::default()));
+        let cancellation = CancellationToken::new();
+        let mut verifier = counting_verifier(&rejected.input, counts.clone(), cancellation.clone());
+        let error = execute_n0(
+            &rejected.input,
+            CountingN0Runner {
+                outputs: current_ao_outputs_with_provider(
+                    &rejected.input.request.workspace.root,
+                    &sandbox,
+                    provider,
+                ),
+                counts: counts.clone(),
+                apply_product: Some(rejected.product.clone()),
+            },
+            &capture_context(&rejected.input, LiveVariant::N0),
+            &mut verifier,
+            &cancellation,
+            invocation_limits(&rejected.input.request).expect("invocation limits"),
+        )
+        .expect_err("425098 trusted tokens must fail at a 425097 boundary");
+        assert_eq!(error.code, "runtime_failure");
+        let counts = counts.lock().expect("invocation counts");
+        assert_eq!(counts.provider, 1);
+        assert_eq!(counts.preview, 0);
+        assert_eq!(counts.apply, 0);
+        assert_eq!(counts.verifier, 0);
+        assert!(!rejected.product.exists());
+        drop(counts);
+
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                rejected
+                    .input
+                    .raw_capture_root
+                    .join("capture-terminal.json"),
+            )
+            .expect("token-envelope terminal metadata"),
+        )
+        .expect("terminal JSON");
+        assert_eq!(terminal["failure_stage"], "token-envelope");
+        assert_eq!(terminal["token_envelope"]["usage"]["input_tokens"], 225_206);
+        assert_eq!(
+            terminal["token_envelope"]["usage"]["cached_input_tokens"],
+            193_792
+        );
+        assert_eq!(terminal["token_envelope"]["usage"]["reasoning_tokens"], 0);
+        assert_eq!(terminal["token_envelope"]["usage"]["output_tokens"], 6_100);
+        assert_eq!(terminal["token_envelope"]["usage"]["total_tokens"], 425_098);
+        assert!(
+            terminal["token_envelope"]["capture_digest"]
+                .as_str()
+                .is_some()
+        );
+        assert!(
+            !serde_json::to_string(&terminal)
+                .expect("terminal text")
+                .contains("private provider text")
+        );
+        let index_digest = Digest::new(
+            terminal["capture_index_digest"]
+                .as_str()
+                .expect("capture index digest"),
+        )
+        .expect("valid capture index digest");
+        verify_raw_capture_index(
+            &rejected.input.raw_capture_root,
+            &capture_context(&rejected.input, LiveVariant::N0),
+            &index_digest,
+            rejected.input.request.limits.max_output_bytes,
+        )
+        .expect("failure capture remains independently verifiable");
+
+        let mut accepted = fixture(LiveVariant::N0);
+        accepted.input.request.limits.max_tokens = 425_098;
+        let sandbox = accepted.root.path().join("ao2-observed-boundary");
+        std::fs::create_dir(&sandbox).expect("current-AO sandbox");
+        let counts = Arc::new(Mutex::new(InvocationCounts::default()));
+        let cancellation = CancellationToken::new();
+        let mut verifier = counting_verifier(&accepted.input, counts.clone(), cancellation.clone());
+        let execution = execute_n0(
+            &accepted.input,
+            CountingN0Runner {
+                outputs: current_ao_outputs_with_provider(
+                    &accepted.input.request.workspace.root,
+                    &sandbox,
+                    codex_output_with_usage(None, 225_206, 193_792, 0, 6_100),
+                ),
+                counts: counts.clone(),
+                apply_product: Some(accepted.product.clone()),
+            },
+            &capture_context(&accepted.input, LiveVariant::N0),
+            &mut verifier,
+            &cancellation,
+            invocation_limits(&accepted.input.request).expect("invocation limits"),
+        )
+        .expect("425098 trusted tokens pass at the exact boundary");
+        assert_eq!(execution.0, RunState::Passed);
+        let counts = counts.lock().expect("invocation counts");
+        assert_eq!(counts.provider, 1);
+        assert_eq!(counts.preview, 1);
+        assert_eq!(counts.apply, 1);
+        assert_eq!(counts.verifier, 1);
+    }
+
+    #[test]
+    fn valid_n0_envelope_runs_each_post_capture_control_once() {
+        let mut n0 = fixture(LiveVariant::N0);
+        n0.input.request.model_profile.context_limit = 262_144;
+        n0.input.request.model_profile.output_limit = 20_000;
+        n0.input.request.limits.max_tokens = 564_288;
+        let sandbox = n0.root.path().join("ao2-valid-live-envelope");
+        std::fs::create_dir(&sandbox).expect("current-AO sandbox");
+        let counts = Arc::new(Mutex::new(InvocationCounts::default()));
+        let output = execute_with_runners(
+            &n0.input,
+            LiveVariant::N0,
+            MeasurementOrigin::OfflineFixture,
+            CountingN0Runner {
+                outputs: current_ao_outputs_with_provider(
+                    &n0.input.request.workspace.root,
+                    &sandbox,
+                    codex_output_with_usage(None, 225_206, 193_792, 0, 6_100),
+                ),
+                counts: counts.clone(),
+                apply_product: Some(n0.product.clone()),
+            },
+            CountingVerifierRunner {
+                counts: counts.clone(),
+            },
+        )
+        .expect("valid N0 fake-provider record");
+        assert_eq!(output.status, 0);
+        assert_eq!(output.value["schema_version"], "ao.next.live-run-record.v1");
+        assert_eq!(
+            output.value["measurement"]["tokens"]["reported_total_tokens"],
+            425_098
+        );
+        let counts = counts.lock().expect("invocation counts");
+        assert_eq!(counts.provider, 1);
+        assert_eq!(counts.preview, 1);
+        assert_eq!(counts.apply, 1);
+        assert_eq!(counts.verifier, 1);
+    }
+
+    #[test]
+    fn n4_over_limit_capture_skips_verifier_after_native_provider_mutation() {
+        let mut n4 = fixture(LiveVariant::N4);
+        n4.input.request.limits.max_tokens = 72_000;
+        let counts = Arc::new(Mutex::new(InvocationCounts::default()));
+        let error = execute_with_runners(
+            &n4.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output_with_usage(None, 36_001, 36_000, 0, 0)]),
+                direct_write: Some(n4.product.clone()),
+                additional_write: None,
+            },
+            CountingVerifierRunner {
+                counts: counts.clone(),
+            },
+        )
+        .expect_err("N4 over-limit usage is not a valid live row");
+        assert_eq!(error.code, "runtime_failure");
+        assert_eq!(counts.lock().expect("invocation counts").verifier, 0);
+        assert_eq!(
+            std::fs::read_to_string(&n4.product).expect("native provider product"),
+            "ready\n",
+            "N4 workspace mutation occurs inside the provider process"
+        );
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(n4.input.raw_capture_root.join("capture-terminal.json"))
+                .expect("token-envelope terminal metadata"),
+        )
+        .expect("terminal JSON");
+        assert_eq!(terminal["failure_stage"], "token-envelope");
+    }
+
+    #[test]
+    fn n7_contradictory_usage_skips_effects_and_verifier() {
+        for (input_tokens, cached_input_tokens, reasoning_tokens, output_tokens) in
+            [(11, 12, 0, 1), (11, 3, 2, 1)]
+        {
+            let n7 = fixture(LiveVariant::N7);
+            let effect = EffectRequest {
+                effect_id: "write-product".into(),
+                run_id: n7.input.request.run_id.clone(),
+                kind: EffectKind::RunProgram,
+                program: Some("/usr/bin/python3".into()),
+                args: vec![
+                    "-c".into(),
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ready\\n')"
+                        .into(),
+                    n7.product.display().to_string(),
+                ],
+                paths: vec![n7.product.clone()],
+                timeout_ms: 1_000,
+                input_digest: digest_bytes(b"write product fixture"),
+            };
+            let turn = AdapterTurn {
+                actions: vec![AdapterAction::Effect(effect), AdapterAction::Verify],
+                usage: TokenUsage::default(),
+                model_claimed_success: false,
+                control_mutations: Vec::new(),
+            };
+            let counts = Arc::new(Mutex::new(InvocationCounts::default()));
+            let error = execute_with_runners(
+                &n7.input,
+                LiveVariant::N7,
+                MeasurementOrigin::OfflineFixture,
+                FakeProvider {
+                    outputs: VecDeque::from([codex_output_with_usage(
+                        Some(&turn),
+                        input_tokens,
+                        cached_input_tokens,
+                        reasoning_tokens,
+                        output_tokens,
+                    )]),
+                    direct_write: None,
+                    additional_write: None,
+                },
+                CountingVerifierRunner {
+                    counts: counts.clone(),
+                },
+            )
+            .expect_err("contradictory N7 trusted usage is not a valid live row");
+            assert_eq!(error.code, "runtime_failure");
+            assert_eq!(counts.lock().expect("invocation counts").verifier, 0);
+            assert!(!n7.product.exists(), "N7 admitted effect must not execute");
+            let terminal: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(n7.input.raw_capture_root.join("capture-terminal.json"))
+                    .expect("token-envelope terminal metadata"),
+            )
+            .expect("terminal JSON");
+            assert_eq!(terminal["failure_stage"], "token-envelope");
+        }
     }
 
     #[test]

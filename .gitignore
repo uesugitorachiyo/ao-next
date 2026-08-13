@@ -1,5 +1,28 @@
+# Rust build output
 /target/
+
+# AO Next local state and generated run output
 /.ao-next/
 /artifacts/
+/evaluation-output/
+/private-raw-captures/
+/captures/
+/transcripts/
+/logs/
+/tmp/
+/temp/
+
+# Local credentials and overrides
+.env
+.env.*
+!.env.example
+
+# Logs and local tool state
 *.log
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .DS_Store
+Thumbs.db

@@ -7,6 +7,19 @@ use thiserror::Error;
 
 use crate::metrics::ExecutionVariant;
 
+pub const FUNCTIONAL_SENTINEL_TASK_ID: &str = "greenfield-native-write-sentinel";
+
+const LIVE_TASKS: [&str; 3] = [
+    "artifact-reconciliation",
+    "bounded-defect-repair",
+    "greenfield-engineering-app",
+];
+const FUNCTIONAL_SENTINEL_TASKS: [&str; 3] = [
+    "artifact-reconciliation",
+    "bounded-defect-repair",
+    FUNCTIONAL_SENTINEL_TASK_ID,
+];
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CorpusKind {
@@ -163,12 +176,34 @@ impl CorpusManifest {
     /// Returns a corpus error for a non-live corpus, placeholder digests or
     /// fixture identities, or a task set other than the three sealed tasks.
     pub fn validate_live(&self) -> Result<(), CorpusError> {
+        self.validate_live_task_set(&LIVE_TASKS)
+    }
+
+    /// Applies live-input rules to the one-row functional N7 sentinel corpus
+    /// without admitting it as an evaluation corpus.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corpus error unless the corpus replaces only the greenfield
+    /// campaign task with the exact functional sentinel identity.
+    pub fn validate_functional_sentinel(&self) -> Result<(), CorpusError> {
+        self.validate_live_task_set(&FUNCTIONAL_SENTINEL_TASKS)?;
+        let sentinel = self
+            .tasks
+            .iter()
+            .find(|task| task.task_id == FUNCTIONAL_SENTINEL_TASK_ID)
+            .ok_or_else(|| CorpusError::PlaceholderIdentity("corpus classification".into()))?;
+        if sentinel.task_kind != "functional_native_write_sentinel" {
+            return Err(CorpusError::PlaceholderIdentity(
+                FUNCTIONAL_SENTINEL_TASK_ID.into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_live_task_set(&self, expected_tasks: &[&str]) -> Result<(), CorpusError> {
         self.validate()?;
-        let expected_tasks = BTreeSet::from([
-            "artifact-reconciliation",
-            "bounded-defect-repair",
-            "greenfield-engineering-app",
-        ]);
+        let expected_tasks = expected_tasks.iter().copied().collect::<BTreeSet<_>>();
         let observed_tasks = self
             .tasks
             .iter()

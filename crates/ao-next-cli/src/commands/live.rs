@@ -23,7 +23,9 @@ use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOut
 use ao_next_core::evidence::digest_bytes;
 use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
 use ao_next_core::verifier::{CommandEngineVerifier, CommandVerifierProfile};
-use ao_next_eval::corpus::{CorpusManifest, EvaluationTask, VariantProfile};
+use ao_next_eval::corpus::{
+    CorpusManifest, EvaluationTask, FUNCTIONAL_SENTINEL_TASK_ID, VariantProfile,
+};
 use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -1785,10 +1787,17 @@ fn validate_input(
     if variant == LiveVariant::N7 {
         validate_n7_model_authority(&input.request)?;
     }
-    input
-        .corpus
-        .validate_live()
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if input.task_id == FUNCTIONAL_SENTINEL_TASK_ID && variant != LiveVariant::N7 {
+        return Err(CommandFailure::invalid_input(
+            "functional sentinel requires N7",
+        ));
+    }
+    let corpus_validation = if input.task_id == FUNCTIONAL_SENTINEL_TASK_ID {
+        input.corpus.validate_functional_sentinel()
+    } else {
+        input.corpus.validate_live()
+    };
+    corpus_validation.map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let task = input
         .corpus
         .tasks
@@ -3494,6 +3503,36 @@ mod tests {
         }
     }
 
+    fn retarget_as_functional_sentinel(fixture: &mut Fixture, task_kind: &str) {
+        let source_bytes = std::fs::read(&fixture.input.source_snapshot).expect("source fixture");
+        let mut source: SourceSnapshot =
+            decode_strict_json(&source_bytes, 64 * 1024).expect("source snapshot");
+        source.task_id = FUNCTIONAL_SENTINEL_TASK_ID.into();
+        std::fs::write(
+            &fixture.input.source_snapshot,
+            serde_json::to_vec(&source).expect("source JSON"),
+        )
+        .expect("sentinel source snapshot");
+        let source_digest = canonical_digest(&source).expect("source digest");
+        let task = fixture
+            .input
+            .corpus
+            .tasks
+            .iter_mut()
+            .find(|task| task.task_id == fixture.input.task_id)
+            .expect("selected task");
+        task.task_id = FUNCTIONAL_SENTINEL_TASK_ID.into();
+        task.task_kind = task_kind.into();
+        task.source_digest = source_digest.clone();
+        fixture.input.task_id = FUNCTIONAL_SENTINEL_TASK_ID.into();
+        fixture.input.request.source.head = source_digest;
+        fixture.input.corpus.corpus_digest = fixture
+            .input
+            .corpus
+            .calculated_digest()
+            .expect("sentinel corpus digest");
+    }
+
     fn profile(variant: ExecutionVariant, runtime: &str, adapter_version: &str) -> VariantProfile {
         VariantProfile {
             variant,
@@ -3716,6 +3755,58 @@ mod tests {
         };
 
         assert!(error.message.contains("N7 model authority"));
+    }
+
+    #[test]
+    fn n7_functional_sentinel_identity_passes_without_relaxing_live_campaign_identity() {
+        let campaign = fixture(LiveVariant::N7);
+        validate_input(&campaign.input, LiveVariant::N7, Utc::now())
+            .expect("ordinary live campaign identity remains valid");
+
+        let mut sentinel = fixture(LiveVariant::N7);
+        retarget_as_functional_sentinel(&mut sentinel, "functional_native_write_sentinel");
+
+        assert!(sentinel.input.corpus.validate_live().is_err());
+        sentinel
+            .input
+            .corpus
+            .validate_functional_sentinel()
+            .expect("sentinel-only validator accepts exact identity");
+
+        validate_input(&sentinel.input, LiveVariant::N7, Utc::now())
+            .expect("exact functional sentinel identity is accepted");
+
+        let input_path = sentinel.root.path().join("sentinel-input.json");
+        std::fs::write(
+            &input_path,
+            serde_json::to_vec(&sentinel.input).expect("sentinel input JSON"),
+        )
+        .expect("sentinel input");
+        let preflight = preflight(&PreflightLiveInputArgs {
+            input: input_path,
+            variant: LiveVariantArg::N7,
+            trusted_corpus_digest: Some(sentinel.input.corpus.corpus_digest.to_string()),
+            trusted_verifier_profile_digest: Some(
+                sentinel.input.command_verifier.profile_digest.to_string(),
+            ),
+        })
+        .expect("functional sentinel preflight");
+        assert_eq!(preflight.status, 0);
+        assert!(!sentinel.input.request.workspace.root.join(".git").exists());
+    }
+
+    #[test]
+    fn functional_sentinel_rejects_non_n7_and_wrong_task_kind() {
+        let mut n4 = fixture(LiveVariant::N4);
+        retarget_as_functional_sentinel(&mut n4, "functional_native_write_sentinel");
+        assert!(validate_input(&n4.input, LiveVariant::N4, Utc::now()).is_err());
+
+        let mut wrong_kind = fixture(LiveVariant::N7);
+        retarget_as_functional_sentinel(&mut wrong_kind, "greenfield_engineering_application");
+        assert!(
+            validate_input(&wrong_kind.input, LiveVariant::N7, Utc::now()).is_err(),
+            "sentinel identity must not admit arbitrary task semantics"
+        );
     }
 
     #[test]

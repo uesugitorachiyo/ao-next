@@ -16,6 +16,8 @@ Every trial uses a new workspace instance reconstructed from the sealed seed. Th
 
 The operator-owned corpus contains a greenfield engineering application, a bounded defect repair, and an artifact-reconciliation task. Hidden tests stay outside worker workspaces and authority roots. The checked-in zero/one corpus is named `synthetic-corpus-v1.json` and cannot decode as the live v2 contract.
 
+A separately authorized one-process functional N7 sentinel may replace only the greenfield task identity with `greenfield-native-write-sentinel` in an otherwise exact sealed live corpus. That alternate identity is accepted only by live input validation; it is not a valid comparison or campaign corpus.
+
 The evaluator calculates a median for each task and variant before it calculates cross-task medians. It rejects missing baselines, incomplete token rows, corpus or identity drift, schedule errors, raw-capture mismatch, hidden exposure, timing contradictions, unauthorized effects, and N7 worker or fan-out violations. [The decision policy](decision-policy.md) defines the score gates. Scripted and fake-process rows cannot produce `AO_NEXT_LIVE_EVALUATION_PASSED`.
 
 Provider calls, credentials, network access, remote mutation, publication, release, deployment, AO migration, and superiority claims are outside local qualification authority.

@@ -203,6 +203,36 @@ fn sealed_command_verifier_runs_exact_contract_and_checks_artifact_digest() {
 }
 
 #[test]
+fn trusted_verifier_does_not_require_model_program_authority() {
+    let workspace = TempDir::new().expect("workspace");
+    std::fs::create_dir(workspace.path().join("product")).expect("working directory");
+    let profile = sealed_profile(Vec::new(), 1024);
+    let mut base_request = request(workspace.path(), &profile);
+    base_request.authority.capabilities.clear();
+    base_request.authority.allowed_programs.clear();
+    let runner = FakeRunner {
+        output: InvocationOutput {
+            status: 0,
+            stdout: b"ok".to_vec(),
+            stderr: Vec::new(),
+        },
+        seen: Vec::new(),
+    };
+
+    let mut verifier = CommandEngineVerifier::new(
+        &base_request,
+        profile,
+        runner,
+        CancellationToken::new(),
+        Utc.with_ymd_and_hms(2026, 8, 6, 12, 0, 0).unwrap(),
+    )
+    .expect("trusted verifier is independent of model effect authority");
+
+    assert!(verifier.verify(&base_request).passed);
+    assert_eq!(verifier.runner().seen.len(), 1);
+}
+
+#[test]
 fn verifier_mutation_and_reordering_fail_before_execution() {
     let workspace = TempDir::new().expect("workspace");
     std::fs::create_dir(workspace.path().join("product")).expect("working directory");

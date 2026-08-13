@@ -35,6 +35,47 @@ fn identity(runtime: &str, version: &str) -> AdapterIdentity {
     }
 }
 
+fn assert_codex_tools_disabled(invocation: &PreparedInvocation) {
+    for feature in [
+        "features.shell_tool=false",
+        "features.unified_exec=false",
+        "features.js_repl=false",
+        "features.code_mode=false",
+        "features.code_mode_host=false",
+        "features.deferred_executor=false",
+        "features.executor_capability_discovery=false",
+        "features.apply_patch_freeform=false",
+        "features.apply_patch_streaming_events=false",
+        "features.web_search_request=false",
+        "features.standalone_web_search=false",
+        "features.browser_use=false",
+        "features.browser_use_external=false",
+        "features.browser_use_full_cdp_access=false",
+        "features.in_app_browser=false",
+        "features.computer_use=false",
+        "features.image_generation=false",
+        "features.view_image=false",
+        "features.apps=false",
+        "features.plugins=false",
+        "features.remote_plugin=false",
+        "features.multi_agent=false",
+        "features.skill_search=false",
+        "features.workspace_dependencies=false",
+        "features.tool_suggest=false",
+        "tools.web_search=false",
+        "tools.experimental_request_user_input=false",
+        "tools.update_plan=false",
+    ] {
+        assert!(
+            invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["-c", feature]),
+            "N7 Codex invocation did not disable {feature}"
+        );
+    }
+}
+
 #[test]
 fn sanitized_help_fixtures_prove_required_offline_cli_contracts() {
     let codex = codex::parse_cli_contract(CODEX_HELP).expect("Codex contract");
@@ -94,6 +135,7 @@ fn invocations_are_structured_bounded_and_disable_dynamic_or_unmediated_tools() 
             .windows(2)
             .any(|args| args == ["-c", "approval_policy=\"never\""])
     );
+    assert_codex_tools_disabled(&codex_invocation);
     assert!(
         !codex_invocation
             .args
@@ -354,6 +396,16 @@ fn codex_and_claude_outputs_normalize_to_the_same_core_turn_contract() {
     assert_eq!(codex.identity.runtime, "codex");
     assert_eq!(claude.identity.runtime, "claude");
     assert_eq!(codex.identity.worker_id, claude.identity.worker_id);
+}
+
+#[test]
+fn codex_normalization_rejects_unmediated_tool_events() {
+    let output = br#"{"type":"item.completed","item":{"id":"tool-1","type":"command_execution","command":"rg --files","aggregated_output":"hidden-test.py\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"answer-1","type":"agent_message","text":"{\"actions\":[{\"kind\":\"verify\"}],\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1,\"output_bytes\":1},\"model_claimed_success\":false,\"control_mutations\":[]}"}}
+"#;
+    let error = codex::normalize_output(identity("codex", "v1"), output, 16 * 1024)
+        .expect_err("unmediated Codex tool activity must fail closed");
+    assert!(error.to_string().contains("unmediated"));
 }
 
 #[test]

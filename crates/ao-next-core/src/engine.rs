@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -11,6 +12,8 @@ use crate::contracts::{Digest, RunRequest, RunState};
 use crate::effects::EffectBroker;
 use crate::strict_json::canonical_digest;
 use crate::terminal::RunLifecycle;
+
+pub const MAX_EFFECTS_PER_TURN: usize = 64;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +43,7 @@ pub enum EngineEventKind {
     Running,
     AdapterTurn,
     EffectAdmitted(String),
-    EffectCompleted(String),
+    EffectCompleted(EffectObservation),
     EffectDenied(String),
     VerificationPassed(Digest),
     VerificationFailed(Digest),
@@ -64,6 +67,7 @@ pub struct RunOutcome {
     pub worker_identity: AdapterIdentity,
     pub metrics: EngineMetrics,
     pub events: Vec<EngineEvent>,
+    pub effect_observations: Vec<EffectObservation>,
     pub verifier_report_digest: Option<Digest>,
     pub failure_code: Option<String>,
     pub blocker: Option<String>,
@@ -140,6 +144,7 @@ where
         let started = Instant::now();
         let maximum_duration = Duration::from_millis(request.limits.max_run_ms);
         let mut effect_observations = Vec::new();
+        let mut effect_ids = BTreeSet::new();
 
         for turn_index in 0..request.limits.max_turns {
             if started.elapsed() >= maximum_duration {
@@ -267,9 +272,64 @@ where
                 );
             }
 
+            if turn
+                .actions
+                .iter()
+                .filter(|action| matches!(action, AdapterAction::Effect(_)))
+                .count()
+                > MAX_EFFECTS_PER_TURN
+            {
+                return transition_and_finish(
+                    lifecycle,
+                    identity,
+                    metrics,
+                    events,
+                    verifier_report_digest,
+                    RunState::Denied,
+                    "effect_limit",
+                    "adapter effect count exceeded the per-turn bound",
+                );
+            }
+
             for action in turn.actions {
                 match action {
                     AdapterAction::Effect(effect) => {
+                        if effect.run_id != request.run_id {
+                            push_event(
+                                &mut events,
+                                &lifecycle,
+                                EngineEventKind::EffectDenied(effect.effect_id),
+                                Some(&identity.worker_id),
+                            );
+                            return transition_and_finish(
+                                lifecycle,
+                                identity,
+                                metrics,
+                                events,
+                                verifier_report_digest,
+                                RunState::Denied,
+                                "effect_run_identity_mismatch",
+                                "effect run identity does not match the request",
+                            );
+                        }
+                        if !effect_ids.insert(effect.effect_id.clone()) {
+                            push_event(
+                                &mut events,
+                                &lifecycle,
+                                EngineEventKind::EffectDenied(effect.effect_id),
+                                Some(&identity.worker_id),
+                            );
+                            return transition_and_finish(
+                                lifecycle,
+                                identity,
+                                metrics,
+                                events,
+                                verifier_report_digest,
+                                RunState::Denied,
+                                "duplicate_effect",
+                                "adapter repeated an effect identity",
+                            );
+                        }
                         match self.broker.authorize(&effect, &request.authority) {
                             Ok(authorized) => {
                                 push_event(
@@ -327,17 +387,18 @@ where
                                         );
                                     }
                                 };
-                                effect_observations.push(EffectObservation {
+                                let observation = EffectObservation {
                                     effect_id: effect.effect_id.clone(),
                                     status: output.status,
                                     stdout: output.stdout,
                                     stderr: output.stderr,
                                     output_digest,
-                                });
+                                };
+                                effect_observations.push(observation.clone());
                                 push_event(
                                     &mut events,
                                     &lifecycle,
-                                    EngineEventKind::EffectCompleted(effect.effect_id),
+                                    EngineEventKind::EffectCompleted(observation),
                                     Some(&identity.worker_id),
                                 );
                             }
@@ -491,11 +552,13 @@ fn transition_and_finish(
         EngineEventKind::Terminal(terminal_state.clone()),
         Some(&identity.worker_id),
     );
+    let effect_observations = completed_effect_observations(&events);
     RunOutcome {
         terminal_state,
         worker_identity: identity,
         metrics,
         events,
+        effect_observations,
         verifier_report_digest,
         failure_code: (code != "verified_pass").then(|| code.to_owned()),
         blocker: (code != "verified_pass").then(|| blocker.to_owned()),
@@ -518,15 +581,27 @@ fn fail_outcome(
         kind: EngineEventKind::Terminal(terminal_state.clone()),
         worker_id: Some(identity.worker_id.clone()),
     });
+    let effect_observations = completed_effect_observations(&events);
     RunOutcome {
         terminal_state,
         worker_identity: identity,
         metrics,
         events,
+        effect_observations,
         verifier_report_digest,
         failure_code: Some(code.to_owned()),
         blocker: Some(blocker.to_owned()),
     }
+}
+
+fn completed_effect_observations(events: &[EngineEvent]) -> Vec<EffectObservation> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EngineEventKind::EffectCompleted(observation) => Some(observation.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn internal_transition_failure(

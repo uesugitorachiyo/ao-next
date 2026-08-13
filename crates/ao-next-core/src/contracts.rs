@@ -199,6 +199,7 @@ pub struct RunRequest {
 pub enum EffectKind {
     ReadFile,
     WriteFile,
+    #[schemars(skip)]
     RunProgram,
     Network,
     Credential,
@@ -215,6 +216,7 @@ pub struct EffectRequest {
     pub run_id: String,
     pub kind: EffectKind,
     pub program: Option<String>,
+    pub content: Option<String>,
     pub args: Vec<String>,
     pub paths: Vec<PathBuf>,
     pub timeout_ms: u64,
@@ -390,6 +392,11 @@ pub fn validate_intake(
 /// which would indicate a programming error in a derived schema.
 pub fn generated_contract_schemas() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
+        (
+            "adapter-turn-v1.schema.json",
+            serde_json::to_value(schema_for!(crate::adapter::AdapterTurn))
+                .expect("schema serialization"),
+        ),
         (
             "command-verifier-profile-v1.schema.json",
             serde_json::to_value(schema_for!(crate::verifier::CommandVerifierProfile))

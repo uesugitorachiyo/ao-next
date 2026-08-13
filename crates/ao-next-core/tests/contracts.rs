@@ -118,6 +118,7 @@ fn effect_event() -> EffectEvent {
             run_id: "run-01".into(),
             kind: EffectKind::RunProgram,
             program: Some("cargo".into()),
+            content: None,
             args: vec!["test".into(), "--workspace".into()],
             paths: vec![PathBuf::from("/tmp/ao-next-fixture")],
             timeout_ms: 120_000,

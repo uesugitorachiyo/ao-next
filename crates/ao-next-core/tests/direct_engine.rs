@@ -12,6 +12,7 @@ use ao_next_core::contracts::{
 };
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineVerifier, VerificationOutcome};
+use ao_next_core::evidence::digest_bytes;
 use ao_next_core::terminal::{InvalidTransition, RunLifecycle};
 use chrono::{DateTime, Utc};
 use tempfile::TempDir;
@@ -133,6 +134,24 @@ impl EngineVerifier for ScriptedVerifier {
     }
 }
 
+struct FileVerifier {
+    path: PathBuf,
+    expected: Vec<u8>,
+    calls: usize,
+}
+
+impl EngineVerifier for FileVerifier {
+    fn verify(&mut self, _: &RunRequest) -> VerificationOutcome {
+        self.calls += 1;
+        let passed = std::fs::read(&self.path).is_ok_and(|bytes| bytes == self.expected);
+        VerificationOutcome {
+            passed,
+            report_digest: digest(if passed { ONE_DIGEST } else { ZERO_DIGEST }),
+            summary: if passed { "passed" } else { "failed" }.into(),
+        }
+    }
+}
+
 fn verification(passed: bool) -> VerificationOutcome {
     VerificationOutcome {
         passed,
@@ -177,7 +196,7 @@ fn lifecycle_rejects_invalid_and_terminal_transitions() {
 fn verified_success_uses_one_worker_identity_for_the_entire_run() {
     let workspace = TempDir::new().expect("workspace");
     let request = request(workspace.path());
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Verify]))]);
     let mut verifier = ScriptedVerifier::new([verification(true)]);
@@ -200,7 +219,7 @@ fn verified_success_uses_one_worker_identity_for_the_entire_run() {
 fn failed_verification_returns_to_the_same_worker_for_one_repair() {
     let workspace = TempDir::new().expect("workspace");
     let request = request(workspace.path());
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut adapter = ScriptedAdapter::new(
         identity(),
@@ -229,13 +248,14 @@ fn failed_verification_returns_to_the_same_worker_for_one_repair() {
 fn denied_effect_terminates_without_becoming_an_adapter_retry() {
     let workspace = TempDir::new().expect("workspace");
     let request = request(workspace.path());
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut effect = EffectRequest {
         effect_id: "effect-denied".into(),
         run_id: "run-01".into(),
         kind: EffectKind::RunProgram,
         program: Some("/usr/bin/printf".into()),
+        content: None,
         args: vec!["must-not-run".into()],
         paths: Vec::new(),
         timeout_ms: 100,
@@ -259,29 +279,165 @@ fn denied_effect_terminates_without_becoming_an_adapter_retry() {
 }
 
 #[test]
-fn admitted_effect_is_executed_before_the_same_worker_continues() {
+fn n7_rg_discovery_is_denied_without_effects_or_verification() {
     let workspace = TempDir::new().expect("workspace");
-    let marker = workspace.path().join("effect-ran");
+    let source = workspace.path().join("source.txt");
+    std::fs::write(&source, b"unchanged").expect("source fixture");
     let mut request = request(workspace.path());
     request
         .authority
         .capabilities
         .insert(Capability::RunLocalProgram);
+    request.authority.allowed_programs.insert("rg".into());
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let engine = DirectEngine::new(&broker);
+    let effect = EffectRequest {
+        effect_id: "inspect-workspace-files".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::RunProgram,
+        program: Some("rg".into()),
+        content: None,
+        args: vec!["--files".into()],
+        paths: vec![workspace.path().to_path_buf()],
+        timeout_ms: 100,
+        input_digest: digest(ZERO_DIGEST),
+    };
+    let mut adapter = ScriptedAdapter::new(
+        identity(),
+        [Ok(turn(vec![
+            AdapterAction::Effect(effect),
+            AdapterAction::Verify,
+        ]))],
+    );
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome = engine.run(&request, &mut adapter, &mut verifier);
+
+    assert_eq!(outcome.terminal_state, RunState::Denied);
+    assert_eq!(outcome.failure_code.as_deref(), Some("effect_denied"));
+    assert_eq!(verifier.calls, 0);
+    assert_eq!(std::fs::read(source).expect("source bytes"), b"unchanged");
+}
+
+#[test]
+fn ordered_native_writes_complete_before_same_turn_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let target = workspace.path().join("product.txt");
+    let mut request = request(workspace.path());
+    request.limits.max_turns = 1;
     request
         .authority
-        .allowed_programs
-        .insert("/usr/bin/touch".into());
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+        .capabilities
+        .insert(Capability::WriteWorkspace);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let engine = DirectEngine::new(&broker);
+    let create = EffectRequest {
+        effect_id: "create-product".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("first\n".into()),
+    };
+    let replace = EffectRequest {
+        effect_id: "replace-product".into(),
+        input_digest: digest_bytes(b"first\n"),
+        content: Some("second\n".into()),
+        ..create.clone()
+    };
+    let mut adapter = ScriptedAdapter::new(
+        identity(),
+        [Ok(turn(vec![
+            AdapterAction::Effect(create),
+            AdapterAction::Effect(replace),
+            AdapterAction::Verify,
+        ]))],
+    );
+    let mut verifier = FileVerifier {
+        path: target.clone(),
+        expected: b"second\n".to_vec(),
+        calls: 0,
+    };
+
+    let outcome = engine.run(&request, &mut adapter, &mut verifier);
+
+    assert_eq!(outcome.terminal_state, RunState::Passed);
+    assert_eq!(verifier.calls, 1);
+    assert_eq!(std::fs::read(target).expect("product bytes"), b"second\n");
+}
+
+#[test]
+fn denied_or_duplicate_native_write_prevents_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let first = workspace.path().join("first.txt");
+    let second = workspace.path().join("second.txt");
+    let mut request = request(workspace.path());
+    request.limits.max_turns = 1;
+    request
+        .authority
+        .capabilities
+        .insert(Capability::WriteWorkspace);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let engine = DirectEngine::new(&broker);
+    let create = EffectRequest {
+        effect_id: "duplicate-effect".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["first.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("first".into()),
+    };
+    let duplicate = EffectRequest {
+        paths: vec!["second.txt".into()],
+        ..create.clone()
+    };
+    let mut adapter = ScriptedAdapter::new(
+        identity(),
+        [Ok(turn(vec![
+            AdapterAction::Effect(create),
+            AdapterAction::Effect(duplicate),
+            AdapterAction::Verify,
+        ]))],
+    );
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome = engine.run(&request, &mut adapter, &mut verifier);
+
+    assert_eq!(outcome.terminal_state, RunState::Denied);
+    assert_eq!(outcome.failure_code.as_deref(), Some("duplicate_effect"));
+    assert_eq!(verifier.calls, 0);
+    assert!(first.is_file());
+    assert!(!second.exists());
+}
+
+#[test]
+fn admitted_native_read_is_observed_before_the_same_worker_continues() {
+    let workspace = TempDir::new().expect("workspace");
+    let source = workspace.path().join("source.txt");
+    std::fs::write(&source, b"visible source\n").expect("source fixture");
+    let mut request = request(workspace.path());
+    request
+        .authority
+        .capabilities
+        .insert(Capability::ReadWorkspace);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let effect = EffectRequest {
         effect_id: "effect-executed".into(),
         run_id: request.run_id.clone(),
-        kind: EffectKind::RunProgram,
-        program: Some("/usr/bin/touch".into()),
-        args: vec![marker.display().to_string()],
-        paths: vec![marker.clone()],
-        timeout_ms: 100,
-        input_digest: digest(ZERO_DIGEST),
+        kind: EffectKind::ReadFile,
+        program: None,
+        content: None,
+        args: Vec::new(),
+        paths: vec!["source.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"visible source\n"),
     };
     let mut adapter = ScriptedAdapter::new(
         identity(),
@@ -295,43 +451,49 @@ fn admitted_effect_is_executed_before_the_same_worker_continues() {
     let outcome = engine.run(&request, &mut adapter, &mut verifier);
 
     assert_eq!(outcome.terminal_state, RunState::Passed);
-    assert!(marker.is_file(), "admitted effect must actually execute");
     assert_eq!(adapter.contexts().len(), 2);
     let observations = &adapter.contexts()[1].effect_observations;
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].effect_id, "effect-executed");
     assert_eq!(observations[0].status, 0);
-    assert!(observations[0].stdout.is_empty());
+    assert_eq!(observations[0].stdout, b"visible source\n");
     assert!(observations[0].stderr.is_empty());
+    let serialized = serde_json::to_value(&outcome).expect("outcome JSON");
+    assert_eq!(
+        serialized["effect_observations"][0]["effect_id"],
+        "effect-executed"
+    );
+    assert_eq!(
+        serialized["effect_observations"][0]["output_digest"],
+        observations[0].output_digest.as_str()
+    );
     assert!(outcome.events.iter().any(|event| matches!(
         &event.kind,
-        ao_next_core::engine::EngineEventKind::EffectCompleted(effect_id) if effect_id == "effect-executed"
+        ao_next_core::engine::EngineEventKind::EffectCompleted(observation)
+            if observation.effect_id == "effect-executed"
     )));
 }
 
 #[test]
-fn admitted_effect_execution_failure_cannot_continue_to_verification() {
+fn missing_parent_write_is_denied_before_verification() {
     let workspace = TempDir::new().expect("workspace");
     let mut request = request(workspace.path());
     request
         .authority
         .capabilities
-        .insert(Capability::RunLocalProgram);
-    request
-        .authority
-        .allowed_programs
-        .insert("/definitely/missing/ao-next-program".into());
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+        .insert(Capability::WriteWorkspace);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let effect = EffectRequest {
-        effect_id: "effect-missing-executable".into(),
+        effect_id: "effect-missing-parent".into(),
         run_id: request.run_id.clone(),
-        kind: EffectKind::RunProgram,
-        program: Some("/definitely/missing/ao-next-program".into()),
+        kind: EffectKind::WriteFile,
+        program: None,
+        content: Some("product".into()),
         args: Vec::new(),
-        paths: vec![workspace.path().to_path_buf()],
-        timeout_ms: 100,
-        input_digest: digest(ZERO_DIGEST),
+        paths: vec!["missing/product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
     };
     let mut adapter = ScriptedAdapter::new(
         identity(),
@@ -344,11 +506,8 @@ fn admitted_effect_execution_failure_cannot_continue_to_verification() {
 
     let outcome = engine.run(&request, &mut adapter, &mut verifier);
 
-    assert_eq!(outcome.terminal_state, RunState::Failed);
-    assert_eq!(
-        outcome.failure_code.as_deref(),
-        Some("effect_execution_failure")
-    );
+    assert_eq!(outcome.terminal_state, RunState::Denied);
+    assert_eq!(outcome.failure_code.as_deref(), Some("effect_denied"));
     assert_eq!(outcome.metrics.turns, 1);
     assert_eq!(verifier.calls, 0);
 }
@@ -357,7 +516,7 @@ fn admitted_effect_execution_failure_cannot_continue_to_verification() {
 fn adapter_failure_and_interrupt_have_distinct_terminal_states() {
     let workspace = TempDir::new().expect("workspace");
     let request = request(workspace.path());
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut failed = ScriptedAdapter::new(
         identity(),
@@ -388,7 +547,7 @@ fn model_success_claim_without_verification_cannot_pass() {
     let workspace = TempDir::new().expect("workspace");
     let mut request = request(workspace.path());
     request.limits.max_turns = 1;
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut claimed = turn(Vec::new());
     claimed.model_claimed_success = true;
@@ -412,7 +571,7 @@ fn authority_policy_verifier_and_terminal_mutations_are_rejected() {
     ] {
         let workspace = TempDir::new().expect("workspace");
         let request = request(workspace.path());
-        let broker = LocalEffectBroker::new(1_000, 4_096);
+        let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
         let engine = DirectEngine::new(&broker);
         let mut malicious = turn(vec![AdapterAction::Verify]);
         malicious.control_mutations = vec![mutation];
@@ -436,7 +595,7 @@ fn token_limit_fails_before_another_turn() {
     let mut request = request(workspace.path());
     request.limits.max_tokens = 1;
     request.limits.max_output_bytes = 1;
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(Vec::new()))]);
     let mut verifier = ScriptedVerifier::new([]);
@@ -454,7 +613,7 @@ fn output_limit_fails_before_another_turn() {
     let mut request = request(workspace.path());
     request.limits.max_tokens = 10_000;
     request.limits.max_output_bytes = 1;
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(Vec::new()))]);
     let mut verifier = ScriptedVerifier::new([]);
@@ -471,7 +630,7 @@ fn elapsed_time_limit_interrupts_before_an_adapter_turn() {
     let workspace = TempDir::new().expect("workspace");
     let mut request = request(workspace.path());
     request.limits.max_run_ms = 0;
-    let broker = LocalEffectBroker::new(1_000, 4_096);
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
     let engine = DirectEngine::new(&broker);
     let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Verify]))]);
     let mut verifier = ScriptedVerifier::new([verification(true)]);

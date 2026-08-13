@@ -4,13 +4,14 @@
   "definitions": {
     "EffectDecision": { "enum": ["admitted", "denied"], "type": "string" },
     "EffectKind": {
-      "enum": ["read_file", "write_file", "run_program", "network", "credential", "remote_mutation", "release", "deployment", "publication"],
+      "enum": ["read_file", "write_file", "network", "credential", "remote_mutation", "release", "deployment", "publication"],
       "type": "string"
     },
     "EffectRequest": {
       "additionalProperties": false,
       "properties": {
         "args": { "items": { "type": "string" }, "type": "array" },
+        "content": { "type": ["string", "null"] },
         "effect_id": { "type": "string" },
         "input_digest": { "type": "string" },
         "kind": { "$ref": "#/definitions/EffectKind" },

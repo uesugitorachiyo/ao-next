@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -9,9 +9,83 @@ use super::{
     InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation, RuntimeAdapter,
     TokenUsage, TurnContext, claude, codex, execute_bounded,
 };
-use crate::contracts::{Digest, RunRequest, SourceIdentity, WorkspaceIdentity};
+use crate::contracts::{
+    Capability, Digest, ExternalEffectPolicy, NetworkPolicy, RunRequest, SourceIdentity,
+    WorkspaceIdentity,
+};
+use crate::engine::MAX_EFFECTS_PER_TURN;
 use crate::evidence::digest_bytes;
 use crate::strict_json::{canonical_digest, decode_strict_json};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ProviderVisibleFile {
+    pub path: String,
+    pub content: String,
+    pub digest: Digest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderVisibility {
+    source_files: Vec<ProviderVisibleFile>,
+    visible_fixtures: Vec<ProviderVisibleFile>,
+    projection_digest: Digest,
+}
+
+impl ProviderVisibility {
+    /// Builds an independently digest-bound live provider projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error for path, UTF-8, byte-limit, or snapshot drift.
+    pub fn from_live_roots(
+        workspace_root: &Path,
+        workspace_seed_digest: &Digest,
+        visible_fixture_root: &Path,
+        visible_fixture_digest: &Digest,
+        maximum_bytes: usize,
+    ) -> Result<Self, AdapterError> {
+        let (source_files, source_identity) = visible_files(workspace_root, maximum_bytes)?;
+        let (visible_fixtures, fixture_identity) =
+            visible_files(visible_fixture_root, maximum_bytes)?;
+        if &canonical_digest(&source_identity)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?
+            != workspace_seed_digest
+            || &canonical_digest(&fixture_identity)
+                .map_err(|error| AdapterError::Runtime(error.to_string()))?
+                != visible_fixture_digest
+        {
+            return Err(AdapterError::Runtime(
+                "provider-visible source or fixture projection drifted".into(),
+            ));
+        }
+        Self::new(source_files, visible_fixtures)
+    }
+
+    fn from_workspace(root: &Path, maximum_bytes: usize) -> Result<Self, AdapterError> {
+        let (source_files, _) = visible_files(root, maximum_bytes)?;
+        Self::new(source_files, Vec::new())
+    }
+
+    fn new(
+        source_files: Vec<ProviderVisibleFile>,
+        visible_fixtures: Vec<ProviderVisibleFile>,
+    ) -> Result<Self, AdapterError> {
+        let projection_digest = canonical_digest(&(&source_files, &visible_fixtures))
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        Ok(Self {
+            source_files,
+            visible_fixtures,
+            projection_digest,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct VisibleFileIdentity {
+    path: PathBuf,
+    sha256: Digest,
+    size_bytes: u64,
+}
 
 pub trait ProcessRunner {
     /// Executes one prepared invocation without changing its program, arguments,
@@ -53,6 +127,8 @@ pub struct ProcessAdapterConfig {
     reasoning_effort: String,
     output_schema_path: PathBuf,
     output_schema: Vec<u8>,
+    authority: ProviderAuthority,
+    visibility: ProviderVisibility,
     limits: InvocationLimits,
     cancellation: CancellationToken,
 }
@@ -71,6 +147,32 @@ impl ProcessAdapterConfig {
         limits: InvocationLimits,
         cancellation: CancellationToken,
     ) -> Result<Self, AdapterError> {
+        let visibility =
+            ProviderVisibility::from_workspace(&request.workspace.root, limits.max_input_bytes)?;
+        Self::from_request_with_visibility(
+            request,
+            worker_id,
+            output_schema_path,
+            visibility,
+            limits,
+            cancellation,
+        )
+    }
+
+    /// Captures a prevalidated provider-visible source and fixture projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when any request, schema, authority, or limit
+    /// binding is unsafe.
+    pub fn from_request_with_visibility(
+        request: &RunRequest,
+        worker_id: impl Into<String>,
+        output_schema_path: &Path,
+        visibility: ProviderVisibility,
+        limits: InvocationLimits,
+        cancellation: CancellationToken,
+    ) -> Result<Self, AdapterError> {
         let worker_id = worker_id.into();
         if request.objective.trim().is_empty()
             || worker_id.trim().is_empty()
@@ -86,6 +188,27 @@ impl ProcessAdapterConfig {
                 "process adapter configuration is not request-bound".into(),
             ));
         }
+        let supported_capabilities = request.authority.capabilities.iter().all(|capability| {
+            matches!(
+                capability,
+                Capability::ReadWorkspace | Capability::WriteWorkspace
+            )
+        });
+        if request.authority.allowed_roots != [request.workspace.root.clone()]
+            || !supported_capabilities
+            || request
+                .authority
+                .capabilities
+                .contains(&Capability::RunLocalProgram)
+            || !request.authority.allowed_programs.is_empty()
+            || request.authority.network != NetworkPolicy::Denied
+            || !request.authority.allowed_network_hosts.is_empty()
+            || request.authority.external_effects != ExternalEffectPolicy::Denied
+        {
+            return Err(AdapterError::Runtime(
+                "process adapter model authority is not native-workspace-only".into(),
+            ));
+        }
         let schema_metadata = std::fs::symlink_metadata(output_schema_path)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
         if schema_metadata.file_type().is_symlink()
@@ -98,33 +221,13 @@ impl ProcessAdapterConfig {
         }
         let canonical_schema = std::fs::canonicalize(output_schema_path)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        let mut schema_allowed = false;
-        for root in &request.authority.allowed_roots {
-            let metadata = std::fs::symlink_metadata(root)
-                .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(AdapterError::Runtime(
-                    "authority root is not a regular non-symlink directory".into(),
-                ));
-            }
-            let canonical_root = std::fs::canonicalize(root)
-                .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-            if canonical_schema.starts_with(canonical_root) {
-                schema_allowed = true;
-                break;
-            }
-        }
-        if !schema_allowed {
-            return Err(AdapterError::Runtime(
-                "output schema is outside the request authority roots".into(),
-            ));
-        }
         let output_schema = std::fs::read(&canonical_schema)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
         decode_strict_json::<Value>(&output_schema, limits.max_input_bytes)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
         let authority_digest = canonical_digest(&request.authority)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        let authority = ProviderAuthority::from_request(request);
         Ok(Self {
             objective: request.objective.clone(),
             run_id: request.run_id.clone(),
@@ -142,10 +245,99 @@ impl ProcessAdapterConfig {
             reasoning_effort: request.model_profile.reasoning_effort.clone(),
             output_schema_path: canonical_schema,
             output_schema,
+            authority,
+            visibility,
             limits,
             cancellation,
         })
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProviderAuthority {
+    native_capabilities: Vec<&'static str>,
+    allowed_programs: Vec<String>,
+    network: &'static str,
+    external_effects: &'static str,
+    limits: ProviderAuthorityLimits,
+    workspace_relative_paths_only: bool,
+    parent_traversal: &'static str,
+    symlinks: &'static str,
+    native_effect_contract: NativeEffectContract,
+    denied: [&'static str; 8],
+}
+
+impl ProviderAuthority {
+    fn from_request(request: &RunRequest) -> Self {
+        let mut native_capabilities = Vec::new();
+        if request
+            .authority
+            .capabilities
+            .contains(&Capability::ReadWorkspace)
+        {
+            native_capabilities.push("read_utf8_file");
+        }
+        if request
+            .authority
+            .capabilities
+            .contains(&Capability::WriteWorkspace)
+        {
+            native_capabilities.push("write_utf8_file");
+        }
+        Self {
+            native_capabilities,
+            allowed_programs: Vec::new(),
+            network: "denied",
+            external_effects: "denied",
+            limits: ProviderAuthorityLimits {
+                max_turns: request.limits.max_turns,
+                max_effects_per_turn: MAX_EFFECTS_PER_TURN,
+                max_input_bytes: request.limits.max_input_bytes,
+                max_output_bytes: request.limits.max_output_bytes,
+                max_effect_timeout_ms: request.limits.max_effect_timeout_ms,
+            },
+            workspace_relative_paths_only: true,
+            parent_traversal: "denied",
+            symlinks: "denied",
+            native_effect_contract: NativeEffectContract {
+                read: "read_file: one workspace-relative path, no content/program/args, timeout_ms=0",
+                write: "write_file: one workspace-relative path plus UTF-8 content, no program/args, timeout_ms=0",
+                input_digest: "exact current file SHA-256 preimage",
+                nonexistent_input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+            },
+            denied: [
+                "run_program",
+                "shell",
+                "python3",
+                "rg",
+                "network",
+                "credentials",
+                "remote_mutation",
+                "executable_interpretation",
+            ],
+        }
+    }
+}
+
+#[allow(
+    clippy::struct_field_names,
+    reason = "the serialized authority contract intentionally names every maximum explicitly"
+)]
+#[derive(Clone, Debug, Serialize)]
+struct ProviderAuthorityLimits {
+    max_turns: u32,
+    max_effects_per_turn: usize,
+    max_input_bytes: u64,
+    max_output_bytes: u64,
+    max_effect_timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NativeEffectContract {
+    read: &'static str,
+    write: &'static str,
+    input_digest: &'static str,
+    nonexistent_input_digest: Digest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -336,8 +528,13 @@ struct ProviderTurnPrompt<'a> {
     adapter_identity: &'a AdapterIdentity,
     reasoning_effort: &'a str,
     source: &'a SourceIdentity,
-    workspace: &'a WorkspaceIdentity,
+    workspace: ProviderWorkspace<'a>,
     authority_digest: &'a Digest,
+    authority: &'a ProviderAuthority,
+    provider_visibility_digest: &'a Digest,
+    visible_workspace: &'a [ProviderVisibleFile],
+    visible_fixtures: &'a [ProviderVisibleFile],
+    hidden_tests: &'static str,
     policy_digest: &'a Digest,
     verifier_profile_digest: &'a Digest,
     output_schema_digest: Digest,
@@ -347,19 +544,33 @@ struct ProviderTurnPrompt<'a> {
     effect_observations: &'a [EffectObservation],
 }
 
+#[derive(Serialize)]
+struct ProviderWorkspace<'a> {
+    workspace_id: &'a str,
+    seed_digest: &'a Digest,
+}
+
 fn build_prompt(
     config: &ProcessAdapterConfig,
     context: &TurnContext,
 ) -> Result<String, AdapterError> {
     let prompt = ProviderTurnPrompt {
-        schema_version: "ao.next.provider-turn-prompt.v1",
+        schema_version: "ao.next.provider-turn-prompt.v2",
         objective: &config.objective,
         run_id: &config.run_id,
         adapter_identity: &config.identity,
         reasoning_effort: &config.reasoning_effort,
         source: &config.source,
-        workspace: &config.workspace,
+        workspace: ProviderWorkspace {
+            workspace_id: &config.workspace.workspace_id,
+            seed_digest: &config.workspace.seed_digest,
+        },
         authority_digest: &config.authority_digest,
+        authority: &config.authority,
+        provider_visibility_digest: &config.visibility.projection_digest,
+        visible_workspace: &config.visibility.source_files,
+        visible_fixtures: &config.visibility.visible_fixtures,
+        hidden_tests: "unavailable_and_must_not_be_requested",
         policy_digest: &config.policy_digest,
         verifier_profile_digest: &config.verifier_profile_digest,
         output_schema_digest: digest_bytes(&config.output_schema),
@@ -368,7 +579,149 @@ fn build_prompt(
         repair_attempt: context.repair_attempt,
         effect_observations: &context.effect_observations,
     };
-    serde_json::to_string(&prompt).map_err(|error| AdapterError::Runtime(error.to_string()))
+    if canonical_digest(&(
+        &config.visibility.source_files,
+        &config.visibility.visible_fixtures,
+    ))
+    .map_err(|error| AdapterError::Runtime(error.to_string()))?
+        != config.visibility.projection_digest
+    {
+        return Err(AdapterError::Runtime(
+            "provider visibility projection drifted".into(),
+        ));
+    }
+    let prompt =
+        serde_json::to_string(&prompt).map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if prompt.len() > config.limits.max_input_bytes {
+        return Err(AdapterError::Runtime(
+            "provider prompt exceeded the bound input size".into(),
+        ));
+    }
+    Ok(prompt)
+}
+
+fn visible_files(
+    root: &Path,
+    maximum_bytes: usize,
+) -> Result<(Vec<ProviderVisibleFile>, Vec<VisibleFileIdentity>), AdapterError> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AdapterError::Runtime(
+            "provider-visible root is not a regular non-symlink directory".into(),
+        ));
+    }
+    let mut paths = Vec::new();
+    collect_visible_paths(root, root, &mut paths)?;
+    paths.sort();
+    let mut total = 0_usize;
+    let mut files = Vec::with_capacity(paths.len());
+    let mut identities = Vec::with_capacity(paths.len());
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        let relative_text = safe_relative_text(relative)?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(AdapterError::Runtime(
+                "provider-visible inventory contains a non-regular file".into(),
+            ));
+        }
+        let bytes =
+            std::fs::read(&path).map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        total = total.checked_add(bytes.len()).ok_or_else(|| {
+            AdapterError::Runtime("provider-visible byte count overflowed".into())
+        })?;
+        if bytes.len() > maximum_bytes || total > maximum_bytes {
+            return Err(AdapterError::Runtime(
+                "provider-visible inventory exceeded its byte bound".into(),
+            ));
+        }
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| AdapterError::Runtime("provider-visible file is not UTF-8".into()))?
+            .to_owned();
+        let digest = digest_bytes(&bytes);
+        files.push(ProviderVisibleFile {
+            path: relative_text,
+            content,
+            digest: digest.clone(),
+        });
+        identities.push(VisibleFileIdentity {
+            path: relative.to_path_buf(),
+            sha256: digest,
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        });
+    }
+    Ok((files, identities))
+}
+
+fn collect_visible_paths(
+    root: &Path,
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), AdapterError> {
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        safe_relative_text(relative)?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(AdapterError::Runtime(
+                "provider-visible inventory contains a symlink".into(),
+            ));
+        }
+        if metadata.is_dir() {
+            collect_visible_paths(root, &path, paths)?;
+        } else if metadata.is_file() {
+            paths.push(path);
+        } else {
+            return Err(AdapterError::Runtime(
+                "provider-visible inventory contains a special file".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn safe_relative_text(path: &Path) -> Result<String, AdapterError> {
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            !matches!(component, Component::Normal(_))
+                || match component {
+                    Component::Normal(value) => {
+                        let value = value.to_string_lossy().to_ascii_lowercase();
+                        value == ".git" || value.contains("hidden")
+                    }
+                    _ => false,
+                }
+        })
+    {
+        return Err(AdapterError::Runtime(
+            "provider-visible inventory path is unsafe".into(),
+        ));
+    }
+    let components =
+        path.components()
+            .map(|component| match component {
+                Component::Normal(value) => value.to_str().map(str::to_owned).ok_or_else(|| {
+                    AdapterError::Runtime("provider-visible path is not UTF-8".into())
+                }),
+                _ => Err(AdapterError::Runtime(
+                    "provider-visible inventory path is unsafe".into(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    Ok(components.join("/"))
 }
 
 fn codex_usage(bytes: &[u8], maximum_bytes: usize) -> Result<TokenUsage, AdapterError> {

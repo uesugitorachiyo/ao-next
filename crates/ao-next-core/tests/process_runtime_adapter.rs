@@ -3,7 +3,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ao_next_core::adapter::process::{
-    ProcessAdapterConfig, ProcessRunner, ProcessRuntimeAdapter, capture_runtime_output,
+    ProcessAdapterConfig, ProcessRunner, ProcessRuntimeAdapter, ProviderVisibility,
+    capture_runtime_output,
 };
 use ao_next_core::adapter::{
     CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
@@ -15,6 +16,7 @@ use ao_next_core::contracts::{
 };
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineVerifier, VerificationOutcome};
+use ao_next_core::evidence::digest_bytes;
 use ao_next_core::strict_json::canonical_digest;
 use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
@@ -235,7 +237,7 @@ fn codex_process_adapter_runs_through_engine_with_trusted_envelope_usage() {
     )
     .expect("adapter config");
     let mut adapter = ProcessRuntimeAdapter::new(config, runner);
-    let broker = LocalEffectBroker::new(1_000, 64 * 1024);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
     let mut verifier = PassingVerifier;
 
     let outcome = DirectEngine::new(&broker).run(&request, &mut adapter, &mut verifier);
@@ -273,6 +275,173 @@ fn codex_process_adapter_runs_through_engine_with_trusted_envelope_usage() {
             .expect("authority digest")
             .as_str()
     );
+}
+
+#[test]
+fn provider_prompt_exposes_bound_native_authority_and_visible_inventory() {
+    let workspace = TempDir::new().expect("workspace");
+    std::fs::write(workspace.path().join("source.txt"), b"visible source\n")
+        .expect("visible source");
+    let schema = workspace.path().join("turn.schema.json");
+    std::fs::write(&schema, b"{\"type\":\"object\"}").expect("schema");
+    let mut request = request(workspace.path());
+    request
+        .authority
+        .capabilities
+        .extend([Capability::ReadWorkspace, Capability::WriteWorkspace]);
+    let provider = br#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"actions\":[{\"kind\":\"verify\"}],\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1,\"output_bytes\":1},\"model_claimed_success\":false,\"control_mutations\":[]}"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}
+"#;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let runner = FakeRunner {
+        output: InvocationOutput {
+            status: 0,
+            stdout: provider.to_vec(),
+            stderr: Vec::new(),
+        },
+        seen: seen.clone(),
+    };
+    let config = ProcessAdapterConfig::from_request(
+        &request,
+        "worker-visible-01",
+        &schema,
+        InvocationLimits {
+            max_input_bytes: 64 * 1024,
+            max_output_bytes: 64 * 1024,
+            timeout_ms: 1_000,
+        },
+        CancellationToken::new(),
+    )
+    .expect("adapter config");
+    let mut adapter = ProcessRuntimeAdapter::new(config, runner);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
+    let mut verifier = PassingVerifier;
+
+    let outcome = DirectEngine::new(&broker).run(&request, &mut adapter, &mut verifier);
+
+    assert_eq!(outcome.terminal_state, RunState::Passed);
+    let invocations = seen.lock().expect("invocation log");
+    let prompt: serde_json::Value =
+        serde_json::from_slice(&invocations[0].stdin).expect("structured prompt");
+    assert_eq!(prompt["schema_version"], "ao.next.provider-turn-prompt.v2");
+    assert_eq!(
+        prompt["authority"]["native_capabilities"],
+        serde_json::json!(["read_utf8_file", "write_utf8_file"])
+    );
+    assert_eq!(
+        prompt["authority"]["allowed_programs"],
+        serde_json::json!([])
+    );
+    assert_eq!(prompt["authority"]["network"], "denied");
+    assert_eq!(prompt["authority"]["external_effects"], "denied");
+    assert_eq!(prompt["authority"]["limits"]["max_turns"], 2);
+    assert_eq!(prompt["authority"]["limits"]["max_input_bytes"], 65_536);
+    assert_eq!(prompt["authority"]["limits"]["max_output_bytes"], 65_536);
+    assert_eq!(
+        prompt["visible_workspace"],
+        serde_json::json!([
+            {
+                "path": "source.txt",
+                "content": "visible source\n",
+                "digest": digest_bytes(b"visible source\n")
+            },
+            {
+                "path": "turn.schema.json",
+                "content": "{\"type\":\"object\"}",
+                "digest": digest_bytes(b"{\"type\":\"object\"}")
+            }
+        ])
+    );
+    assert_eq!(
+        prompt["hidden_tests"],
+        "unavailable_and_must_not_be_requested"
+    );
+}
+
+#[test]
+fn live_visibility_binds_visible_fixtures_without_private_paths() {
+    let workspace = TempDir::new().expect("workspace");
+    let visible = TempDir::new().expect("visible fixtures");
+    let controls = TempDir::new().expect("controls");
+    std::fs::write(workspace.path().join("source.txt"), b"source\n").expect("source");
+    std::fs::write(visible.path().join("example.txt"), b"example\n").expect("visible");
+    let schema = controls.path().join("turn.schema.json");
+    std::fs::write(&schema, b"{\"type\":\"object\"}").expect("schema");
+    let source_digest = canonical_digest(&[serde_json::json!({
+        "path": "source.txt",
+        "sha256": digest_bytes(b"source\n"),
+        "size_bytes": 7
+    })])
+    .expect("source digest");
+    let visible_digest = canonical_digest(&[serde_json::json!({
+        "path": "example.txt",
+        "sha256": digest_bytes(b"example\n"),
+        "size_bytes": 8
+    })])
+    .expect("visible digest");
+    let visibility = ProviderVisibility::from_live_roots(
+        workspace.path(),
+        &source_digest,
+        visible.path(),
+        &visible_digest,
+        64 * 1024,
+    )
+    .expect("bound visibility");
+    let mut request = request(workspace.path());
+    request.workspace.seed_digest = source_digest;
+    request
+        .authority
+        .capabilities
+        .extend([Capability::ReadWorkspace, Capability::WriteWorkspace]);
+    let provider = br#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"actions\":[{\"kind\":\"verify\"}],\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1,\"output_bytes\":1},\"model_claimed_success\":false,\"control_mutations\":[]}"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}
+"#;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let runner = FakeRunner {
+        output: InvocationOutput {
+            status: 0,
+            stdout: provider.to_vec(),
+            stderr: Vec::new(),
+        },
+        seen: seen.clone(),
+    };
+    let config = ProcessAdapterConfig::from_request_with_visibility(
+        &request,
+        "worker-visible-live-01",
+        &schema,
+        visibility,
+        InvocationLimits {
+            max_input_bytes: 64 * 1024,
+            max_output_bytes: 64 * 1024,
+            timeout_ms: 1_000,
+        },
+        CancellationToken::new(),
+    )
+    .expect("adapter config");
+    let mut adapter = ProcessRuntimeAdapter::new(config, runner);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
+    let mut verifier = PassingVerifier;
+
+    assert_eq!(
+        DirectEngine::new(&broker)
+            .run(&request, &mut adapter, &mut verifier)
+            .terminal_state,
+        RunState::Passed
+    );
+    let invocations = seen.lock().expect("invocations");
+    let prompt_text = String::from_utf8(invocations[0].stdin.clone()).expect("prompt UTF-8");
+    let prompt: serde_json::Value = serde_json::from_str(&prompt_text).expect("prompt JSON");
+    assert_eq!(
+        prompt["visible_fixtures"],
+        serde_json::json!([{
+            "path": "example.txt",
+            "content": "example\n",
+            "digest": digest_bytes(b"example\n")
+        }])
+    );
+    assert!(!prompt_text.contains(workspace.path().to_str().expect("workspace path")));
+    assert!(!prompt_text.contains(visible.path().to_str().expect("visible path")));
+    assert!(!prompt_text.contains(controls.path().to_str().expect("controls path")));
 }
 
 #[test]
@@ -331,7 +500,7 @@ fn claude_process_adapter_runs_through_engine_with_trusted_envelope_usage() {
     )
     .expect("adapter config");
     let mut adapter = ProcessRuntimeAdapter::new(config, runner);
-    let broker = LocalEffectBroker::new(1_000, 64 * 1024);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
     let mut verifier = PassingVerifier;
 
     let outcome = DirectEngine::new(&broker).run(&request, &mut adapter, &mut verifier);
@@ -388,7 +557,7 @@ fn raw_capture_digest_binds_status_stdout_and_stderr() {
     )
     .expect("adapter config");
     let mut adapter = ProcessRuntimeAdapter::new(config, runner);
-    let broker = LocalEffectBroker::new(1_000, 64 * 1024);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
     let mut verifier = PassingVerifier;
 
     let outcome = DirectEngine::new(&broker).run(&request, &mut adapter, &mut verifier);
@@ -405,20 +574,18 @@ fn effect_observation_returns_to_one_worker_on_the_next_provider_turn() {
     let workspace = TempDir::new().expect("workspace");
     let schema = workspace.path().join("turn.schema.json");
     std::fs::write(&schema, b"{\"type\":\"object\"}").expect("schema");
+    let source = workspace.path().join("source.txt");
+    std::fs::write(&source, b"effect-output").expect("source");
     let mut request = request(workspace.path());
     request
         .authority
         .capabilities
-        .insert(Capability::RunLocalProgram);
-    request
-        .authority
-        .allowed_programs
-        .insert("/usr/bin/printf".into());
+        .insert(Capability::ReadWorkspace);
     let first = format!(
-        "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"{{\\\"actions\\\":[{{\\\"kind\\\":\\\"effect\\\",\\\"value\\\":{{\\\"effect_id\\\":\\\"effect-1\\\",\\\"run_id\\\":\\\"{}\\\",\\\"kind\\\":\\\"run_program\\\",\\\"program\\\":\\\"/usr/bin/printf\\\",\\\"args\\\":[\\\"effect-output\\\"],\\\"paths\\\":[\\\"{}\\\"],\\\"timeout_ms\\\":100,\\\"input_digest\\\":\\\"{}\\\"}}}}],\\\"usage\\\":{{\\\"input_tokens\\\":99,\\\"cached_input_tokens\\\":99,\\\"reasoning_tokens\\\":99,\\\"output_tokens\\\":99,\\\"output_bytes\\\":99}},\\\"model_claimed_success\\\":false,\\\"control_mutations\\\":[]}}\"}}}}\n{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1}}}}\n",
+        "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"{{\\\"actions\\\":[{{\\\"kind\\\":\\\"effect\\\",\\\"value\\\":{{\\\"effect_id\\\":\\\"effect-1\\\",\\\"run_id\\\":\\\"{}\\\",\\\"kind\\\":\\\"read_file\\\",\\\"program\\\":null,\\\"content\\\":null,\\\"args\\\":[],\\\"paths\\\":[\\\"{}\\\"],\\\"timeout_ms\\\":0,\\\"input_digest\\\":\\\"{}\\\"}}}}],\\\"usage\\\":{{\\\"input_tokens\\\":99,\\\"cached_input_tokens\\\":99,\\\"reasoning_tokens\\\":99,\\\"output_tokens\\\":99,\\\"output_bytes\\\":99}},\\\"model_claimed_success\\\":false,\\\"control_mutations\\\":[]}}\"}}}}\n{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1}}}}\n",
         request.run_id,
-        workspace.path().display(),
-        ZERO
+        "source.txt",
+        digest_bytes(b"effect-output")
     );
     let second = br#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"actions\":[{\"kind\":\"verify\"}],\"usage\":{\"input_tokens\":99,\"cached_input_tokens\":99,\"reasoning_tokens\":99,\"output_tokens\":99,\"output_bytes\":99},\"model_claimed_success\":false,\"control_mutations\":[]}"}}
 {"type":"turn.completed","usage":{"input_tokens":2,"cached_input_tokens":0,"reasoning_tokens":0,"output_tokens":1}}
@@ -452,7 +619,7 @@ fn effect_observation_returns_to_one_worker_on_the_next_provider_turn() {
     )
     .expect("adapter config");
     let mut adapter = ProcessRuntimeAdapter::new(config, runner);
-    let broker = LocalEffectBroker::new(1_000, 64 * 1024);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
     let mut verifier = PassingVerifier;
 
     let outcome = DirectEngine::new(&broker).run(&request, &mut adapter, &mut verifier);
@@ -517,7 +684,7 @@ fn pre_cancelled_adapter_never_calls_the_process_runner() {
     )
     .expect("adapter config");
     let mut adapter = ProcessRuntimeAdapter::new(config, runner);
-    let broker = LocalEffectBroker::new(1_000, 64 * 1024);
+    let broker = LocalEffectBroker::new(1_000, 64 * 1024, 64 * 1024);
     let mut verifier = PassingVerifier;
 
     let outcome = DirectEngine::new(&broker).run(&request, &mut adapter, &mut verifier);

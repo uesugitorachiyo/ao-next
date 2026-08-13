@@ -62,6 +62,62 @@ pub fn prepare_invocation(
             "read-only".into(),
             "-c".into(),
             "approval_policy=\"never\"".into(),
+            "-c".into(),
+            "features.shell_tool=false".into(),
+            "-c".into(),
+            "features.unified_exec=false".into(),
+            "-c".into(),
+            "features.js_repl=false".into(),
+            "-c".into(),
+            "features.code_mode=false".into(),
+            "-c".into(),
+            "features.code_mode_host=false".into(),
+            "-c".into(),
+            "features.deferred_executor=false".into(),
+            "-c".into(),
+            "features.executor_capability_discovery=false".into(),
+            "-c".into(),
+            "features.apply_patch_freeform=false".into(),
+            "-c".into(),
+            "features.apply_patch_streaming_events=false".into(),
+            "-c".into(),
+            "features.web_search_request=false".into(),
+            "-c".into(),
+            "features.standalone_web_search=false".into(),
+            "-c".into(),
+            "features.browser_use=false".into(),
+            "-c".into(),
+            "features.browser_use_external=false".into(),
+            "-c".into(),
+            "features.browser_use_full_cdp_access=false".into(),
+            "-c".into(),
+            "features.in_app_browser=false".into(),
+            "-c".into(),
+            "features.computer_use=false".into(),
+            "-c".into(),
+            "features.image_generation=false".into(),
+            "-c".into(),
+            "features.view_image=false".into(),
+            "-c".into(),
+            "features.apps=false".into(),
+            "-c".into(),
+            "features.plugins=false".into(),
+            "-c".into(),
+            "features.remote_plugin=false".into(),
+            "-c".into(),
+            "features.multi_agent=false".into(),
+            "-c".into(),
+            "features.skill_search=false".into(),
+            "-c".into(),
+            "features.workspace_dependencies=false".into(),
+            "-c".into(),
+            "features.tool_suggest=false".into(),
+            "-c".into(),
+            "tools.web_search=false".into(),
+            "-c".into(),
+            "tools.experimental_request_user_input=false".into(),
+            "-c".into(),
+            "tools.update_plan=false".into(),
             "--model".into(),
             model.into(),
             "-c".into(),
@@ -258,21 +314,34 @@ pub fn normalize_output(
         }
         let event: Value = decode_strict_json(line, maximum_bytes)
             .map_err(|error| AdapterContractError::MalformedOutput(error.to_string()))?;
-        if event.get("type").and_then(Value::as_str) != Some("item.completed")
-            || event.pointer("/item/type").and_then(Value::as_str) != Some("agent_message")
-        {
-            continue;
+        match event.get("type").and_then(Value::as_str) {
+            Some("thread.started" | "turn.started" | "turn.completed") => {}
+            Some("item.completed")
+                if event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") =>
+            {
+                if turn.is_some() {
+                    return Err(AdapterContractError::MalformedOutput(
+                        "Codex returned multiple agent messages".into(),
+                    ));
+                }
+                let text = event
+                    .pointer("/item/text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        AdapterContractError::MalformedOutput("agent message has no text".into())
+                    })?;
+                turn = Some(
+                    decode_strict_json(text.as_bytes(), maximum_bytes).map_err(|error| {
+                        AdapterContractError::MalformedOutput(error.to_string())
+                    })?,
+                );
+            }
+            _ => {
+                return Err(AdapterContractError::MalformedOutput(
+                    "Codex emitted unmediated or unknown activity".into(),
+                ));
+            }
         }
-        let text = event
-            .pointer("/item/text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AdapterContractError::MalformedOutput("agent message has no text".into())
-            })?;
-        turn = Some(
-            decode_strict_json(text.as_bytes(), maximum_bytes)
-                .map_err(|error| AdapterContractError::MalformedOutput(error.to_string()))?,
-        );
     }
     Ok(NormalizedAdapterTurn {
         identity,

@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::adapter::process::ProcessRunner;
-use crate::adapter::{CancellationToken, InvocationLimits, InvocationOutput, PreparedInvocation};
-use crate::contracts::{
-    AuthorityEnvelope, Digest, EffectKind, EffectRequest, StructuredCommand, VerifierProfile,
-    VerifierReport, VerifierResult,
+use crate::adapter::{
+    CancellationToken, InvocationLimits, InvocationOutput, PreparedInvocation, execute_bounded,
 };
-use crate::effects::{EffectBrokerError, LocalEffectBroker};
+use crate::contracts::{
+    Digest, StructuredCommand, VerifierProfile, VerifierReport, VerifierResult,
+};
 use crate::engine::{EngineVerifier, VerificationOutcome};
 use crate::evidence::{EvidenceError, digest_bytes, digest_file, read_regular_file};
 use crate::strict_json::{StrictJsonError, canonical_digest, decode_strict_json};
@@ -121,18 +121,10 @@ pub enum VerificationError {
     UnsafeWorkspace(PathBuf),
     #[error("verifier I/O failed: {0}")]
     Io(String),
-    #[error("effect broker failed: {0}")]
-    Effect(String),
     #[error("strict JSON failed: {0}")]
     StrictJson(#[from] StrictJsonError),
     #[error("evidence helper failed: {0}")]
     Evidence(String),
-}
-
-impl From<EffectBrokerError> for VerificationError {
-    fn from(error: EffectBrokerError) -> Self {
-        Self::Effect(error.to_string())
-    }
 }
 
 impl From<EvidenceError> for VerificationError {
@@ -158,8 +150,6 @@ pub trait ProductVerifier {
 
 pub struct LocalProductVerifier<'a> {
     run_id: &'a str,
-    authority: &'a AuthorityEnvelope,
-    broker: &'a LocalEffectBroker,
     registry: &'a VerifierRegistry,
     recorded_at: DateTime<Utc>,
 }
@@ -168,15 +158,11 @@ impl<'a> LocalProductVerifier<'a> {
     #[must_use]
     pub const fn new(
         run_id: &'a str,
-        authority: &'a AuthorityEnvelope,
-        broker: &'a LocalEffectBroker,
         registry: &'a VerifierRegistry,
         recorded_at: DateTime<Utc>,
     ) -> Self {
         Self {
             run_id,
-            authority,
-            broker,
             registry,
             recorded_at,
         }
@@ -202,7 +188,12 @@ impl ProductVerifier for LocalProductVerifier<'_> {
 
         let mut results = Vec::new();
         for (index, command) in plan.commands.iter().enumerate() {
-            results.push(self.verify_command(workspace, command, index)?);
+            results.push(Self::verify_command(
+                workspace,
+                command,
+                index,
+                plan.max_file_bytes,
+            ));
         }
         for path in &plan.required_files {
             results.push(verify_required_file(workspace, path, plan.max_file_bytes));
@@ -237,25 +228,34 @@ impl ProductVerifier for LocalProductVerifier<'_> {
 
 impl LocalProductVerifier<'_> {
     fn verify_command(
-        &self,
         workspace: &VerifiedWorkspace,
         command: &StructuredCommand,
         index: usize,
-    ) -> Result<VerifierResult, VerificationError> {
-        let request = EffectRequest {
-            effect_id: format!("verifier-command-{index}"),
-            run_id: self.run_id.to_owned(),
-            kind: EffectKind::RunProgram,
-            program: Some(command.program.clone()),
+        maximum_output_bytes: u64,
+    ) -> VerifierResult {
+        let invocation = PreparedInvocation {
+            program: command.program.clone(),
             args: command.args.clone(),
-            paths: vec![workspace.root.clone()],
-            timeout_ms: command.timeout_ms,
-            input_digest: canonical_digest(command)?,
+            stdin: Vec::new(),
+            cwd: workspace.root.clone(),
+            limits: InvocationLimits {
+                max_input_bytes: 0,
+                max_output_bytes: usize::try_from(maximum_output_bytes).unwrap_or(usize::MAX),
+                timeout_ms: command.timeout_ms,
+            },
         };
-        let output = self.broker.execute(&request, self.authority)?;
+        let output = match execute_bounded(&invocation, &CancellationToken::new()) {
+            Ok(output) => output,
+            Err(error) => {
+                return failed_result(
+                    format!("command:{index}:{}", command.program),
+                    &error.to_string(),
+                );
+            }
+        };
         let mut combined = output.stdout;
         combined.extend_from_slice(&output.stderr);
-        Ok(VerifierResult {
+        VerifierResult {
             verifier_id: format!("command:{index}:{}", command.program),
             passed: output.status == 0,
             exit_status: Some(output.status),
@@ -265,7 +265,7 @@ impl LocalProductVerifier<'_> {
             } else {
                 format!("structured command exited {}", output.status)
             },
-        })
+        }
     }
 }
 
@@ -512,14 +512,6 @@ impl CommandVerifierProfile {
             || request.verifier_profile.profile_digest != self.profile_digest
             || request.verifier_profile.commands != commands
             || request.verifier_profile.required_artifacts != required_artifacts
-            || !request
-                .authority
-                .capabilities
-                .contains(&crate::contracts::Capability::RunLocalProgram)
-            || self
-                .entries
-                .iter()
-                .any(|entry| !request.authority.allowed_programs.contains(&entry.program))
         {
             return Err(VerificationError::ProfileContractMismatch);
         }

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+pub mod campaign;
 pub mod evaluate;
 pub mod inspect;
 pub mod instantiate_corpus;
@@ -27,6 +28,7 @@ enum Command {
     RunCurrentAoBaseline(LiveRunArgs),
     RunDirectBaseline(LiveRunArgs),
     PreflightLiveInput(PreflightLiveInputArgs),
+    QualifyLiveCampaign(QualifyLiveCampaignArgs),
     Inspect(InspectArgs),
     VerifyEvidence(VerifyEvidenceArgs),
     Replay(ReplayArgs),
@@ -40,6 +42,10 @@ enum Command {
 pub struct LiveRunArgs {
     #[arg(long)]
     pub input: PathBuf,
+    #[arg(long)]
+    pub trusted_corpus_digest: Option<String>,
+    #[arg(long)]
+    pub trusted_verifier_profile_digest: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -55,6 +61,24 @@ pub struct PreflightLiveInputArgs {
     pub input: PathBuf,
     #[arg(long, value_enum, ignore_case = false)]
     pub variant: LiveVariantArg,
+    #[arg(long)]
+    pub trusted_corpus_digest: Option<String>,
+    #[arg(long)]
+    pub trusted_verifier_profile_digest: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct QualifyLiveCampaignArgs {
+    #[arg(long)]
+    pub qualification: PathBuf,
+    #[arg(long)]
+    pub trusted_corpus_digest: String,
+    #[arg(long = "trusted-verifier-profile", value_name = "TASK_ID=SHA256")]
+    pub trusted_verifier_profiles: Vec<String>,
+    #[arg(long)]
+    pub fake_provider_program: PathBuf,
+    #[arg(long)]
+    pub fake_provider_program_digest: String,
 }
 
 #[derive(Debug, Args)]
@@ -211,6 +235,7 @@ pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
         Command::RunCurrentAoBaseline(args) => live::execute(&args, live::LiveVariant::N0),
         Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
         Command::PreflightLiveInput(args) => live::preflight(&args),
+        Command::QualifyLiveCampaign(args) => campaign::execute(&args),
         Command::Inspect(args) => inspect::execute(&args),
         Command::VerifyEvidence(args) => verify_evidence::execute(&args),
         Command::Replay(args) => replay::execute(&args),

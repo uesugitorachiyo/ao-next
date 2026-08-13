@@ -565,7 +565,29 @@ fn live_commands_deny_before_input_or_process_resolution() {
         "--variant",
         "n0",
     ]);
-    assert_json_error(&output, 3, "invalid_input");
+    assert_json_error(&output, 2, "usage");
+}
+
+#[test]
+fn live_commands_require_operator_owned_corpus_and_verifier_anchors() {
+    let temporary = TempDir::new().expect("temporary");
+    let missing_input = temporary.path().join("missing-live-input.json");
+    for command in ["run-current-ao-baseline", "run-live", "run-direct-baseline"] {
+        let output = run_with_live_environment(
+            &[command, "--input", missing_input.to_str().expect("path")],
+            temporary.path(),
+            Some("operator-authorized"),
+        );
+        assert_json_error(&output, 2, "usage");
+    }
+    let output = run(&[
+        "preflight-live-input",
+        "--input",
+        missing_input.to_str().expect("path"),
+        "--variant",
+        "n7",
+    ]);
+    assert_json_error(&output, 2, "usage");
 }
 
 fn sealed_corpus() -> CorpusManifest {
@@ -615,6 +637,58 @@ fn sealed_corpus() -> CorpusManifest {
     };
     corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
     corpus
+}
+
+fn qualify_campaign(path: &Path) -> Output {
+    let fake_program = Path::new("/usr/bin/true");
+    let fake_digest = digest_bytes(&std::fs::read(fake_program).expect("fake program bytes"));
+    run(&[
+        "qualify-live-campaign",
+        "--qualification",
+        path.to_str().expect("path"),
+        "--trusted-corpus-digest",
+        ZERO_DIGEST,
+        "--trusted-verifier-profile",
+        &format!("greenfield-engineering-app={ONE_DIGEST}"),
+        "--trusted-verifier-profile",
+        &format!("bounded-defect-repair={ONE_DIGEST}"),
+        "--trusted-verifier-profile",
+        &format!("artifact-reconciliation={ONE_DIGEST}"),
+        "--fake-provider-program",
+        fake_program.to_str().expect("fake program path"),
+        "--fake-provider-program-digest",
+        fake_digest.as_str(),
+    ])
+}
+
+#[test]
+fn campaign_rejects_caller_authored_attestations_without_executing_a_fake_process() {
+    let temporary = TempDir::new().expect("temporary");
+    let path = temporary.path().join("qualification.json");
+    write_json(
+        &path,
+        &serde_json::json!({
+            "schema_version":"ao.next.provider-free-campaign-qualification.v1",
+            "rows":27,
+            "negative_mutations":[{"name":"duplicate-top-level-key","rejected":true}],
+            "provider_processes":27,
+            "provider_calls":0
+        }),
+    );
+    let output = qualify_campaign(&path);
+    assert_json_error(&output, 3, "invalid_input");
+}
+
+#[test]
+fn campaign_parser_rejects_malformed_and_over_one_mib_inputs_separately() {
+    let temporary = TempDir::new().expect("temporary");
+    let malformed = temporary.path().join("malformed.json");
+    std::fs::write(&malformed, b"{").expect("malformed input");
+    assert_json_error(&qualify_campaign(&malformed), 3, "invalid_input");
+
+    let oversized = temporary.path().join("oversized.json");
+    std::fs::write(&oversized, vec![b' '; 1024 * 1024 + 1]).expect("oversized input");
+    assert_json_error(&qualify_campaign(&oversized), 3, "invalid_input");
 }
 
 #[test]

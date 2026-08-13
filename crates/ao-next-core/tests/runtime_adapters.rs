@@ -188,6 +188,7 @@ fn codex_projects_one_of_without_mutating_the_internal_schema() {
         !String::from_utf8_lossy(&std::fs::read(projected).expect("projected schema"))
             .contains("\"oneOf\"")
     );
+    assert_all_object_properties_required(&projected_value);
 
     let repeated = codex::prepare_invocation(
         "fixture-model",
@@ -199,6 +200,37 @@ fn codex_projects_one_of_without_mutating_the_internal_schema() {
     )
     .expect("deterministic projected Codex invocation");
     assert_eq!(invocation.args, repeated.args);
+}
+
+fn assert_all_object_properties_required(schema: &serde_json::Value) {
+    match schema {
+        serde_json::Value::Array(values) => {
+            values
+                .iter()
+                .for_each(assert_all_object_properties_required);
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(properties) = object
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                let required = object
+                    .get("required")
+                    .and_then(serde_json::Value::as_array)
+                    .expect("object schema required array");
+                for property in properties.keys() {
+                    assert!(
+                        required.iter().any(|value| value == property),
+                        "projected object omits {property:?} from required"
+                    );
+                }
+            }
+            object
+                .values()
+                .for_each(assert_all_object_properties_required);
+        }
+        _ => {}
+    }
 }
 
 #[test]

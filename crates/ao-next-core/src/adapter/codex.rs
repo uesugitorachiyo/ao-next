@@ -98,7 +98,7 @@ fn prepare_provider_schema(
         .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
     let mut schema: Value = decode_strict_json(&source, maximum_bytes)
         .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
-    if !project_one_of(&mut schema)? {
+    if !project_codex_schema(&mut schema)? {
         return Ok(source_path);
     }
     let projected = serde_json::to_vec(&schema)
@@ -121,14 +121,11 @@ fn prepare_provider_schema(
     Ok(projected_path)
 }
 
-fn project_one_of(schema: &mut Value) -> Result<bool, AdapterContractError> {
+fn project_codex_schema(schema: &mut Value) -> Result<bool, AdapterContractError> {
     match schema {
-        Value::Array(values) => {
-            values.iter_mut().try_fold(
-                false,
-                |changed, value| Ok(project_one_of(value)? || changed),
-            )
-        }
+        Value::Array(values) => values.iter_mut().try_fold(false, |changed, value| {
+            Ok(project_codex_schema(value)? || changed)
+        }),
         Value::Object(object) => {
             let mut changed = false;
             if let Some(one_of) = object.remove("oneOf") {
@@ -140,8 +137,20 @@ fn project_one_of(schema: &mut Value) -> Result<bool, AdapterContractError> {
                 object.insert("anyOf".into(), one_of);
                 changed = true;
             }
+            if let Some(required) =
+                object
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map(|properties| {
+                        Value::Array(properties.keys().cloned().map(Value::String).collect())
+                    })
+                && object.get("required") != Some(&required)
+            {
+                object.insert("required".into(), required);
+                changed = true;
+            }
             for value in object.values_mut() {
-                changed = project_one_of(value)? || changed;
+                changed = project_codex_schema(value)? || changed;
             }
             Ok(changed)
         }

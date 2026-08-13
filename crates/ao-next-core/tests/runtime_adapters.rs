@@ -5,9 +5,10 @@ use std::time::Duration;
 use ao_next_core::adapter::claude;
 use ao_next_core::adapter::codex;
 use ao_next_core::adapter::{
-    AdapterIdentity, CancellationToken, InvocationError, InvocationLimits, PreparedInvocation,
-    execute_bounded, live_adapter_tests_enabled,
+    AdapterIdentity, AdapterTurn, CancellationToken, InvocationError, InvocationLimits,
+    PreparedInvocation, execute_bounded, live_adapter_tests_enabled,
 };
+use schemars::schema_for;
 use tempfile::TempDir;
 
 const CODEX_HELP: &[u8] =
@@ -143,6 +144,119 @@ fn invocations_are_structured_bounded_and_disable_dynamic_or_unmediated_tools() 
             .iter()
             .any(|arg| arg.contains("dangerously"))
     );
+}
+
+#[test]
+fn codex_projects_one_of_without_mutating_the_internal_schema() {
+    let temporary = TempDir::new().expect("temporary");
+    let schema = temporary.path().join("turn.schema.json");
+    let original = serde_json::to_vec(&schema_for!(AdapterTurn)).expect("internal schema");
+    assert!(String::from_utf8_lossy(&original).contains("\"oneOf\""));
+    std::fs::write(&schema, &original).expect("schema");
+
+    let invocation = codex::prepare_invocation(
+        "fixture-model",
+        "high",
+        temporary.path(),
+        &schema,
+        "prompt",
+        limits(),
+    )
+    .expect("projected Codex invocation");
+    let projected = invocation
+        .args
+        .windows(2)
+        .find_map(|args| (args[0] == "--output-schema").then(|| Path::new(&args[1])))
+        .expect("projected schema path");
+    assert_ne!(projected, schema);
+    assert_eq!(std::fs::read(&schema).expect("source schema"), original);
+
+    let projected_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(projected).expect("projected schema"))
+            .expect("projected schema JSON");
+    let action = &projected_value["definitions"]["AdapterAction"];
+    assert!(action.get("oneOf").is_none());
+    assert_eq!(action["anyOf"].as_array().map(Vec::len), Some(4));
+    assert!(
+        action["anyOf"]
+            .as_array()
+            .expect("action branches")
+            .iter()
+            .all(|branch| branch["additionalProperties"] == false)
+    );
+    assert!(
+        !String::from_utf8_lossy(&std::fs::read(projected).expect("projected schema"))
+            .contains("\"oneOf\"")
+    );
+
+    let repeated = codex::prepare_invocation(
+        "fixture-model",
+        "high",
+        temporary.path(),
+        &schema,
+        "prompt",
+        limits(),
+    )
+    .expect("deterministic projected Codex invocation");
+    assert_eq!(invocation.args, repeated.args);
+}
+
+#[test]
+fn codex_normalization_keeps_adapter_actions_strict() {
+    let usage = serde_json::json!({
+        "input_tokens": 1,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0,
+        "output_tokens": 1,
+        "output_bytes": 1
+    });
+    let valid = serde_json::json!({
+        "actions": [
+            {
+                "kind": "effect",
+                "value": {
+                    "effect_id": "effect-1",
+                    "run_id": "run-1",
+                    "kind": "read_file",
+                    "program": null,
+                    "args": [],
+                    "paths": ["fixture.txt"],
+                    "timeout_ms": 100,
+                    "input_digest": format!("sha256:{}", "0".repeat(64))
+                }
+            },
+            {"kind": "verify"},
+            {"kind": "blocked", "value": "bounded"},
+            {"kind": "interrupt"}
+        ],
+        "usage": usage,
+        "model_claimed_success": false,
+        "control_mutations": []
+    });
+    let encode = |turn: serde_json::Value| {
+        serde_json::to_vec(&serde_json::json!({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": serde_json::to_string(&turn).expect("turn")}
+        }))
+        .expect("event")
+    };
+    let normalized =
+        codex::normalize_output(identity("codex", "v1"), &encode(valid.clone()), 16 * 1024)
+            .expect("all action variants");
+    assert_eq!(normalized.turn.actions.len(), 4);
+
+    for invalid_action in [
+        serde_json::json!({"kind": "unknown"}),
+        serde_json::json!({"kind": "effect"}),
+        serde_json::json!({"kind": "verify", "value": "contradiction"}),
+        serde_json::json!({"kind": "interrupt", "unexpected": true}),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["actions"] = serde_json::json!([invalid_action]);
+        assert!(
+            codex::normalize_output(identity("codex", "v1"), &encode(invalid), 16 * 1024,).is_err()
+        );
+    }
 }
 
 #[test]
@@ -318,6 +432,102 @@ fn schema_path_must_be_a_regular_file() {
             "high",
             temporary.path(),
             Path::new("missing.schema.json"),
+            "prompt",
+            limits(),
+        )
+        .is_err()
+    );
+
+    let malformed = temporary.path().join("malformed.json");
+    std::fs::write(&malformed, br#"{"type":"object","type":"array"}"#).expect("malformed");
+    assert!(
+        codex::prepare_invocation(
+            "fixture-model",
+            "high",
+            temporary.path(),
+            &malformed,
+            "prompt",
+            limits(),
+        )
+        .is_err()
+    );
+
+    let ambiguous = temporary.path().join("ambiguous.json");
+    std::fs::write(&ambiguous, br#"{"oneOf":[],"anyOf":[],"type":"object"}"#).expect("ambiguous");
+    assert!(
+        codex::prepare_invocation(
+            "fixture-model",
+            "high",
+            temporary.path(),
+            &ambiguous,
+            "prompt",
+            limits(),
+        )
+        .is_err()
+    );
+
+    let oversized = temporary.path().join("oversized.json");
+    std::fs::write(&oversized, vec![b' '; limits().max_input_bytes + 1]).expect("oversized");
+    assert!(
+        codex::prepare_invocation(
+            "fixture-model",
+            "high",
+            temporary.path(),
+            &oversized,
+            "prompt",
+            limits(),
+        )
+        .is_err()
+    );
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&ambiguous, temporary.path().join("schema-link.json"))
+            .expect("schema symlink");
+        assert!(
+            codex::prepare_invocation(
+                "fixture-model",
+                "high",
+                temporary.path(),
+                &temporary.path().join("schema-link.json"),
+                "prompt",
+                limits(),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn codex_projection_rejects_digest_path_drift() {
+    let temporary = TempDir::new().expect("temporary");
+    let schema = temporary.path().join("turn.schema.json");
+    std::fs::write(
+        &schema,
+        serde_json::to_vec(&schema_for!(AdapterTurn)).expect("internal schema"),
+    )
+    .expect("schema");
+    let invocation = codex::prepare_invocation(
+        "fixture-model",
+        "high",
+        temporary.path(),
+        &schema,
+        "prompt",
+        limits(),
+    )
+    .expect("first projection");
+    let projected = invocation
+        .args
+        .windows(2)
+        .find_map(|args| (args[0] == "--output-schema").then(|| Path::new(&args[1])))
+        .expect("projected schema path");
+    std::fs::write(projected, b"drift").expect("projection drift");
+    assert!(
+        codex::prepare_invocation(
+            "fixture-model",
+            "high",
+            temporary.path(),
+            &schema,
             "prompt",
             limits(),
         )

@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -7,6 +9,7 @@ use super::{
     AdapterContractError, AdapterIdentity, CliContract, InvocationLimits, NormalizedAdapterTurn,
     PreparedInvocation,
 };
+use crate::evidence::digest_bytes;
 use crate::strict_json::decode_strict_json;
 
 const REQUIRED_FLAGS: [&str; 5] = [
@@ -44,13 +47,7 @@ pub fn prepare_invocation(
     limits: InvocationLimits,
 ) -> Result<PreparedInvocation, AdapterContractError> {
     validate_inputs(model, reasoning_effort, workspace, prompt, limits)?;
-    let schema_metadata = std::fs::symlink_metadata(output_schema)
-        .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
-    if schema_metadata.file_type().is_symlink() || !schema_metadata.is_file() {
-        return Err(AdapterContractError::InvalidInvocation(
-            "output schema must be a regular non-symlink file".into(),
-        ));
-    }
+    let provider_schema = prepare_provider_schema(output_schema, limits.max_input_bytes)?;
     Ok(PreparedInvocation {
         program: "codex".into(),
         args: vec![
@@ -70,7 +67,7 @@ pub fn prepare_invocation(
             "-c".into(),
             format!("model_reasoning_effort=\"{reasoning_effort}\""),
             "--output-schema".into(),
-            output_schema.display().to_string(),
+            provider_schema.display().to_string(),
             "-C".into(),
             workspace.display().to_string(),
             "-".into(),
@@ -79,6 +76,109 @@ pub fn prepare_invocation(
         cwd: workspace.to_path_buf(),
         limits,
     })
+}
+
+fn prepare_provider_schema(
+    output_schema: &Path,
+    maximum_bytes: usize,
+) -> Result<PathBuf, AdapterContractError> {
+    let metadata = std::fs::symlink_metadata(output_schema)
+        .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > u64::try_from(maximum_bytes).unwrap_or(u64::MAX)
+    {
+        return Err(AdapterContractError::InvalidInvocation(
+            "output schema must be a bounded regular non-symlink file".into(),
+        ));
+    }
+    let source_path = std::fs::canonicalize(output_schema)
+        .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+    let source = std::fs::read(&source_path)
+        .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+    let mut schema: Value = decode_strict_json(&source, maximum_bytes)
+        .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+    if !project_one_of(&mut schema)? {
+        return Ok(source_path);
+    }
+    let projected = serde_json::to_vec(&schema)
+        .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+    if projected.len() > maximum_bytes {
+        return Err(AdapterContractError::InvalidInvocation(
+            "projected output schema exceeds input bound".into(),
+        ));
+    }
+    let file_name = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AdapterContractError::InvalidInvocation("output schema has an unsafe name".into())
+        })?;
+    let digest = digest_bytes(&projected);
+    let projected_path =
+        source_path.with_file_name(format!(".{file_name}.codex-{}.json", &digest.as_str()[7..]));
+    write_projected_schema(&projected_path, &projected)?;
+    Ok(projected_path)
+}
+
+fn project_one_of(schema: &mut Value) -> Result<bool, AdapterContractError> {
+    match schema {
+        Value::Array(values) => {
+            values.iter_mut().try_fold(
+                false,
+                |changed, value| Ok(project_one_of(value)? || changed),
+            )
+        }
+        Value::Object(object) => {
+            let mut changed = false;
+            if let Some(one_of) = object.remove("oneOf") {
+                if object.contains_key("anyOf") {
+                    return Err(AdapterContractError::InvalidInvocation(
+                        "output schema combines oneOf and anyOf".into(),
+                    ));
+                }
+                object.insert("anyOf".into(), one_of);
+                changed = true;
+            }
+            for value in object.values_mut() {
+                changed = project_one_of(value)? || changed;
+            }
+            Ok(changed)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn write_projected_schema(path: &Path, expected: &[u8]) -> Result<(), AdapterContractError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(expected)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+            let contents = std::fs::read(path)
+                .map_err(|error| AdapterContractError::InvalidInvocation(error.to_string()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() || contents != expected {
+                return Err(AdapterContractError::InvalidInvocation(
+                    "projected output schema drifted".into(),
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(AdapterContractError::InvalidInvocation(error.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// Prepares the separately authorized native Codex baseline. Unlike the AO

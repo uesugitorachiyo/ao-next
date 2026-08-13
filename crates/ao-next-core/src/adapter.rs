@@ -304,7 +304,12 @@ pub enum ControlMutation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    tag = "kind",
+    content = "value"
+)]
 pub enum AdapterAction {
     Effect(EffectRequest),
     Verify,

@@ -63,8 +63,8 @@ fn assert_codex_tools_disabled(invocation: &PreparedInvocation) {
         "features.workspace_dependencies=false",
         "features.tool_suggest=false",
         "tools.web_search=false",
-        "tools.experimental_request_user_input=false",
-        "tools.update_plan=false",
+        "tools.experimental_request_user_input={enabled=false}",
+        "tools.update_plan={enabled=false}",
     ] {
         assert!(
             invocation
@@ -74,6 +74,13 @@ fn assert_codex_tools_disabled(invocation: &PreparedInvocation) {
             "N7 Codex invocation did not disable {feature}"
         );
     }
+    assert!(
+        !invocation.args.iter().any(|arg| matches!(
+            arg.as_str(),
+            "tools.experimental_request_user_input=false" | "tools.update_plan=false"
+        )),
+        "N7 Codex invocation used an obsolete structured-tool boolean"
+    );
 }
 
 #[test]

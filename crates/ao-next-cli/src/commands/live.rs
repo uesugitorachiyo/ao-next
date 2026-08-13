@@ -268,11 +268,6 @@ pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, Command
         LiveVariantArg::N7 => LiveVariant::N7,
     };
     let validated = validate_input(&input, variant, Utc::now())?;
-    let git_workspace = prepare_git_workspace(
-        &input.request.workspace.root,
-        &input.request.authority.allowed_roots,
-        &validated.task.workspace_seed_digest,
-    )?;
     Ok(CommandOutput::new(
         serde_json::json!({
             "schema_version": "ao.next.live-input-preflight.v1",
@@ -287,7 +282,7 @@ pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, Command
             "reasoning_effort": input.request.model_profile.reasoning_effort,
             "runtime": validated.profile.runtime,
             "adapter_version": validated.profile.adapter_version,
-            "git_workspace": git_workspace,
+            "workspace_prepared": false,
             "provider_calls": 0
         }),
         "validated one provider-free live input",
@@ -3048,6 +3043,71 @@ mod tests {
     }
 
     #[test]
+    fn provider_free_preflight_leaves_workspace_ready_for_exact_live_execution() {
+        assert!(std::env::var_os("AO_NEXT_LIVE_PROVIDER_CALLS").is_none());
+        let n7 = fixture(LiveVariant::N7);
+        let input_path = n7.root.path().join("live-input.json");
+        std::fs::write(
+            &input_path,
+            serde_json::to_vec(&n7.input).expect("live input JSON"),
+        )
+        .expect("live input");
+
+        let output = preflight(&PreflightLiveInputArgs {
+            input: input_path,
+            variant: LiveVariantArg::N7,
+        })
+        .expect("provider-free preflight");
+        assert_eq!(output.status, 0);
+        assert!(!n7.input.request.workspace.root.join(".git").exists());
+        assert_eq!(output.value["workspace_prepared"], false);
+        let repeated = preflight(&PreflightLiveInputArgs {
+            input: n7.root.path().join("live-input.json"),
+            variant: LiveVariantArg::N7,
+        })
+        .expect("repeated provider-free preflight");
+        assert_eq!(output.value, repeated.value);
+        assert!(!n7.input.request.workspace.root.join(".git").exists());
+
+        let script = format!(
+            "from pathlib import Path; Path({:?}).write_text('ready\\n')",
+            n7.product.display().to_string()
+        );
+        let turn = AdapterTurn {
+            actions: vec![
+                AdapterAction::Effect(EffectRequest {
+                    effect_id: "write-product".into(),
+                    run_id: n7.input.request.run_id.clone(),
+                    kind: EffectKind::RunProgram,
+                    program: Some("/usr/bin/python3".into()),
+                    args: vec!["-c".into(), script.clone()],
+                    paths: vec![n7.input.request.workspace.root.clone()],
+                    timeout_ms: 5_000,
+                    input_digest: digest_bytes(script.as_bytes()),
+                }),
+                AdapterAction::Verify,
+            ],
+            usage: TokenUsage::default(),
+            model_claimed_success: true,
+            control_mutations: Vec::new(),
+        };
+        let output = execute_with_runners(
+            &n7.input,
+            LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(Some(&turn))]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("exact live path after provider-free preflight");
+        assert_eq!(output.status, 0);
+        assert_eq!(output.value["terminal_state"], "passed");
+    }
+
+    #[test]
     fn live_envelope_derivation_and_observed_usage_boundaries_are_exact() {
         assert_eq!(
             required_live_token_envelope(262_144, 20_000)
@@ -3430,6 +3490,63 @@ mod tests {
         .expect("dirty seed");
         let error = verify_git_workspace(&identities[0].1, true).expect_err("dirty seed rejected");
         assert!(error.message.contains("dirty before provider spawn"));
+
+        std::fs::write(
+            identities[0].1.repository_root.join("product.txt"),
+            b"sealed product\n",
+        )
+        .expect("restore seed");
+        verify_git_workspace(&identities[0].1, true).expect("restored seed is clean");
+
+        let mut wrong_head = identities[0].1.clone();
+        wrong_head.head_commit = "0".repeat(40);
+        assert!(verify_git_workspace(&wrong_head, true).is_err());
+        let mut wrong_branch = identities[0].1.clone();
+        wrong_branch.branch = "wrong-branch";
+        assert!(verify_git_workspace(&wrong_branch, true).is_err());
+        let mut wrong_common_dir = identities[0].1.clone();
+        wrong_common_dir.common_dir = wrong_common_dir.repository_root.join("missing-common-dir");
+        assert!(verify_git_workspace(&wrong_common_dir, true).is_err());
+
+        let untracked = identities[0].1.repository_root.join("untracked.txt");
+        std::fs::write(&untracked, b"untracked\n").expect("untracked product");
+        assert!(verify_git_workspace(&identities[0].1, true).is_err());
+        std::fs::remove_file(untracked).expect("remove untracked product");
+        verify_git_workspace(&identities[0].1, true).expect("untracked product removed");
+
+        std::fs::write(identities[0].1.common_dir.join("index"), b"invalid index")
+            .expect("corrupt index");
+        assert!(verify_git_workspace(&identities[0].1, true).is_err());
+    }
+
+    #[test]
+    fn single_provider_process_refuses_a_second_start() {
+        let temporary = TempDir::new().expect("temporary");
+        let invocation = PreparedInvocation {
+            program: "/usr/bin/true".into(),
+            args: Vec::new(),
+            stdin: Vec::new(),
+            cwd: temporary.path().to_path_buf(),
+            limits: InvocationLimits {
+                max_input_bytes: 0,
+                max_output_bytes: 0,
+                timeout_ms: 100,
+            },
+        };
+        let mut provider = SingleProviderProcess::new(FixedProcessResult {
+            result: Some(Ok(InvocationOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })),
+        });
+        provider
+            .run(&invocation, &CancellationToken::new())
+            .expect("first provider start");
+        let error = provider
+            .run(&invocation, &CancellationToken::new())
+            .expect_err("second provider start rejected");
+        assert!(error.to_string().contains("budget exhausted"));
     }
 
     #[test]

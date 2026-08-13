@@ -416,6 +416,31 @@ fn codex_normalization_rejects_unmediated_tool_events() {
 }
 
 #[test]
+fn codex_normalization_accepts_nonfatal_diagnostic_items() {
+    let output = br#"{"type":"thread.started","thread_id":"thread-1"}
+{"type":"item.completed","item":{"id":"warning-1","type":"error","message":"bounded diagnostic"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"answer-1","type":"agent_message","text":"{\"actions\":[{\"kind\":\"verify\"}],\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1,\"output_bytes\":1},\"model_claimed_success\":false,\"control_mutations\":[]}"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
+"#;
+
+    let normalized = codex::normalize_output(identity("codex", "v1"), output, 16 * 1024)
+        .expect("nonfatal Codex diagnostic item");
+    assert_eq!(normalized.turn.actions.len(), 1);
+}
+
+#[test]
+fn codex_normalization_rejects_malformed_diagnostic_items() {
+    let output = br#"{"type":"item.completed","item":{"id":"warning-1","type":"error","message":"bounded diagnostic","unexpected":true}}
+{"type":"item.completed","item":{"id":"answer-1","type":"agent_message","text":"{\"actions\":[{\"kind\":\"verify\"}],\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"reasoning_tokens\":0,\"output_tokens\":1,\"output_bytes\":1},\"model_claimed_success\":false,\"control_mutations\":[]}"}}
+"#;
+
+    let error = codex::normalize_output(identity("codex", "v1"), output, 16 * 1024)
+        .expect_err("malformed diagnostic item");
+    assert!(error.to_string().contains("diagnostic item is malformed"));
+}
+
+#[test]
 fn malformed_oversized_and_identity_drift_outputs_fail_closed() {
     assert!(codex::normalize_output(identity("codex", "v1"), b"{not-json\n", 1024).is_err());
     assert!(

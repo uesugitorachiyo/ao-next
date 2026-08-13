@@ -336,6 +336,24 @@ pub fn normalize_output(
                     })?,
                 );
             }
+            Some("item.completed")
+                if event.pointer("/item/type").and_then(Value::as_str) == Some("error") =>
+            {
+                let item = event
+                    .get("item")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        AdapterContractError::MalformedOutput("diagnostic item is malformed".into())
+                    })?;
+                if item.len() != 3
+                    || item.get("id").and_then(Value::as_str).is_none()
+                    || item.get("message").and_then(Value::as_str).is_none()
+                {
+                    return Err(AdapterContractError::MalformedOutput(
+                        "diagnostic item is malformed".into(),
+                    ));
+                }
+            }
             _ => {
                 return Err(AdapterContractError::MalformedOutput(
                     "Codex emitted unmediated or unknown activity".into(),

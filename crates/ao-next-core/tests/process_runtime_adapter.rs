@@ -160,6 +160,34 @@ fn direct_capture_uses_only_the_trusted_runtime_envelope() {
 }
 
 #[test]
+fn codex_0147_reasoning_output_tokens_are_trusted_usage() {
+    let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":3,"cache_write_input_tokens":2,"output_tokens":7,"reasoning_output_tokens":5}}
+"#;
+    let output = InvocationOutput {
+        status: 0,
+        stdout: stdout.to_vec(),
+        stderr: Vec::new(),
+    };
+
+    let capture = capture_runtime_output("codex", &output, 4096).expect("Codex 0.147 usage");
+    assert_eq!(capture.usage.reasoning_tokens, 5);
+    assert_eq!(capture.usage.checked_total_tokens(), Some(26));
+}
+
+#[test]
+fn codex_reasoning_counter_aliases_cannot_coexist() {
+    let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":3,"output_tokens":7,"reasoning_tokens":5,"reasoning_output_tokens":5}}
+"#;
+    let output = InvocationOutput {
+        status: 0,
+        stdout: stdout.to_vec(),
+        stderr: Vec::new(),
+    };
+
+    assert!(capture_runtime_output("codex", &output, 4096).is_err());
+}
+
+#[test]
 fn four_counter_trusted_usage_total_uses_checked_arithmetic() {
     let observed = TokenUsage {
         input_tokens: 225_206,
@@ -355,6 +383,10 @@ fn provider_prompt_exposes_bound_native_authority_and_visible_inventory() {
     assert_eq!(
         prompt["hidden_tests"],
         "unavailable_and_must_not_be_requested"
+    );
+    assert_eq!(
+        prompt["action_sequence"],
+        "when max_turns is 1, include every required effect followed by verify in the same actions array"
     );
 }
 

@@ -539,6 +539,7 @@ struct ProviderTurnPrompt<'a> {
     verifier_profile_digest: &'a Digest,
     output_schema_digest: Digest,
     allowed_actions: [&'static str; 4],
+    action_sequence: &'static str,
     turn_index: u32,
     repair_attempt: u32,
     effect_observations: &'a [EffectObservation],
@@ -575,6 +576,7 @@ fn build_prompt(
         verifier_profile_digest: &config.verifier_profile_digest,
         output_schema_digest: digest_bytes(&config.output_schema),
         allowed_actions: ["effect", "verify", "blocked", "interrupt"],
+        action_sequence: "when max_turns is 1, include every required effect followed by verify in the same actions array",
         turn_index: context.turn_index,
         repair_attempt: context.repair_attempt,
         effect_observations: &context.effect_observations,
@@ -738,15 +740,29 @@ fn codex_usage(bytes: &[u8], maximum_bytes: usize) -> Result<TokenUsage, Adapter
                     "Codex output duplicated terminal usage".into(),
                 ));
             }
-            usage = Some(read_usage(
-                event
-                    .get("usage")
-                    .ok_or_else(|| AdapterError::Runtime("Codex usage is missing".into()))?,
-                "cached_input_tokens",
-            )?);
+            usage = Some(read_codex_usage(event.get("usage").ok_or_else(|| {
+                AdapterError::Runtime("Codex usage is missing".into())
+            })?)?);
         }
     }
     usage.ok_or_else(|| AdapterError::Runtime("Codex trusted usage is missing".into()))
+}
+
+fn read_codex_usage(value: &Value) -> Result<TokenUsage, AdapterError> {
+    let mut usage = read_usage(value, "cached_input_tokens")?;
+    usage.reasoning_tokens = match (
+        value.get("reasoning_tokens"),
+        value.get("reasoning_output_tokens"),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(AdapterError::Runtime(
+                "Codex usage contains conflicting reasoning counters".into(),
+            ));
+        }
+        (Some(value), None) | (None, Some(value)) => required_u64(value)?,
+        (None, None) => 0,
+    };
+    Ok(usage)
 }
 
 fn claude_usage(bytes: &[u8], maximum_bytes: usize) -> Result<TokenUsage, AdapterError> {

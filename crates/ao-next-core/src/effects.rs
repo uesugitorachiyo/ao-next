@@ -1,26 +1,39 @@
+#[cfg(not(windows))]
 use std::ffi::{OsStr, OsString};
+#[cfg(not(windows))]
 use std::fs::File;
+#[cfg(not(windows))]
 use std::io::{Read, Seek, Write};
+#[cfg(not(windows))]
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::sync::Arc;
 
+#[cfg(not(windows))]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
+#[cfg(not(windows))]
 use rustix::io::Errno;
 use thiserror::Error;
 
-use crate::contracts::{AuthorityEnvelope, Digest, EffectKind, EffectRequest};
+#[cfg(not(windows))]
+use crate::contracts::Digest;
+use crate::contracts::{AuthorityEnvelope, EffectKind, EffectRequest};
+#[cfg(not(windows))]
 use crate::evidence::digest_bytes;
 use crate::policy::{PolicyDenial, resolve_effect_paths, validate_effect_request};
 
+#[cfg(not(windows))]
 const NONEXISTENT_FILE_BINDING: &[u8] = b"ao.next.file-does-not-exist.v1";
 
 #[derive(Clone, Debug)]
 pub struct AuthorizedEffect {
     request: EffectRequest,
     authority: AuthorityEnvelope,
+    #[cfg(not(windows))]
     target: DescriptorTarget,
 }
 
+#[cfg(not(windows))]
 #[derive(Clone, Debug)]
 enum DescriptorTarget {
     Read {
@@ -136,20 +149,28 @@ impl LocalEffectBroker {
         authorized: &AuthorizedEffect,
     ) -> Result<EffectOutput, EffectBrokerError> {
         validate_effect_request(&authorized.request, &authorized.authority, self.timeout_ms)?;
-        verify_descriptor_binding(&authorized.target)?;
-        match (&authorized.request.kind, &authorized.target) {
-            (EffectKind::ReadFile, DescriptorTarget::Read { file, .. }) => {
-                self.read_file(&authorized.request, file)
+        #[cfg(windows)]
+        return Err(EffectBrokerError::UnsupportedEffect(
+            authorized.request.kind.clone(),
+        ));
+        #[cfg(not(windows))]
+        {
+            verify_descriptor_binding(&authorized.target)?;
+            match (&authorized.request.kind, &authorized.target) {
+                (EffectKind::ReadFile, DescriptorTarget::Read { file, .. }) => {
+                    self.read_file(&authorized.request, file)
+                }
+                (EffectKind::WriteFile, DescriptorTarget::Write { parent, name, .. }) => {
+                    self.write_file(&authorized.request, parent, name)
+                }
+                _ => Err(EffectBrokerError::UnsupportedEffect(
+                    authorized.request.kind.clone(),
+                )),
             }
-            (EffectKind::WriteFile, DescriptorTarget::Write { parent, name, .. }) => {
-                self.write_file(&authorized.request, parent, name)
-            }
-            _ => Err(EffectBrokerError::UnsupportedEffect(
-                authorized.request.kind.clone(),
-            )),
         }
     }
 
+    #[cfg(not(windows))]
     fn read_file(
         &self,
         request: &EffectRequest,
@@ -164,6 +185,7 @@ impl LocalEffectBroker {
         })
     }
 
+    #[cfg(not(windows))]
     fn write_file(
         &self,
         request: &EffectRequest,
@@ -225,11 +247,15 @@ impl EffectBroker for LocalEffectBroker {
         validate_effect_request(request, authority, self.timeout_ms)?;
         let resolved_paths =
             resolve_effect_paths(request, authority, request.kind == EffectKind::ReadFile)?;
+        #[cfg(windows)]
+        let _ = resolved_paths;
+        #[cfg(not(windows))]
         let target = open_descriptor_target(request, authority, &resolved_paths[0])
             .map_err(|_| PolicyDenial::NonRegularFile(request.paths[0].clone()))?;
         Ok(AuthorizedEffect {
             request: request.clone(),
             authority: authority.clone(),
+            #[cfg(not(windows))]
             target,
         })
     }
@@ -242,6 +268,7 @@ impl EffectBroker for LocalEffectBroker {
     }
 }
 
+#[cfg(not(windows))]
 fn open_descriptor_target(
     request: &EffectRequest,
     authority: &AuthorityEnvelope,
@@ -287,6 +314,7 @@ fn open_descriptor_target(
     }
 }
 
+#[cfg(not(windows))]
 fn verify_descriptor_binding(target: &DescriptorTarget) -> Result<(), EffectBrokerError> {
     let (root, root_path) = match target {
         DescriptorTarget::Read {
@@ -331,6 +359,7 @@ fn verify_descriptor_binding(target: &DescriptorTarget) -> Result<(), EffectBrok
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn open_parent_at(root: &File, relative: &Path) -> Result<File, std::io::Error> {
     let mut parent = root.try_clone()?;
     for component in relative.components() {
@@ -349,6 +378,7 @@ fn open_parent_at(root: &File, relative: &Path) -> Result<File, std::io::Error> 
     Ok(parent)
 }
 
+#[cfg(not(windows))]
 fn open_regular_at(parent: &File, name: &OsStr) -> Result<Option<File>, std::io::Error> {
     match rustix::fs::openat(
         parent,
@@ -369,6 +399,7 @@ fn open_regular_at(parent: &File, name: &OsStr) -> Result<Option<File>, std::io:
     }
 }
 
+#[cfg(not(windows))]
 fn publish_create(parent: &File, name: &OsStr, temporary: &OsStr) -> Result<(), EffectBrokerError> {
     rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::NOREPLACE)
         .map_err(std::io::Error::from)?;
@@ -380,6 +411,7 @@ fn publish_create(parent: &File, name: &OsStr, temporary: &OsStr) -> Result<(), 
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn publish_replace(
     parent: &File,
     name: &OsStr,
@@ -408,12 +440,14 @@ fn publish_replace(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn rollback_exchange(parent: &File, name: &OsStr, temporary: &OsStr) {
     let _ = rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::EXCHANGE);
     let _ = rustix::fs::unlinkat(parent, temporary, AtFlags::empty());
     let _ = rustix::fs::fsync(parent);
 }
 
+#[cfg(not(windows))]
 fn same_file(expected: &File, observed: &File) -> bool {
     match (rustix::fs::fstat(expected), rustix::fs::fstat(observed)) {
         (Ok(expected), Ok(observed)) => {
@@ -423,6 +457,7 @@ fn same_file(expected: &File, observed: &File) -> bool {
     }
 }
 
+#[cfg(not(windows))]
 fn invalid_target() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
@@ -430,6 +465,7 @@ fn invalid_target() -> std::io::Error {
     )
 }
 
+#[cfg(not(windows))]
 fn read_descriptor_utf8(file: &File, limit: usize) -> Result<Vec<u8>, EffectBrokerError> {
     let stat = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
     if !FileType::from_raw_mode(stat.st_mode).is_file() {
@@ -450,6 +486,7 @@ fn read_descriptor_utf8(file: &File, limit: usize) -> Result<Vec<u8>, EffectBrok
     Ok(bytes)
 }
 
+#[cfg(not(windows))]
 fn require_digest(bytes: &[u8], expected: &Digest) -> Result<(), EffectBrokerError> {
     if &digest_bytes(bytes) == expected {
         Ok(())
@@ -458,6 +495,7 @@ fn require_digest(bytes: &[u8], expected: &Digest) -> Result<(), EffectBrokerErr
     }
 }
 
+#[cfg(not(windows))]
 fn temporary_name(target: &OsStr, request: &EffectRequest) -> OsString {
     let binding = digest_bytes(
         format!(

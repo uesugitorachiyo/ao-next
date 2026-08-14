@@ -27,6 +27,7 @@ AO Next is not established as superior, production-ready, released, published, d
 - Keep N0 bound to AO2's existing sandbox and digest-approved patch path. Never relabel an N4 or N7 row as current AO.
 - Retain raw provider captures only under the input's empty operator-owned private capture directory outside every worker authority root.
 - Keep sealed hidden tests outside worker workspaces and authority roots. Never copy hidden bytes or paths into prompts, effect observations, logs, or public evidence.
+- Keep Windows native file effects fail-closed until an equally strong descriptor-bound implementation and native qualification exist.
 
 ## Working Method
 

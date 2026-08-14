@@ -55,7 +55,12 @@ jobs:
           toolchain: 1.95.0
 
       - name: Test
+        if: runner.os != 'Windows'
         run: cargo test --locked --workspace
+
+      - name: Compile tests
+        if: runner.os == 'Windows'
+        run: cargo test --locked --workspace --no-run
 
       - name: Build release
         run: cargo build --locked --workspace --release

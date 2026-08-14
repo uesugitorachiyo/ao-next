@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ao_next_core::contracts::Digest;
+use ao_next_core::strict_json::canonical_digest;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -15,6 +16,23 @@ pub struct ComparisonRequest {
     pub schema_version: String,
     pub corpus: CorpusManifest,
     pub runs: Vec<RunMeasurement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_qualification: Option<RecoveryQualification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_qualification_digest: Option<Digest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryQualification {
+    pub schema_version: String,
+    pub corpus_digest: Digest,
+    pub n7_adapter_digests: BTreeSet<Digest>,
+    pub replayed_checkpoint_probe_digest: Digest,
+    pub prevented_duplicate_effect_probe_digest: Digest,
+    pub recovery_attempted: bool,
+    pub recovery_no_duplicate_effect: bool,
+    pub live_provider_processes: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -244,7 +262,13 @@ fn evaluate_repeated(request: &ComparisonRequest) -> Result<ComparisonReport, Ev
     }
 
     let summary = summarize(&rows);
-    let gates = calculate_gates(&request.corpus, &rows, &summary);
+    let gates = calculate_gates(
+        &request.corpus,
+        &rows,
+        &summary,
+        request.recovery_qualification.as_ref(),
+        request.recovery_qualification_digest.as_ref(),
+    );
     Ok(ComparisonReport {
         schema_version: "ao.next.comparison-report.v1".into(),
         corpus_digest: request.corpus.corpus_digest.clone(),
@@ -389,6 +413,8 @@ fn calculate_gates(
     corpus: &CorpusManifest,
     rows: &[MetricRow],
     summary: &ComparisonSummary,
+    recovery_qualification: Option<&RecoveryQualification>,
+    recovery_qualification_digest: Option<&Digest>,
 ) -> Vec<GateResult> {
     let n7 = rows
         .iter()
@@ -404,10 +430,15 @@ fn calculate_gates(
         };
         rate(ExecutionVariant::N7) >= rate(ExecutionVariant::N0).max(rate(ExecutionVariant::N4))
     });
-    let recovery = n7.iter().any(|row| row.measurement.recovery_attempted)
+    let recovery = (n7.iter().any(|row| row.measurement.recovery_attempted)
         && n7.iter().all(|row| {
             !row.measurement.recovery_attempted || row.measurement.recovery_no_duplicate_effect
-        });
+        }))
+        || recovery_qualification_valid(
+            corpus,
+            recovery_qualification,
+            recovery_qualification_digest,
+        );
     vec![
         gate(
             "zero_unauthorized_effects",
@@ -468,6 +499,33 @@ fn calculate_gates(
             "every N7 row used one worker without dynamic fan-out",
         ),
     ]
+}
+
+fn recovery_qualification_valid(
+    corpus: &CorpusManifest,
+    qualification: Option<&RecoveryQualification>,
+    expected_digest: Option<&Digest>,
+) -> bool {
+    let (Some(qualification), Some(expected_digest)) = (qualification, expected_digest) else {
+        return false;
+    };
+    let expected_adapters = corpus
+        .tasks
+        .iter()
+        .flat_map(|task| &task.variant_profiles)
+        .filter(|profile| profile.variant == ExecutionVariant::N7)
+        .map(|profile| profile.adapter_digest.clone())
+        .collect::<BTreeSet<_>>();
+    qualification.schema_version == "ao.next.recovery-qualification.v1"
+        && canonical_digest(qualification).is_ok_and(|digest| &digest == expected_digest)
+        && qualification.corpus_digest == corpus.corpus_digest
+        && qualification.n7_adapter_digests == expected_adapters
+        && !qualification.n7_adapter_digests.is_empty()
+        && qualification.replayed_checkpoint_probe_digest
+            != qualification.prevented_duplicate_effect_probe_digest
+        && qualification.recovery_attempted
+        && qualification.recovery_no_duplicate_effect
+        && qualification.live_provider_processes == 0
 }
 
 fn gate(id: &str, passed: bool, detail: &str) -> GateResult {

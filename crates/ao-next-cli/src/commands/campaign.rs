@@ -21,6 +21,8 @@ use ao_next_core::recovery::{
     write_durable_event_log,
 };
 use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
+use ao_next_eval::comparison::RecoveryQualification;
+use ao_next_eval::corpus::CorpusManifest;
 use ao_next_eval::metrics::ExecutionVariant;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
@@ -30,7 +32,10 @@ use super::live::{
     preflight_provider_free_row, provider_free_capture_root, reject_provider_free_input,
     verify_provider_free_capture,
 };
-use super::{CommandFailure, CommandOutput, QualifyLiveCampaignArgs, read_bounded_regular};
+use super::{
+    CommandFailure, CommandOutput, QualifyLiveCampaignArgs, QualifyRecoveryArgs,
+    read_bounded_regular,
+};
 
 const ROW_COUNT: usize = 27;
 const TASKS: [&str; 3] = [
@@ -165,6 +170,12 @@ pub fn execute(args: &QualifyLiveCampaignArgs) -> Result<CommandOutput, CommandF
     let security_coverage = run_security_matrix(&qualification.evidence_root)?;
     let security_coverage_digest = canonical_digest(&security_coverage)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let recovery_qualification = recovery_qualification(
+        &corpus_from_live_input(&qualification.rows[0].input)?,
+        &security_coverage,
+    );
+    let recovery_qualification_digest = canonical_digest(&recovery_qualification)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     write_json_new(
         &qualification.evidence_root.join("security-coverage.json"),
         &serde_json::to_value(&security_coverage)
@@ -287,12 +298,86 @@ pub fn execute(args: &QualifyLiveCampaignArgs) -> Result<CommandOutput, CommandF
             ],
             "security_coverage": security_coverage.names,
             "security_coverage_digest": security_coverage_digest,
+            "recovery_qualification": recovery_qualification,
+            "recovery_qualification_digest": recovery_qualification_digest,
             "record_digests": record_digests,
             "row_bindings": row_bindings,
         }),
         "executed and qualified exact provider-free 27-row fake campaign",
         0,
     ))
+}
+
+pub fn execute_recovery(args: &QualifyRecoveryArgs) -> Result<CommandOutput, CommandFailure> {
+    if std::env::var_os("AO_NEXT_LIVE_PROVIDER_CALLS").is_some() {
+        return Err(CommandFailure::authorization(
+            "recovery qualification must remain provider-free",
+        ));
+    }
+    let corpus: CorpusManifest =
+        decode_strict_json(&read_bounded_regular(&args.corpus)?, 1024 * 1024)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    corpus
+        .validate_live()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    create_private_empty_directory(&args.evidence_root)?;
+    let security_coverage = run_security_matrix(&args.evidence_root)?;
+    write_json_new(
+        &args.evidence_root.join("security-coverage.json"),
+        &serde_json::to_value(&security_coverage)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?,
+    )?;
+    let qualification = recovery_qualification(&corpus, &security_coverage);
+    let digest = canonical_digest(&qualification)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    Ok(CommandOutput::new(
+        serde_json::json!({
+            "schema_version": "ao.next.provider-free-recovery-qualification.v1",
+            "recovery_qualification": qualification,
+            "recovery_qualification_digest": digest,
+            "live_provider_processes": 0,
+            "live_provider_calls": 0,
+        }),
+        "qualified deterministic recovery evidence without a provider",
+        0,
+    ))
+}
+
+fn recovery_qualification(
+    corpus: &CorpusManifest,
+    security_coverage: &SecurityCoverageReceipt,
+) -> RecoveryQualification {
+    RecoveryQualification {
+        schema_version: "ao.next.recovery-qualification.v1".into(),
+        corpus_digest: corpus.corpus_digest.clone(),
+        n7_adapter_digests: corpus
+            .tasks
+            .iter()
+            .flat_map(|task| &task.variant_profiles)
+            .filter(|profile| profile.variant == ExecutionVariant::N7)
+            .map(|profile| profile.adapter_digest.clone())
+            .collect(),
+        replayed_checkpoint_probe_digest:
+            security_coverage.probe_digests["replayed-interrupted-checkpoint"].clone(),
+        prevented_duplicate_effect_probe_digest:
+            security_coverage.probe_digests["prevented-duplicate-effect"].clone(),
+        recovery_attempted: true,
+        recovery_no_duplicate_effect: true,
+        live_provider_processes: 0,
+    }
+}
+
+fn corpus_from_live_input(input_path: &Path) -> Result<CorpusManifest, CommandFailure> {
+    let value: serde_json::Value =
+        decode_strict_json(&read_bounded_regular(input_path)?, 1024 * 1024)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    serde_json::from_value(
+        value
+            .get("corpus")
+            .cloned()
+            .ok_or_else(|| CommandFailure::invalid_input("corpus is missing"))?,
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))
 }
 
 fn validate_header(qualification: &CampaignQualification) -> Result<(), CommandFailure> {

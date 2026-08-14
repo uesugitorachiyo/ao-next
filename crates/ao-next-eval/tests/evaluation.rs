@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
+
 use ao_next_core::evidence::digest_bytes;
 use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
 use ao_next_eval::comparison::{
-    ComparisonRequest, EvaluationDecision, EvaluationError, evaluate_live_authorized,
-    evaluate_offline,
+    ComparisonRequest, EvaluationDecision, EvaluationError, RecoveryQualification,
+    evaluate_live_authorized, evaluate_offline,
 };
 use ao_next_eval::corpus::{
     CorpusKind, CorpusManifest, EvaluationTask, ScheduleEntry, VariantProfile,
@@ -155,7 +157,146 @@ fn ready_request() -> ComparisonRequest {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
+        recovery_qualification: None,
+        recovery_qualification_digest: None,
     }
+}
+
+fn qualified_recovery_request() -> ComparisonRequest {
+    let mut request = ready_request();
+    for run in &mut request.runs {
+        run.recovery_attempted = false;
+        run.recovery_no_duplicate_effect = false;
+    }
+    let qualification = RecoveryQualification {
+        schema_version: "ao.next.recovery-qualification.v1".into(),
+        corpus_digest: request.corpus.corpus_digest.clone(),
+        n7_adapter_digests: request
+            .corpus
+            .tasks
+            .iter()
+            .flat_map(|task| &task.variant_profiles)
+            .filter(|profile| profile.variant == ExecutionVariant::N7)
+            .map(|profile| profile.adapter_digest.clone())
+            .collect::<BTreeSet<_>>(),
+        replayed_checkpoint_probe_digest: digest_bytes(b"replayed-checkpoint"),
+        prevented_duplicate_effect_probe_digest: digest_bytes(b"prevented-duplicate-effect"),
+        recovery_attempted: true,
+        recovery_no_duplicate_effect: true,
+        live_provider_processes: 0,
+    };
+    request.recovery_qualification_digest =
+        Some(canonical_digest(&qualification).expect("recovery qualification digest"));
+    request.recovery_qualification = Some(qualification);
+    request
+}
+
+fn recovery_gate_passed(request: &ComparisonRequest) -> bool {
+    evaluate_offline(request)
+        .expect("comparison")
+        .gates
+        .into_iter()
+        .find(|gate| gate.gate_id == "recovery_without_duplicate_effect")
+        .expect("recovery gate")
+        .passed
+}
+
+#[test]
+fn provider_free_recovery_qualification_satisfies_recovery_without_repair_attempts() {
+    let request = qualified_recovery_request();
+
+    assert!(recovery_gate_passed(&request));
+}
+
+#[test]
+fn recovery_qualification_rejects_missing_altered_or_mismatched_evidence() {
+    let valid = qualified_recovery_request();
+    let mut cases = Vec::new();
+
+    let mut missing_digest = valid.clone();
+    missing_digest.recovery_qualification_digest = None;
+    cases.push(missing_digest);
+
+    let mut altered_probe = valid.clone();
+    altered_probe
+        .recovery_qualification
+        .as_mut()
+        .expect("qualification")
+        .replayed_checkpoint_probe_digest = digest_bytes(b"altered");
+    cases.push(altered_probe);
+
+    let mut wrong_corpus = valid.clone();
+    wrong_corpus
+        .recovery_qualification
+        .as_mut()
+        .expect("qualification")
+        .corpus_digest = digest_bytes(b"wrong corpus");
+    wrong_corpus.recovery_qualification_digest = Some(
+        canonical_digest(
+            wrong_corpus
+                .recovery_qualification
+                .as_ref()
+                .expect("qualification"),
+        )
+        .expect("digest"),
+    );
+    cases.push(wrong_corpus);
+
+    let mut wrong_adapters = valid.clone();
+    wrong_adapters
+        .recovery_qualification
+        .as_mut()
+        .expect("qualification")
+        .n7_adapter_digests = BTreeSet::from([digest_bytes(b"wrong adapter")]);
+    wrong_adapters.recovery_qualification_digest = Some(
+        canonical_digest(
+            wrong_adapters
+                .recovery_qualification
+                .as_ref()
+                .expect("qualification"),
+        )
+        .expect("digest"),
+    );
+    cases.push(wrong_adapters);
+
+    let mut reused_probe = valid.clone();
+    let qualification = reused_probe
+        .recovery_qualification
+        .as_mut()
+        .expect("qualification");
+    qualification.prevented_duplicate_effect_probe_digest =
+        qualification.replayed_checkpoint_probe_digest.clone();
+    reused_probe.recovery_qualification_digest =
+        Some(canonical_digest(qualification).expect("digest"));
+    cases.push(reused_probe);
+
+    for field in ["recovery_attempted", "recovery_no_duplicate_effect"] {
+        let mut incomplete = valid.clone();
+        let qualification = incomplete
+            .recovery_qualification
+            .as_mut()
+            .expect("qualification");
+        if field == "recovery_attempted" {
+            qualification.recovery_attempted = false;
+        } else {
+            qualification.recovery_no_duplicate_effect = false;
+        }
+        incomplete.recovery_qualification_digest =
+            Some(canonical_digest(qualification).expect("digest"));
+        cases.push(incomplete);
+    }
+
+    let mut provider_claim = valid;
+    let qualification = provider_claim
+        .recovery_qualification
+        .as_mut()
+        .expect("qualification");
+    qualification.live_provider_processes = 1;
+    provider_claim.recovery_qualification_digest =
+        Some(canonical_digest(qualification).expect("digest"));
+    cases.push(provider_claim);
+
+    assert!(cases.iter().all(|request| !recovery_gate_passed(request)));
 }
 
 fn schedule() -> Vec<ScheduleEntry> {

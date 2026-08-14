@@ -29,6 +29,7 @@ enum Command {
     RunDirectBaseline(LiveRunArgs),
     PreflightLiveInput(PreflightLiveInputArgs),
     QualifyLiveCampaign(QualifyLiveCampaignArgs),
+    QualifyRecovery(QualifyRecoveryArgs),
     Inspect(InspectArgs),
     VerifyEvidence(VerifyEvidenceArgs),
     Replay(ReplayArgs),
@@ -79,6 +80,14 @@ pub struct QualifyLiveCampaignArgs {
     pub fake_provider_program: PathBuf,
     #[arg(long)]
     pub fake_provider_program_digest: String,
+}
+
+#[derive(Debug, Args)]
+pub struct QualifyRecoveryArgs {
+    #[arg(long)]
+    pub corpus: PathBuf,
+    #[arg(long)]
+    pub evidence_root: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -236,6 +245,7 @@ pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
         Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
         Command::PreflightLiveInput(args) => live::preflight(&args),
         Command::QualifyLiveCampaign(args) => campaign::execute(&args),
+        Command::QualifyRecovery(args) => campaign::execute_recovery(&args),
         Command::Inspect(args) => inspect::execute(&args),
         Command::VerifyEvidence(args) => verify_evidence::execute(&args),
         Command::Replay(args) => replay::execute(&args),

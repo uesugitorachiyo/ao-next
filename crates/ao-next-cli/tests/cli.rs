@@ -198,6 +198,8 @@ fn ready_comparison_json() -> serde_json::Value {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
+        recovery_qualification: None,
+        recovery_qualification_digest: None,
     })
     .expect("comparison JSON")
 }
@@ -789,6 +791,8 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
+        recovery_qualification: None,
+        recovery_qualification_digest: None,
     };
     let path = temporary.path().join("live-comparison.json");
     write_json(&path, &request);

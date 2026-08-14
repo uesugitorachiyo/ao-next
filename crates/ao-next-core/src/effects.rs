@@ -1,11 +1,17 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
+#[cfg(unix)]
 use rustix::io::Errno;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 use thiserror::Error;
 
 use crate::contracts::{AuthorityEnvelope, Digest, EffectKind, EffectRequest};
@@ -26,13 +32,16 @@ enum DescriptorTarget {
     Read {
         root: Arc<File>,
         root_path: PathBuf,
+        anchors: Vec<Arc<File>>,
         file: Arc<File>,
         relative: PathBuf,
     },
     Write {
         root: Arc<File>,
         root_path: PathBuf,
+        anchors: Vec<Arc<File>>,
         parent: Arc<File>,
+        parent_path: PathBuf,
         parent_relative: PathBuf,
         name: OsString,
     },
@@ -141,9 +150,15 @@ impl LocalEffectBroker {
             (EffectKind::ReadFile, DescriptorTarget::Read { file, .. }) => {
                 self.read_file(&authorized.request, file)
             }
-            (EffectKind::WriteFile, DescriptorTarget::Write { parent, name, .. }) => {
-                self.write_file(&authorized.request, parent, name)
-            }
+            (
+                EffectKind::WriteFile,
+                DescriptorTarget::Write {
+                    parent,
+                    parent_path,
+                    name,
+                    ..
+                },
+            ) => self.write_file(&authorized.request, parent, parent_path, name),
             _ => Err(EffectBrokerError::UnsupportedEffect(
                 authorized.request.kind.clone(),
             )),
@@ -168,6 +183,7 @@ impl LocalEffectBroker {
         &self,
         request: &EffectRequest,
         parent: &File,
+        parent_path: &Path,
         name: &OsStr,
     ) -> Result<EffectOutput, EffectBrokerError> {
         let content = request.content.as_deref().unwrap_or_default().as_bytes();
@@ -176,7 +192,7 @@ impl LocalEffectBroker {
                 limit: self.output_bytes,
             });
         }
-        let existing = open_regular_at(parent, name)?;
+        let existing = open_regular_at(parent, parent_path, name)?;
         match &existing {
             Some(file) => require_digest(
                 &read_descriptor_utf8(file, self.input_bytes)?,
@@ -185,27 +201,20 @@ impl LocalEffectBroker {
             None => require_digest(NONEXISTENT_FILE_BINDING, &request.input_digest)?,
         }
         let temporary = temporary_name(name, request);
-        let temporary_fd = rustix::fs::openat(
-            parent,
-            &temporary,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(std::io::Error::from)?;
-        let mut temporary_file = File::from(temporary_fd);
+        let mut temporary_file = create_temporary(parent, parent_path, &temporary)?;
         let result: Result<(), EffectBrokerError> = (|| {
             temporary_file.write_all(content)?;
             temporary_file.sync_all()?;
             drop(temporary_file);
             if let Some(existing) = existing {
-                publish_replace(parent, name, &temporary, &existing)?;
+                publish_replace(parent, parent_path, name, &temporary, existing)?;
             } else {
-                publish_create(parent, name, &temporary)?;
+                publish_create(parent, parent_path, name, &temporary)?;
             }
             Ok(())
         })();
         if result.is_err() {
-            let _ = rustix::fs::unlinkat(parent, &temporary, AtFlags::empty());
+            remove_temporary(parent, parent_path, &temporary);
         }
         result?;
         Ok(EffectOutput {
@@ -257,21 +266,17 @@ fn open_descriptor_target(
         .file_name()
         .ok_or_else(invalid_target)?
         .to_os_string();
-    let root_fd = rustix::fs::open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(std::io::Error::from)?;
-    let root_file = File::from(root_fd);
+    let root_file = open_root(root)?;
     let root_descriptor = Arc::new(root_file);
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
-    let parent = open_parent_at(&root_descriptor, parent_relative)?;
+    let (parent, anchors) = open_parent_at(&root_descriptor, root, parent_relative)?;
+    let parent_path = root.join(parent_relative);
     match request.kind {
-        EffectKind::ReadFile => open_regular_at(&parent, &name)?
+        EffectKind::ReadFile => open_regular_at(&parent, &parent_path, &name)?
             .map(|file| DescriptorTarget::Read {
                 root: root_descriptor,
                 root_path: root.clone(),
+                anchors,
                 file: Arc::new(file),
                 relative: relative.to_path_buf(),
             })
@@ -279,7 +284,9 @@ fn open_descriptor_target(
         EffectKind::WriteFile => Ok(DescriptorTarget::Write {
             root: root_descriptor,
             root_path: root.clone(),
+            anchors,
             parent: Arc::new(parent),
+            parent_path,
             parent_relative: parent_relative.to_path_buf(),
             name,
         }),
@@ -296,33 +303,40 @@ fn verify_descriptor_binding(target: &DescriptorTarget) -> Result<(), EffectBrok
             root, root_path, ..
         } => (root, root_path),
     };
-    let current_root = File::from(
-        rustix::fs::open(
-            root_path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?,
-    );
+    let current_root = open_root(root_path)?;
     if !same_file(root, &current_root) {
         return Err(EffectBrokerError::PreimageMismatch);
     }
     match target {
-        DescriptorTarget::Read { file, relative, .. } => {
-            let parent = open_parent_at(root, relative.parent().unwrap_or_else(|| Path::new("")))?;
-            let current =
-                open_regular_at(&parent, relative.file_name().ok_or_else(invalid_target)?)?
-                    .ok_or(EffectBrokerError::PreimageMismatch)?;
+        DescriptorTarget::Read {
+            anchors,
+            file,
+            relative,
+            ..
+        } => {
+            let _ = anchors;
+            let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+            let (parent, current_anchors) = open_parent_at(root, root_path, parent_relative)?;
+            let _ = current_anchors;
+            let current = open_regular_at(
+                &parent,
+                &root_path.join(parent_relative),
+                relative.file_name().ok_or_else(invalid_target)?,
+            )?
+            .ok_or(EffectBrokerError::PreimageMismatch)?;
             if !same_file(file, &current) {
                 return Err(EffectBrokerError::PreimageMismatch);
             }
         }
         DescriptorTarget::Write {
             parent,
+            anchors,
             parent_relative,
             ..
         } => {
-            let current = open_parent_at(root, parent_relative)?;
+            let _ = anchors;
+            let (current, current_anchors) = open_parent_at(root, root_path, parent_relative)?;
+            let _ = current_anchors;
             if !same_file(parent, &current) {
                 return Err(EffectBrokerError::PreimageMismatch);
             }
@@ -331,7 +345,23 @@ fn verify_descriptor_binding(target: &DescriptorTarget) -> Result<(), EffectBrok
     Ok(())
 }
 
-fn open_parent_at(root: &File, relative: &Path) -> Result<File, std::io::Error> {
+#[cfg(unix)]
+fn open_root(path: &Path) -> Result<File, std::io::Error> {
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(unix)]
+fn open_parent_at(
+    root: &File,
+    _root_path: &Path,
+    relative: &Path,
+) -> Result<(File, Vec<Arc<File>>), std::io::Error> {
     let mut parent = root.try_clone()?;
     for component in relative.components() {
         let std::path::Component::Normal(segment) = component else {
@@ -346,10 +376,15 @@ fn open_parent_at(root: &File, relative: &Path) -> Result<File, std::io::Error> 
         .map_err(std::io::Error::from)?;
         parent = File::from(next);
     }
-    Ok(parent)
+    Ok((parent, Vec::new()))
 }
 
-fn open_regular_at(parent: &File, name: &OsStr) -> Result<Option<File>, std::io::Error> {
+#[cfg(unix)]
+fn open_regular_at(
+    parent: &File,
+    _parent_path: &Path,
+    name: &OsStr,
+) -> Result<Option<File>, std::io::Error> {
     match rustix::fs::openat(
         parent,
         name,
@@ -369,7 +404,34 @@ fn open_regular_at(parent: &File, name: &OsStr) -> Result<Option<File>, std::io:
     }
 }
 
-fn publish_create(parent: &File, name: &OsStr, temporary: &OsStr) -> Result<(), EffectBrokerError> {
+#[cfg(unix)]
+fn create_temporary(
+    parent: &File,
+    _parent_path: &Path,
+    temporary: &OsStr,
+) -> Result<File, std::io::Error> {
+    rustix::fs::openat(
+        parent,
+        temporary,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(unix)]
+fn remove_temporary(parent: &File, _parent_path: &Path, temporary: &OsStr) {
+    let _ = rustix::fs::unlinkat(parent, temporary, AtFlags::empty());
+}
+
+#[cfg(unix)]
+fn publish_create(
+    parent: &File,
+    _parent_path: &Path,
+    name: &OsStr,
+    temporary: &OsStr,
+) -> Result<(), EffectBrokerError> {
     rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::NOREPLACE)
         .map_err(std::io::Error::from)?;
     if let Err(error) = rustix::fs::fsync(parent) {
@@ -380,20 +442,22 @@ fn publish_create(parent: &File, name: &OsStr, temporary: &OsStr) -> Result<(), 
     Ok(())
 }
 
+#[cfg(unix)]
 fn publish_replace(
     parent: &File,
+    _parent_path: &Path,
     name: &OsStr,
     temporary: &OsStr,
-    expected: &File,
+    expected: File,
 ) -> Result<(), EffectBrokerError> {
     rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::EXCHANGE)
         .map_err(std::io::Error::from)?;
-    let swapped = open_regular_at(parent, temporary);
+    let swapped = open_regular_at(parent, Path::new(""), temporary);
     let identity_matches = swapped
         .as_ref()
         .ok()
         .and_then(Option::as_ref)
-        .is_some_and(|observed| same_file(expected, observed));
+        .is_some_and(|observed| same_file(&expected, observed));
     if !identity_matches {
         rollback_exchange(parent, name, temporary);
         return Err(EffectBrokerError::PreimageMismatch);
@@ -405,20 +469,183 @@ fn publish_replace(
     if let Err(error) = rustix::fs::fsync(parent) {
         return Err(std::io::Error::from(error).into());
     }
+    drop(expected);
     Ok(())
 }
 
+#[cfg(unix)]
 fn rollback_exchange(parent: &File, name: &OsStr, temporary: &OsStr) {
     let _ = rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::EXCHANGE);
     let _ = rustix::fs::unlinkat(parent, temporary, AtFlags::empty());
     let _ = rustix::fs::fsync(parent);
 }
 
+#[cfg(unix)]
 fn same_file(expected: &File, observed: &File) -> bool {
     match (rustix::fs::fstat(expected), rustix::fs::fstat(observed)) {
         (Ok(expected), Ok(observed)) => {
             expected.st_dev == observed.st_dev && expected.st_ino == observed.st_ino
         }
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+
+#[cfg(windows)]
+fn open_root(path: &Path) -> Result<File, std::io::Error> {
+    open_windows_directory(path)
+}
+
+#[cfg(windows)]
+fn open_windows_directory(path: &Path) -> Result<File, std::io::Error> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid_target());
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_parent_at(
+    root: &File,
+    root_path: &Path,
+    relative: &Path,
+) -> Result<(File, Vec<Arc<File>>), std::io::Error> {
+    let mut parent = root.try_clone()?;
+    let mut path = root_path.to_path_buf();
+    let mut anchors = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err(invalid_target());
+        };
+        path.push(segment);
+        let next = open_windows_directory(&path)?;
+        anchors.push(Arc::new(next.try_clone()?));
+        parent = next;
+    }
+    Ok((parent, anchors))
+}
+
+#[cfg(windows)]
+fn open_regular_at(
+    _parent: &File,
+    parent_path: &Path,
+    name: &OsStr,
+) -> Result<Option<File>, std::io::Error> {
+    let path = parent_path.join(name);
+    let file = match OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid_target());
+    }
+    Ok(Some(file))
+}
+
+#[cfg(windows)]
+fn create_temporary(
+    _parent: &File,
+    parent_path: &Path,
+    temporary: &OsStr,
+) -> Result<File, std::io::Error> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(parent_path.join(temporary))
+}
+
+#[cfg(windows)]
+fn remove_temporary(_parent: &File, parent_path: &Path, temporary: &OsStr) {
+    let _ = std::fs::remove_file(parent_path.join(temporary));
+}
+
+#[cfg(windows)]
+fn publish_create(
+    _parent: &File,
+    parent_path: &Path,
+    name: &OsStr,
+    temporary: &OsStr,
+) -> Result<(), EffectBrokerError> {
+    let temporary_path = parent_path.join(temporary);
+    let target_path = parent_path.join(name);
+    std::fs::hard_link(&temporary_path, &target_path)?;
+    std::fs::remove_file(temporary_path)?;
+    if let Err(error) = sync_windows_file(&target_path) {
+        let _ = std::fs::remove_file(&target_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_replace(
+    parent: &File,
+    parent_path: &Path,
+    name: &OsStr,
+    temporary: &OsStr,
+    expected: File,
+) -> Result<(), EffectBrokerError> {
+    let target = parent_path.join(name);
+    let current =
+        open_regular_at(parent, parent_path, name)?.ok_or(EffectBrokerError::PreimageMismatch)?;
+    if !same_file(&expected, &current) {
+        return Err(EffectBrokerError::PreimageMismatch);
+    }
+    drop(current);
+    drop(expected);
+    std::fs::rename(parent_path.join(temporary), &target)?;
+    sync_windows_file(&target)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_windows_file(path: &Path) -> Result<(), EffectBrokerError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid_target().into());
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn same_file(expected: &File, observed: &File) -> bool {
+    match (
+        expected.try_clone().and_then(same_file::Handle::from_file),
+        observed.try_clone().and_then(same_file::Handle::from_file),
+    ) {
+        (Ok(expected), Ok(observed)) => expected == observed,
         _ => false,
     }
 }
@@ -431,11 +658,11 @@ fn invalid_target() -> std::io::Error {
 }
 
 fn read_descriptor_utf8(file: &File, limit: usize) -> Result<Vec<u8>, EffectBrokerError> {
-    let stat = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
-    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(invalid_target().into());
     }
-    if stat.st_size < 0 || u64::try_from(stat.st_size).unwrap_or(u64::MAX) > limit as u64 {
+    if metadata.len() > limit as u64 {
         return Err(EffectBrokerError::InputTooLarge { limit });
     }
     let mut file = file.try_clone()?;

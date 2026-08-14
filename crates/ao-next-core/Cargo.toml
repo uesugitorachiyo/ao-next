@@ -14,6 +14,9 @@ sha2.workspace = true
 rustix.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+same-file.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

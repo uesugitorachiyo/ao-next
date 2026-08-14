@@ -130,6 +130,7 @@ pub fn prepare_invocation(
         ],
         stdin: prompt.as_bytes().to_vec(),
         cwd: workspace.to_path_buf(),
+        environment: None,
         limits,
     })
 }
@@ -286,6 +287,7 @@ pub fn prepare_direct_invocation(
         ],
         stdin: prompt.as_bytes().to_vec(),
         cwd: workspace.to_path_buf(),
+        environment: None,
         limits,
     })
 }

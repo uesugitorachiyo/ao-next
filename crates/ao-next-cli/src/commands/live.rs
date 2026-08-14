@@ -1,7 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read as _, Seek as _, Write as _};
+#[cfg(unix)]
+use std::io::Write as _;
+use std::io::{Read as _, Seek as _};
+#[cfg(unix)]
 use std::os::fd::AsRawFd as _;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -37,8 +43,8 @@ use super::{
 };
 
 const WORKER_ID: &str = "ao-next-live-worker-01";
+#[cfg(unix)]
 const GIT_PROGRAM: &str = "/usr/bin/git";
-const ENV_PROGRAM: &str = "/usr/bin/env";
 const GIT_BRANCH: &str = "ao-next-sealed-seed";
 const GIT_TIMESTAMP: &str = "2000-01-01T00:00:00Z";
 const GIT_OUTPUT_LIMIT: usize = 256 * 1024;
@@ -167,6 +173,7 @@ struct SingleProviderProcess<R> {
 
 struct DigestBoundFakeRunner {
     program: PathBuf,
+    #[cfg(unix)]
     interpreter: &'static str,
     executable: std::fs::File,
     calls: Arc<Mutex<usize>>,
@@ -178,9 +185,13 @@ impl DigestBoundFakeRunner {
         program_digest: &Digest,
         calls: Arc<Mutex<usize>>,
     ) -> Result<Self, CommandFailure> {
+        #[cfg(unix)]
         let (interpreter, executable) = open_bound_fake_program(program, program_digest)?;
+        #[cfg(windows)]
+        let executable = open_bound_fake_program(program, program_digest)?;
         Ok(Self {
             program: program.to_path_buf(),
+            #[cfg(unix)]
             interpreter,
             executable,
             calls,
@@ -199,12 +210,27 @@ impl ProcessRunner for DigestBoundFakeRunner {
                 "provider-free fake program binding drifted".into(),
             ));
         }
+        let result = self.run_bound(invocation, cancellation)?;
+        *self
+            .calls
+            .lock()
+            .map_err(|error| InvocationError::Io(error.to_string()))? += 1;
+        Ok(result)
+    }
+}
+
+impl DigestBoundFakeRunner {
+    #[cfg(unix)]
+    fn run_bound(
+        &mut self,
+        invocation: &PreparedInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutput, InvocationError> {
         self.executable
             .rewind()
             .map_err(|error| InvocationError::Io(error.to_string()))?;
         rustix::io::fcntl_setfd(&self.executable, rustix::io::FdFlags::empty())
             .map_err(|error| InvocationError::Io(error.to_string()))?;
-        let mut runner = BoundedProcessRunner;
         let descriptor = self.executable.as_raw_fd();
         let descriptor_path = format!("/dev/fd/{descriptor}");
         let mut args = if self.interpreter == "/usr/bin/python3" {
@@ -221,27 +247,46 @@ impl ProcessRunner for DigestBoundFakeRunner {
             vec![descriptor_path]
         };
         args.extend(invocation.args.clone());
-        let result = runner.run(
+        let result = BoundedProcessRunner.run(
             &PreparedInvocation {
                 program: self.interpreter.into(),
                 args,
                 stdin: invocation.stdin.clone(),
                 cwd: invocation.cwd.clone(),
+                environment: invocation.environment.clone(),
                 limits: invocation.limits,
             },
             cancellation,
         );
         rustix::io::fcntl_setfd(&self.executable, rustix::io::FdFlags::CLOEXEC)
             .map_err(|error| InvocationError::Io(error.to_string()))?;
-        let result = result?;
-        *self
-            .calls
-            .lock()
-            .map_err(|error| InvocationError::Io(error.to_string()))? += 1;
-        Ok(result)
+        result
+    }
+
+    #[cfg(windows)]
+    fn run_bound(
+        &mut self,
+        invocation: &PreparedInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutput, InvocationError> {
+        self.executable
+            .rewind()
+            .map_err(|error| InvocationError::Io(error.to_string()))?;
+        BoundedProcessRunner.run(
+            &PreparedInvocation {
+                program: self.program.display().to_string(),
+                args: invocation.args.clone(),
+                stdin: invocation.stdin.clone(),
+                cwd: invocation.cwd.clone(),
+                environment: invocation.environment.clone(),
+                limits: invocation.limits,
+            },
+            cancellation,
+        )
     }
 }
 
+#[cfg(unix)]
 fn open_bound_fake_program(
     program: &Path,
     program_digest: &Digest,
@@ -288,6 +333,46 @@ fn open_bound_fake_program(
     Ok((interpreter, seal_fake_program(&bytes)?))
 }
 
+#[cfg(windows)]
+fn open_bound_fake_program(
+    program: &Path,
+    program_digest: &Digest,
+) -> Result<std::fs::File, CommandFailure> {
+    if !program.is_absolute() {
+        return Err(CommandFailure::invalid_input(
+            "provider-free fake program binding drifted",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(program)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > 512 * 1024 * 1024
+    {
+        return Err(CommandFailure::invalid_input(
+            "provider-free fake program is not a bounded regular non-symlink file",
+        ));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .custom_flags(0x0020_0000)
+        .open(program)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.read_to_end(&mut bytes)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if digest_bytes(&bytes) != *program_digest {
+        return Err(CommandFailure::invalid_input(
+            "provider-free fake program binding drifted",
+        ));
+    }
+    file.rewind()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    Ok(file)
+}
+
+#[cfg(unix)]
 fn seal_fake_program(bytes: &[u8]) -> Result<std::fs::File, CommandFailure> {
     for sequence in 0_u8..=u8::MAX {
         let path = std::env::temp_dir().join(format!(
@@ -1354,6 +1439,7 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         ],
         stdin: Vec::new(),
         cwd: input.request.workspace.root.clone(),
+        environment: None,
         limits,
     };
     let started = Instant::now();
@@ -1563,6 +1649,7 @@ fn run_current_ao_control<P: ProcessRunner>(
             args: args.iter().map(|value| (*value).to_string()).collect(),
             stdin: Vec::new(),
             cwd: workspace.to_path_buf(),
+            environment: None,
             limits,
         },
         cancellation,
@@ -2691,25 +2778,71 @@ fn reject_git_metadata(root: &Path) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-fn git_environment_args() -> Vec<String> {
-    vec![
-        "-i".into(),
-        "PATH=/usr/bin:/bin".into(),
-        "HOME=/var/empty".into(),
-        "LANG=C".into(),
-        "LC_ALL=C".into(),
-        "TZ=UTC".into(),
-        "GIT_CONFIG_NOSYSTEM=1".into(),
-        "GIT_CONFIG_GLOBAL=/dev/null".into(),
-        "GIT_CONFIG_SYSTEM=/dev/null".into(),
-        "GIT_AUTHOR_NAME=AO Next".into(),
-        "GIT_AUTHOR_EMAIL=ao-next@invalid".into(),
-        format!("GIT_AUTHOR_DATE={GIT_TIMESTAMP}"),
-        "GIT_COMMITTER_NAME=AO Next".into(),
-        "GIT_COMMITTER_EMAIL=ao-next@invalid".into(),
-        format!("GIT_COMMITTER_DATE={GIT_TIMESTAMP}"),
-        GIT_PROGRAM.into(),
-    ]
+fn git_environment(root: &Path, program: &Path) -> BTreeMap<String, String> {
+    #[cfg(unix)]
+    let _ = program;
+    let mut environment = BTreeMap::from([
+        ("HOME".into(), root.display().to_string()),
+        ("LANG".into(), "C".into()),
+        ("LC_ALL".into(), "C".into()),
+        ("TZ".into(), "UTC".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_AUTHOR_NAME".into(), "AO Next".into()),
+        ("GIT_AUTHOR_EMAIL".into(), "ao-next@invalid".into()),
+        ("GIT_AUTHOR_DATE".into(), GIT_TIMESTAMP.into()),
+        ("GIT_COMMITTER_NAME".into(), "AO Next".into()),
+        ("GIT_COMMITTER_EMAIL".into(), "ao-next@invalid".into()),
+        ("GIT_COMMITTER_DATE".into(), GIT_TIMESTAMP.into()),
+    ]);
+    #[cfg(unix)]
+    environment.extend([
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
+    ]);
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let program_dir = program.parent().unwrap_or_else(|| Path::new(""));
+        environment.extend([
+            (
+                "PATH".into(),
+                format!(r"{};{}\System32", program_dir.display(), system_root),
+            ),
+            ("GIT_CONFIG_GLOBAL".into(), "NUL".into()),
+            ("GIT_CONFIG_SYSTEM".into(), "NUL".into()),
+            ("SystemRoot".into(), system_root),
+        ]);
+    }
+    environment
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Windows Git discovery can fail and shares this call site"
+)]
+fn git_program() -> Result<PathBuf, CommandFailure> {
+    Ok(PathBuf::from(GIT_PROGRAM))
+}
+
+#[cfg(windows)]
+fn git_program() -> Result<PathBuf, CommandFailure> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| CommandFailure::runtime("Git executable cannot be resolved without PATH"))?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join("git.exe");
+        let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.file_type().is_symlink() && metadata.is_file() {
+            return std::fs::canonicalize(candidate)
+                .map_err(|error| CommandFailure::runtime(error.to_string()));
+        }
+    }
+    Err(CommandFailure::runtime(
+        "Git executable is missing from the operator PATH",
+    ))
 }
 
 fn run_git_checked(
@@ -2727,15 +2860,15 @@ fn run_git_checked_with_runner<R: ProcessRunner>(
     stage: &str,
     runner: &mut R,
 ) -> Result<InvocationOutput, CommandFailure> {
-    let mut environment_args = git_environment_args();
-    environment_args.extend(args);
+    let program = git_program()?;
     let output = runner
         .run(
             &PreparedInvocation {
-                program: ENV_PROGRAM.into(),
-                args: environment_args,
+                program: program.display().to_string(),
+                args,
                 stdin: Vec::new(),
                 cwd: root.to_path_buf(),
+                environment: Some(git_environment(root, &program)),
                 limits: InvocationLimits {
                     max_input_bytes: 0,
                     max_output_bytes: GIT_OUTPUT_LIMIT,
@@ -3009,7 +3142,7 @@ fn checked_sum_capture_usage(captures: &[RuntimeCapture]) -> Option<TokenUsage> 
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
     use std::process::Command;
@@ -4002,6 +4135,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn digest_bound_fake_executable_runs_the_real_n7_provider_free_path() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4073,6 +4207,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_free_execution_rejects_post_preflight_input_drift_before_spawn() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4125,6 +4260,7 @@ mod tests {
         assert!(!marker.exists(), "drifted row spawned fake provider");
     }
 
+    #[cfg(unix)]
     #[test]
     fn digest_bound_fake_runner_counts_direct_n0_invocations() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4149,6 +4285,7 @@ mod tests {
                     args: Vec::new(),
                     stdin: Vec::new(),
                     cwd: n0.input.request.workspace.root.clone(),
+                    environment: None,
                     limits: invocation_limits(&n0.input.request).expect("invocation limits"),
                 },
                 &CancellationToken::new(),
@@ -4159,6 +4296,7 @@ mod tests {
         assert_eq!(*calls.lock().expect("fake call count"), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn digest_bound_fake_runner_rejects_a_symlink_program() {
         use std::os::unix::fs::symlink;
@@ -4174,6 +4312,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn digest_bound_fake_runner_executes_the_bound_descriptor_after_a_path_swap() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4201,6 +4340,7 @@ mod tests {
                     args: Vec::new(),
                     stdin: Vec::new(),
                     cwd: temporary.path().to_path_buf(),
+                    environment: None,
                     limits: InvocationLimits {
                         timeout_ms: 1_000,
                         max_input_bytes: 1_024,
@@ -4216,6 +4356,7 @@ mod tests {
         assert_eq!(*calls.lock().expect("fake call count"), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn digest_bound_fake_runner_executes_sealed_bytes_after_an_in_place_overwrite() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4240,6 +4381,7 @@ mod tests {
                     args: Vec::new(),
                     stdin: Vec::new(),
                     cwd: temporary.path().to_path_buf(),
+                    environment: None,
                     limits: InvocationLimits {
                         timeout_ms: 1_000,
                         max_input_bytes: 1_024,
@@ -4254,6 +4396,7 @@ mod tests {
         assert_eq!(*calls.lock().expect("fake call count"), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     #[allow(
         clippy::too_many_lines,
@@ -5155,6 +5298,7 @@ else:
             args: Vec::new(),
             stdin: Vec::new(),
             cwd: temporary.path().to_path_buf(),
+            environment: None,
             limits: InvocationLimits {
                 max_input_bytes: 0,
                 max_output_bytes: 0,
@@ -5251,28 +5395,25 @@ else:
 
     #[test]
     fn deterministic_git_environment_clears_host_identity_and_configuration() {
-        let args = git_environment_args();
-        assert_eq!(args.first().map(String::as_str), Some("-i"));
-        for binding in [
-            "GIT_CONFIG_NOSYSTEM=1",
-            "GIT_CONFIG_GLOBAL=/dev/null",
-            "GIT_CONFIG_SYSTEM=/dev/null",
-            "GIT_AUTHOR_NAME=AO Next",
-            "GIT_AUTHOR_EMAIL=ao-next@invalid",
-            "GIT_COMMITTER_NAME=AO Next",
-            "GIT_COMMITTER_EMAIL=ao-next@invalid",
+        let temporary = TempDir::new().expect("temporary");
+        let program = git_program().expect("Git program");
+        let environment = git_environment(temporary.path(), &program);
+        for (name, value) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_AUTHOR_NAME", "AO Next"),
+            ("GIT_AUTHOR_EMAIL", "ao-next@invalid"),
+            ("GIT_COMMITTER_NAME", "AO Next"),
+            ("GIT_COMMITTER_EMAIL", "ao-next@invalid"),
+            ("GIT_AUTHOR_DATE", GIT_TIMESTAMP),
+            ("GIT_COMMITTER_DATE", GIT_TIMESTAMP),
         ] {
-            assert!(args.iter().any(|argument| argument == binding));
+            assert_eq!(environment.get(name).map(String::as_str), Some(value));
         }
-        assert!(
-            args.iter()
-                .any(|argument| argument == &format!("GIT_AUTHOR_DATE={GIT_TIMESTAMP}"))
+        assert_eq!(
+            environment.get("HOME").map(String::as_str),
+            temporary.path().to_str()
         );
-        assert!(
-            args.iter()
-                .any(|argument| argument == &format!("GIT_COMMITTER_DATE={GIT_TIMESTAMP}"))
-        );
-        assert_eq!(args.last().map(String::as_str), Some(GIT_PROGRAM));
+        assert!(environment.contains_key("PATH"));
     }
 
     #[test]
@@ -6168,5 +6309,61 @@ else:
         )
         .expect("capture terminal JSON");
         assert_eq!(terminal["failure_stage"], "provider");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn windows_git_workspace_preparation_is_seed_bound_and_clean() {
+        let temporary = TempDir::new().expect("temporary");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::write(workspace.join("source.txt"), b"source\n").expect("source");
+        let identity = prepare_git_workspace(
+            &workspace,
+            std::slice::from_ref(&workspace),
+            &digest_bytes(b"windows-seed"),
+        )
+        .expect("Windows Git workspace");
+        verify_git_workspace(&identity, true).expect("stable Windows Git workspace");
+    }
+
+    #[test]
+    fn windows_fake_program_is_digest_bound_and_locked_while_it_runs() {
+        let temporary = TempDir::new().expect("temporary");
+        let program = temporary.path().join("fake-provider.exe");
+        std::fs::copy(std::env::current_exe().expect("test executable"), &program)
+            .expect("fake executable");
+        let digest = digest_regular_file(&program).expect("fake digest");
+        let calls = Arc::new(Mutex::new(0));
+        let mut runner =
+            DigestBoundFakeRunner::new(&program, &digest, calls.clone()).expect("bound fake");
+        assert!(
+            std::fs::write(&program, b"drift").is_err(),
+            "bound executable must reject in-place drift"
+        );
+        let output = runner
+            .run(
+                &PreparedInvocation {
+                    program: "codex".into(),
+                    args: vec!["--list".into()],
+                    stdin: Vec::new(),
+                    cwd: temporary.path().to_path_buf(),
+                    environment: None,
+                    limits: InvocationLimits {
+                        max_input_bytes: 0,
+                        max_output_bytes: 1024 * 1024,
+                        timeout_ms: 10_000,
+                    },
+                },
+                &CancellationToken::new(),
+            )
+            .expect("bound Windows executable runs");
+        assert_eq!(output.status, 0);
+        assert_eq!(*calls.lock().expect("fake call count"), 1);
     }
 }

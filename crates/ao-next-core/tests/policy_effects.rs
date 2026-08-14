@@ -135,6 +135,26 @@ fn path_containment_rejects_outside_traversal_symlink_and_non_regular_inputs() {
         );
     }
 
+    #[cfg(windows)]
+    {
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, b"secret").expect("outside fixture");
+        let link = workspace.path().join("link");
+        match std::os::windows::fs::symlink_file(&outside_file, &link) {
+            Ok(()) => {
+                read.paths = vec!["link".into()];
+                assert_eq!(
+                    broker
+                        .authorize(&read, &authorized)
+                        .expect_err("symlink denied"),
+                    PolicyDenial::SymlinkNotAllowed(link)
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(error) => panic!("symlink fixture: {error}"),
+        }
+    }
+
     let directory = workspace.path().join("directory");
     std::fs::create_dir(&directory).expect("directory fixture");
     read.paths = vec!["directory".into()];
@@ -348,13 +368,29 @@ fn authorized_native_write_rejects_a_regular_parent_substitution() {
         .authorize(&write, &authorized)
         .expect("write admitted against the original parent");
 
-    let moved_parent = workspace.path().join("original-nested");
-    std::fs::rename(&original_parent, &moved_parent).expect("move original parent");
-    std::fs::create_dir(&original_parent).expect("substitute parent");
-
-    broker
-        .execute_authorized(&admitted)
-        .expect_err("regular parent substitution must invalidate admission");
-    assert!(!original_parent.join("product.txt").exists());
-    assert!(!moved_parent.join("product.txt").exists());
+    #[cfg(unix)]
+    {
+        let moved_parent = workspace.path().join("original-nested");
+        std::fs::rename(&original_parent, &moved_parent).expect("move original parent");
+        std::fs::create_dir(&original_parent).expect("substitute parent");
+        broker
+            .execute_authorized(&admitted)
+            .expect_err("regular parent substitution must invalidate admission");
+        assert!(!original_parent.join("product.txt").exists());
+        assert!(!moved_parent.join("product.txt").exists());
+    }
+    #[cfg(windows)]
+    {
+        assert!(
+            std::fs::rename(&original_parent, workspace.path().join("replacement")).is_err(),
+            "admitted parent handle must block substitution"
+        );
+        broker
+            .execute_authorized(&admitted)
+            .expect("unchanged admitted parent remains valid");
+        assert_eq!(
+            std::fs::read(original_parent.join("product.txt")).expect("written product"),
+            b"ready\n"
+        );
+    }
 }

@@ -641,7 +641,10 @@ fn sealed_corpus() -> CorpusManifest {
 }
 
 fn qualify_campaign(path: &Path) -> Output {
+    #[cfg(unix)]
     let fake_program = Path::new("/usr/bin/true");
+    #[cfg(windows)]
+    let fake_program = Path::new(env!("CARGO_BIN_EXE_ao-next"));
     let fake_digest = digest_bytes(&std::fs::read(fake_program).expect("fake program bytes"));
     run(&[
         "qualify-live-campaign",

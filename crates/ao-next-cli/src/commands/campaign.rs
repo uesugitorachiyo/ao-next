@@ -1108,11 +1108,10 @@ fn create_symlink(target: &Path, link: &Path) -> Result<(), CommandFailure> {
         .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
-#[cfg(not(unix))]
-fn create_symlink(_: &Path, _: &Path) -> Result<(), CommandFailure> {
-    Err(CommandFailure::invalid_input(
-        "symlink admission regression is unavailable on this platform",
-    ))
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path) -> Result<(), CommandFailure> {
+    std::os::windows::fs::symlink_file(target, link)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
 fn string_at(value: &serde_json::Value, pointer: &str) -> Result<String, CommandFailure> {

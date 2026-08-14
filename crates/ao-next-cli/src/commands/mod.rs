@@ -130,6 +130,8 @@ pub struct ReplayArgs {
 pub struct EvaluateArgs {
     #[arg(long)]
     pub comparison: PathBuf,
+    #[arg(long)]
+    pub recovery_qualification_digest: Option<String>,
 }
 
 #[derive(Debug, Args)]

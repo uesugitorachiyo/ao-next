@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -6,7 +6,8 @@ use ao_next_core::contracts::{
     AdapterIdentity, Digest, RunState, SourceIdentity, TerminalReadback, WorkspaceIdentity,
 };
 use ao_next_core::evidence::digest_bytes;
-use ao_next_eval::comparison::ComparisonRequest;
+use ao_next_core::strict_json::canonical_digest;
+use ao_next_eval::comparison::{ComparisonRequest, RecoveryQualification};
 use ao_next_eval::corpus::{
     CorpusKind, CorpusManifest, EvaluationTask, ScheduleEntry, VariantProfile,
     counterbalanced_schedule,
@@ -199,7 +200,6 @@ fn ready_comparison_json() -> serde_json::Value {
         corpus,
         runs,
         recovery_qualification: None,
-        recovery_qualification_digest: None,
     })
     .expect("comparison JSON")
 }
@@ -776,7 +776,7 @@ fn instantiate_corpus_binds_exact_model_effort_and_adapter_identities() {
 fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
     let temporary = TempDir::new().expect("temporary");
     let corpus = sealed_corpus();
-    let runs = corpus
+    let mut runs: Vec<RunMeasurement> = corpus
         .tasks
         .iter()
         .flat_map(|task| {
@@ -787,12 +787,32 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
             })
         })
         .collect();
+    for run in &mut runs {
+        run.recovery_attempted = false;
+        run.recovery_no_duplicate_effect = false;
+    }
+    let recovery_qualification = RecoveryQualification {
+        schema_version: "ao.next.recovery-qualification.v1".into(),
+        corpus_digest: corpus.corpus_digest.clone(),
+        n7_adapter_digests: corpus
+            .tasks
+            .iter()
+            .flat_map(|task| &task.variant_profiles)
+            .filter(|profile| profile.variant == ExecutionVariant::N7)
+            .map(|profile| profile.adapter_digest.clone())
+            .collect::<BTreeSet<_>>(),
+        replayed_checkpoint_probe_digest: digest_bytes(b"checkpoint replay"),
+        prevented_duplicate_effect_probe_digest: digest_bytes(b"duplicate prevention"),
+        recovery_attempted: true,
+        recovery_no_duplicate_effect: true,
+        live_provider_processes: 0,
+    };
+    let recovery_digest = canonical_digest(&recovery_qualification).expect("recovery digest");
     let request = ComparisonRequest {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
-        recovery_qualification: None,
-        recovery_qualification_digest: None,
+        recovery_qualification: Some(recovery_qualification),
     };
     let path = temporary.path().join("live-comparison.json");
     write_json(&path, &request);
@@ -807,9 +827,36 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
     );
     assert_eq!(output.status.code(), Some(0));
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).expect("live comparison");
+    assert_eq!(live["decision"], "AO_NEXT_NOT_YET_SUPERIOR");
+
+    let output = run_with_live_environment(
+        &[
+            "evaluate-live",
+            "--comparison",
+            path.to_str().expect("path"),
+            "--recovery-qualification-digest",
+            recovery_digest.as_str(),
+        ],
+        temporary.path(),
+        Some("operator-authorized"),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).expect("live comparison");
     assert_eq!(live["decision"], "AO_NEXT_LIVE_EVALUATION_PASSED");
 
     let output = run(&["evaluate", "--comparison", path.to_str().expect("path")]);
+    assert_eq!(output.status.code(), Some(0));
+    let offline: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("offline comparison");
+    assert_eq!(offline["decision"], "AO_NEXT_NOT_YET_SUPERIOR");
+
+    let output = run(&[
+        "evaluate",
+        "--comparison",
+        path.to_str().expect("path"),
+        "--recovery-qualification-digest",
+        recovery_digest.as_str(),
+    ]);
     assert_eq!(output.status.code(), Some(0));
     let offline: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("offline comparison");

@@ -18,8 +18,6 @@ pub struct ComparisonRequest {
     pub runs: Vec<RunMeasurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_qualification: Option<RecoveryQualification>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_qualification_digest: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -151,7 +149,21 @@ pub enum EvaluationError {
 /// duplicate variants, incomplete tokens, metric manipulation, or contradictory
 /// raw measurements.
 pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport, EvaluationError> {
-    let mut report = evaluate_repeated(request)?;
+    evaluate_offline_with_recovery_digest(request, None)
+}
+
+/// Evaluates offline rows with a recovery receipt anchored outside the
+/// caller-controlled comparison document.
+///
+/// # Errors
+///
+/// Returns [`EvaluationError`] under the same conditions as
+/// [`evaluate_offline`].
+pub fn evaluate_offline_with_recovery_digest(
+    request: &ComparisonRequest,
+    recovery_qualification_digest: Option<&Digest>,
+) -> Result<ComparisonReport, EvaluationError> {
+    let mut report = evaluate_repeated(request, recovery_qualification_digest)?;
     report.decision = if report.gates.iter().all(|gate| gate.passed) {
         EvaluationDecision::AoNextReadyForLiveEvaluation
     } else {
@@ -170,6 +182,20 @@ pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport,
 pub fn evaluate_live_authorized(
     request: &ComparisonRequest,
 ) -> Result<ComparisonReport, EvaluationError> {
+    evaluate_live_authorized_with_recovery_digest(request, None)
+}
+
+/// Evaluates live rows with a recovery receipt anchored outside the
+/// caller-controlled comparison document.
+///
+/// # Errors
+///
+/// Returns [`EvaluationError`] under the same conditions as
+/// [`evaluate_live_authorized`].
+pub fn evaluate_live_authorized_with_recovery_digest(
+    request: &ComparisonRequest,
+    recovery_qualification_digest: Option<&Digest>,
+) -> Result<ComparisonReport, EvaluationError> {
     if std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").as_deref() != Ok("operator-authorized") {
         return Err(EvaluationError::LiveAuthorityMissing);
     }
@@ -182,7 +208,7 @@ pub fn evaluate_live_authorized(
     }) {
         return Err(EvaluationError::LiveProvenanceRequired);
     }
-    let mut report = evaluate_repeated(request)?;
+    let mut report = evaluate_repeated(request, recovery_qualification_digest)?;
     report.decision = if report.gates.iter().all(|gate| gate.passed) {
         EvaluationDecision::AoNextLiveEvaluationPassed
     } else {
@@ -191,7 +217,10 @@ pub fn evaluate_live_authorized(
     Ok(report)
 }
 
-fn evaluate_repeated(request: &ComparisonRequest) -> Result<ComparisonReport, EvaluationError> {
+fn evaluate_repeated(
+    request: &ComparisonRequest,
+    recovery_qualification_digest: Option<&Digest>,
+) -> Result<ComparisonReport, EvaluationError> {
     if request.schema_version != "ao.next.comparison-request.v2" {
         return Err(EvaluationError::UnsupportedSchema);
     }
@@ -267,7 +296,7 @@ fn evaluate_repeated(request: &ComparisonRequest) -> Result<ComparisonReport, Ev
         &rows,
         &summary,
         request.recovery_qualification.as_ref(),
-        request.recovery_qualification_digest.as_ref(),
+        recovery_qualification_digest,
     );
     Ok(ComparisonReport {
         schema_version: "ao.next.comparison-report.v1".into(),
@@ -509,6 +538,9 @@ fn recovery_qualification_valid(
     let (Some(qualification), Some(expected_digest)) = (qualification, expected_digest) else {
         return false;
     };
+    if corpus.validate_live().is_err() {
+        return false;
+    }
     let expected_adapters = corpus
         .tasks
         .iter()

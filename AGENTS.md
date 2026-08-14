@@ -48,6 +48,7 @@ AO Next is not established as superior, production-ready, released, published, d
 Run focused tests first, then:
 
 ```sh
+bash tests/bootstrap_contract.sh
 cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings

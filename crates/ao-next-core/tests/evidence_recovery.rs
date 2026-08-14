@@ -34,7 +34,23 @@ fn digest(value: &str) -> Digest {
     Digest::new(value).expect("fixture digest")
 }
 
+fn passing_command() -> StructuredCommand {
+    #[cfg(unix)]
+    let (program, args) = ("/usr/bin/true".into(), Vec::new());
+    #[cfg(windows)]
+    let (program, args) = (
+        std::env::var("ComSpec").expect("Windows command interpreter"),
+        vec!["/D".into(), "/C".into(), "exit 0".into()],
+    );
+    StructuredCommand {
+        program,
+        args,
+        timeout_ms: 1_000,
+    }
+}
+
 fn request(root: &Path) -> RunRequest {
+    let verifier_command = passing_command();
     RunRequest {
         schema_version: "ao.next.run-request.v1".into(),
         run_id: "run-evidence-01".into(),
@@ -65,7 +81,7 @@ fn request(root: &Path) -> RunRequest {
             expires_at: timestamp("2026-08-06T00:00:00Z"),
             capabilities: BTreeSet::from([Capability::RunLocalProgram]),
             allowed_roots: vec![root.to_path_buf()],
-            allowed_programs: BTreeSet::from(["/usr/bin/true".into()]),
+            allowed_programs: BTreeSet::from([verifier_command.program.clone()]),
             network: NetworkPolicy::Denied,
             allowed_network_hosts: BTreeSet::new(),
             external_effects: ExternalEffectPolicy::Denied,
@@ -73,11 +89,7 @@ fn request(root: &Path) -> RunRequest {
         verifier_profile: VerifierProfile {
             profile_id: "complete-local".into(),
             profile_digest: digest(ONE_DIGEST),
-            commands: vec![StructuredCommand {
-                program: "/usr/bin/true".into(),
-                args: Vec::new(),
-                timeout_ms: 1_000,
-            }],
+            commands: vec![verifier_command],
             required_artifacts: vec![PathBuf::from("result.txt")],
         },
         policy_digest: digest(ZERO_DIGEST),
@@ -104,11 +116,7 @@ fn adapter_identity() -> AdapterIdentity {
 
 fn verification_plan(json_digest: Digest) -> VerificationPlan {
     VerificationPlan {
-        commands: vec![StructuredCommand {
-            program: "/usr/bin/true".into(),
-            args: Vec::new(),
-            timeout_ms: 1_000,
-        }],
+        commands: vec![passing_command()],
         required_files: vec![PathBuf::from("result.txt")],
         strict_json_files: vec![PathBuf::from("result.json")],
         digest_expectations: BTreeMap::from([(PathBuf::from("result.json"), json_digest)]),

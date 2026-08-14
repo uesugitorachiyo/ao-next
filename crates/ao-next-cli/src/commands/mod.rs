@@ -131,7 +131,7 @@ pub struct EvaluateArgs {
     #[arg(long)]
     pub comparison: PathBuf,
     #[arg(long)]
-    pub recovery_qualification_digest: Option<String>,
+    pub recovery_evidence_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

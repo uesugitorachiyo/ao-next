@@ -317,17 +317,7 @@ pub fn execute_recovery(args: &QualifyRecoveryArgs) -> Result<CommandOutput, Com
     let corpus: CorpusManifest =
         decode_strict_json(&read_bounded_regular(&args.corpus)?, 1024 * 1024)
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    corpus
-        .validate_live()
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    create_private_empty_directory(&args.evidence_root)?;
-    let security_coverage = run_security_matrix(&args.evidence_root)?;
-    write_json_new(
-        &args.evidence_root.join("security-coverage.json"),
-        &serde_json::to_value(&security_coverage)
-            .map_err(|error| CommandFailure::evidence(error.to_string()))?,
-    )?;
-    let qualification = recovery_qualification(&corpus, &security_coverage);
+    let qualification = qualify_recovery(&corpus, &args.evidence_root)?;
     let digest = canonical_digest(&qualification)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     Ok(CommandOutput::new(
@@ -341,6 +331,23 @@ pub fn execute_recovery(args: &QualifyRecoveryArgs) -> Result<CommandOutput, Com
         "qualified deterministic recovery evidence without a provider",
         0,
     ))
+}
+
+pub(super) fn qualify_recovery(
+    corpus: &CorpusManifest,
+    evidence_root: &Path,
+) -> Result<RecoveryQualification, CommandFailure> {
+    corpus
+        .validate_live()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    create_private_empty_directory(evidence_root)?;
+    let security_coverage = run_security_matrix(evidence_root)?;
+    write_json_new(
+        &evidence_root.join("security-coverage.json"),
+        &serde_json::to_value(&security_coverage)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?,
+    )?;
+    Ok(recovery_qualification(corpus, &security_coverage))
 }
 
 fn recovery_qualification(

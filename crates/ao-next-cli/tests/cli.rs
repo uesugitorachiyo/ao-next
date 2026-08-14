@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -6,8 +6,7 @@ use ao_next_core::contracts::{
     AdapterIdentity, Digest, RunState, SourceIdentity, TerminalReadback, WorkspaceIdentity,
 };
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::strict_json::canonical_digest;
-use ao_next_eval::comparison::{ComparisonRequest, RecoveryQualification};
+use ao_next_eval::comparison::ComparisonRequest;
 use ao_next_eval::corpus::{
     CorpusKind, CorpusManifest, EvaluationTask, ScheduleEntry, VariantProfile,
     counterbalanced_schedule,
@@ -199,7 +198,6 @@ fn ready_comparison_json() -> serde_json::Value {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
-        recovery_qualification: None,
     })
     .expect("comparison JSON")
 }
@@ -791,28 +789,10 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
         run.recovery_attempted = false;
         run.recovery_no_duplicate_effect = false;
     }
-    let recovery_qualification = RecoveryQualification {
-        schema_version: "ao.next.recovery-qualification.v1".into(),
-        corpus_digest: corpus.corpus_digest.clone(),
-        n7_adapter_digests: corpus
-            .tasks
-            .iter()
-            .flat_map(|task| &task.variant_profiles)
-            .filter(|profile| profile.variant == ExecutionVariant::N7)
-            .map(|profile| profile.adapter_digest.clone())
-            .collect::<BTreeSet<_>>(),
-        replayed_checkpoint_probe_digest: digest_bytes(b"checkpoint replay"),
-        prevented_duplicate_effect_probe_digest: digest_bytes(b"duplicate prevention"),
-        recovery_attempted: true,
-        recovery_no_duplicate_effect: true,
-        live_provider_processes: 0,
-    };
-    let recovery_digest = canonical_digest(&recovery_qualification).expect("recovery digest");
     let request = ComparisonRequest {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
-        recovery_qualification: Some(recovery_qualification),
     };
     let path = temporary.path().join("live-comparison.json");
     write_json(&path, &request);
@@ -834,8 +814,12 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
             "evaluate-live",
             "--comparison",
             path.to_str().expect("path"),
-            "--recovery-qualification-digest",
-            recovery_digest.as_str(),
+            "--recovery-evidence-root",
+            temporary
+                .path()
+                .join("live-recovery")
+                .to_str()
+                .expect("recovery root"),
         ],
         temporary.path(),
         Some("operator-authorized"),
@@ -854,11 +838,16 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
         "evaluate",
         "--comparison",
         path.to_str().expect("path"),
-        "--recovery-qualification-digest",
-        recovery_digest.as_str(),
+        "--recovery-evidence-root",
+        temporary
+            .path()
+            .join("offline-recovery")
+            .to_str()
+            .expect("recovery root"),
     ]);
     assert_eq!(output.status.code(), Some(0));
     let offline: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("offline comparison");
     assert_eq!(offline["decision"], "AO_NEXT_READY_FOR_LIVE_EVALUATION");
+    assert!(offline["recovery_qualification_digest"].is_string());
 }

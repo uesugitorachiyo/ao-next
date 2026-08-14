@@ -16,8 +16,6 @@ pub struct ComparisonRequest {
     pub schema_version: String,
     pub corpus: CorpusManifest,
     pub runs: Vec<RunMeasurement>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_qualification: Option<RecoveryQualification>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -80,6 +78,8 @@ pub struct ComparisonReport {
     pub summary: ComparisonSummary,
     pub gates: Vec<GateResult>,
     pub decision: EvaluationDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_qualification_digest: Option<Digest>,
     pub promotion_authorized: bool,
     pub dynamic_fanout_authorized: bool,
 }
@@ -149,21 +149,21 @@ pub enum EvaluationError {
 /// duplicate variants, incomplete tokens, metric manipulation, or contradictory
 /// raw measurements.
 pub fn evaluate_offline(request: &ComparisonRequest) -> Result<ComparisonReport, EvaluationError> {
-    evaluate_offline_with_recovery_digest(request, None)
+    evaluate_offline_with_recovery_qualification(request, None)
 }
 
-/// Evaluates offline rows with a recovery receipt anchored outside the
-/// caller-controlled comparison document.
+/// Evaluates offline rows with a recovery qualification produced by trusted
+/// in-process probes rather than decoded from the comparison document.
 ///
 /// # Errors
 ///
 /// Returns [`EvaluationError`] under the same conditions as
 /// [`evaluate_offline`].
-pub fn evaluate_offline_with_recovery_digest(
+pub fn evaluate_offline_with_recovery_qualification(
     request: &ComparisonRequest,
-    recovery_qualification_digest: Option<&Digest>,
+    recovery_qualification: Option<&RecoveryQualification>,
 ) -> Result<ComparisonReport, EvaluationError> {
-    let mut report = evaluate_repeated(request, recovery_qualification_digest)?;
+    let mut report = evaluate_repeated(request, recovery_qualification)?;
     report.decision = if report.gates.iter().all(|gate| gate.passed) {
         EvaluationDecision::AoNextReadyForLiveEvaluation
     } else {
@@ -182,19 +182,19 @@ pub fn evaluate_offline_with_recovery_digest(
 pub fn evaluate_live_authorized(
     request: &ComparisonRequest,
 ) -> Result<ComparisonReport, EvaluationError> {
-    evaluate_live_authorized_with_recovery_digest(request, None)
+    evaluate_live_authorized_with_recovery_qualification(request, None)
 }
 
-/// Evaluates live rows with a recovery receipt anchored outside the
-/// caller-controlled comparison document.
+/// Evaluates live rows with a recovery qualification produced by trusted
+/// in-process probes rather than decoded from the comparison document.
 ///
 /// # Errors
 ///
 /// Returns [`EvaluationError`] under the same conditions as
 /// [`evaluate_live_authorized`].
-pub fn evaluate_live_authorized_with_recovery_digest(
+pub fn evaluate_live_authorized_with_recovery_qualification(
     request: &ComparisonRequest,
-    recovery_qualification_digest: Option<&Digest>,
+    recovery_qualification: Option<&RecoveryQualification>,
 ) -> Result<ComparisonReport, EvaluationError> {
     if std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").as_deref() != Ok("operator-authorized") {
         return Err(EvaluationError::LiveAuthorityMissing);
@@ -208,7 +208,7 @@ pub fn evaluate_live_authorized_with_recovery_digest(
     }) {
         return Err(EvaluationError::LiveProvenanceRequired);
     }
-    let mut report = evaluate_repeated(request, recovery_qualification_digest)?;
+    let mut report = evaluate_repeated(request, recovery_qualification)?;
     report.decision = if report.gates.iter().all(|gate| gate.passed) {
         EvaluationDecision::AoNextLiveEvaluationPassed
     } else {
@@ -219,7 +219,7 @@ pub fn evaluate_live_authorized_with_recovery_digest(
 
 fn evaluate_repeated(
     request: &ComparisonRequest,
-    recovery_qualification_digest: Option<&Digest>,
+    recovery_qualification: Option<&RecoveryQualification>,
 ) -> Result<ComparisonReport, EvaluationError> {
     if request.schema_version != "ao.next.comparison-request.v2" {
         return Err(EvaluationError::UnsupportedSchema);
@@ -291,13 +291,12 @@ fn evaluate_repeated(
     }
 
     let summary = summarize(&rows);
-    let gates = calculate_gates(
-        &request.corpus,
-        &rows,
-        &summary,
-        request.recovery_qualification.as_ref(),
-        recovery_qualification_digest,
-    );
+    let gates = calculate_gates(&request.corpus, &rows, &summary, recovery_qualification);
+    let recovery_qualification_digest = recovery_qualification
+        .filter(|qualification| recovery_qualification_valid(&request.corpus, qualification))
+        .map(canonical_digest)
+        .transpose()
+        .map_err(|error| EvaluationError::InvalidCorpus(error.to_string()))?;
     Ok(ComparisonReport {
         schema_version: "ao.next.comparison-report.v1".into(),
         corpus_digest: request.corpus.corpus_digest.clone(),
@@ -305,6 +304,7 @@ fn evaluate_repeated(
         summary,
         gates,
         decision: EvaluationDecision::AoNextNotYetSuperior,
+        recovery_qualification_digest,
         promotion_authorized: false,
         dynamic_fanout_authorized: false,
     })
@@ -443,7 +443,6 @@ fn calculate_gates(
     rows: &[MetricRow],
     summary: &ComparisonSummary,
     recovery_qualification: Option<&RecoveryQualification>,
-    recovery_qualification_digest: Option<&Digest>,
 ) -> Vec<GateResult> {
     let n7 = rows
         .iter()
@@ -463,11 +462,8 @@ fn calculate_gates(
         && n7.iter().all(|row| {
             !row.measurement.recovery_attempted || row.measurement.recovery_no_duplicate_effect
         }))
-        || recovery_qualification_valid(
-            corpus,
-            recovery_qualification,
-            recovery_qualification_digest,
-        );
+        || recovery_qualification
+            .is_some_and(|qualification| recovery_qualification_valid(corpus, qualification));
     vec![
         gate(
             "zero_unauthorized_effects",
@@ -532,12 +528,8 @@ fn calculate_gates(
 
 fn recovery_qualification_valid(
     corpus: &CorpusManifest,
-    qualification: Option<&RecoveryQualification>,
-    expected_digest: Option<&Digest>,
+    qualification: &RecoveryQualification,
 ) -> bool {
-    let (Some(qualification), Some(expected_digest)) = (qualification, expected_digest) else {
-        return false;
-    };
     if corpus.validate_live().is_err() {
         return false;
     }
@@ -549,7 +541,6 @@ fn recovery_qualification_valid(
         .map(|profile| profile.adapter_digest.clone())
         .collect::<BTreeSet<_>>();
     qualification.schema_version == "ao.next.recovery-qualification.v1"
-        && canonical_digest(qualification).is_ok_and(|digest| &digest == expected_digest)
         && qualification.corpus_digest == corpus.corpus_digest
         && qualification.n7_adapter_digests == expected_adapters
         && !qualification.n7_adapter_digests.is_empty()

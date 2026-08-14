@@ -4616,6 +4616,40 @@ else:
                 .join("evidence/security-coverage.json")
                 .is_file()
         );
+        let recovery: ao_next_eval::comparison::RecoveryQualification =
+            serde_json::from_value(output.value["recovery_qualification"].clone())
+                .expect("strict recovery qualification");
+        assert_eq!(recovery.corpus_digest, corpus.corpus_digest);
+        assert!(recovery.recovery_attempted);
+        assert!(recovery.recovery_no_duplicate_effect);
+        assert_eq!(recovery.live_provider_processes, 0);
+        assert_eq!(
+            canonical_digest(&recovery).expect("recovery qualification digest"),
+            Digest::new(
+                output.value["recovery_qualification_digest"]
+                    .as_str()
+                    .expect("recovery qualification digest")
+            )
+            .expect("valid recovery qualification digest")
+        );
+        let corpus_path = campaign.path().join("recovery-corpus.json");
+        std::fs::write(
+            &corpus_path,
+            serde_json::to_vec(&corpus).expect("recovery corpus JSON"),
+        )
+        .expect("write recovery corpus");
+        let recovery_only =
+            super::super::campaign::execute_recovery(&crate::commands::QualifyRecoveryArgs {
+                corpus: corpus_path,
+                evidence_root: campaign.path().join("recovery-only-evidence"),
+            })
+            .expect("provider-free recovery-only qualification");
+        assert_eq!(recovery_only.status, 0);
+        assert_eq!(recovery_only.value["live_provider_processes"], 0);
+        assert_eq!(
+            recovery_only.value["recovery_qualification"]["corpus_digest"],
+            corpus.corpus_digest.as_str()
+        );
         assert_eq!(
             output.value["correlation_chain"],
             serde_json::json!({

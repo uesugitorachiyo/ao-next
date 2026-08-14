@@ -14,7 +14,7 @@ The evaluator first takes the median across the three trials for each task and v
 - complete, digest-valid evidence for every N7 row;
 - median N7 total tokens no more than 120% of N4;
 - median N7 total tokens and wall-clock time at least 25% below N0;
-- at least one successful N7 recovery with no duplicate effect;
+- at least one successful N7 recovery with no duplicate effect, established by either a bound live measurement or a canonical provider-free recovery qualification whose receipt digest, exact corpus, complete N7 adapter digest set, checkpoint replay, duplicate-effect denial, and zero-live-provider boundary all validate;
 - cross-runtime contract agreement for every N7 task; and
 - exactly one N7 worker with no dynamic fan-out.
 

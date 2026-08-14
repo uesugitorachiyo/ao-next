@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -32,6 +32,7 @@ pub struct PreparedInvocation {
     pub args: Vec<String>,
     pub stdin: Vec<u8>,
     pub cwd: PathBuf,
+    pub environment: Option<BTreeMap<String, String>>,
     pub limits: InvocationLimits,
 }
 
@@ -139,20 +140,23 @@ pub fn execute_bounded(
         return Err(InvocationError::Cancelled);
     }
 
-    let mut child = Command::new(&invocation.program)
+    let mut command = Command::new(&invocation.program);
+    command
         .args(&invocation.args)
         .current_dir(&invocation.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                InvocationError::MissingExecutable(invocation.program.clone())
-            } else {
-                InvocationError::Io(error.to_string())
-            }
-        })?;
+        .stderr(Stdio::piped());
+    if let Some(environment) = &invocation.environment {
+        command.env_clear().envs(environment);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            InvocationError::MissingExecutable(invocation.program.clone())
+        } else {
+            InvocationError::Io(error.to_string())
+        }
+    })?;
     let mut stdin = child
         .stdin
         .take()

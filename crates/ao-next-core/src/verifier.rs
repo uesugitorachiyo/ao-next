@@ -238,6 +238,7 @@ impl LocalProductVerifier<'_> {
             args: command.args.clone(),
             stdin: Vec::new(),
             cwd: workspace.root.clone(),
+            environment: None,
             limits: InvocationLimits {
                 max_input_bytes: 0,
                 max_output_bytes: usize::try_from(maximum_output_bytes).unwrap_or(usize::MAX),
@@ -644,6 +645,7 @@ fn run_command_entry(
         args: entry.args.clone(),
         stdin: Vec::new(),
         cwd,
+        environment: None,
         limits: InvocationLimits {
             max_input_bytes: 0,
             max_output_bytes: entry.max_output_bytes,

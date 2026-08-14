@@ -495,6 +495,7 @@ fn run_maps_success_denial_failure_interruption_and_evidence_failure() {
     assert_json_error(&output, 7, "evidence_failure");
 }
 
+#[cfg(unix)]
 #[test]
 fn live_commands_deny_before_input_or_process_resolution() {
     use std::os::unix::fs::PermissionsExt;
@@ -640,7 +641,10 @@ fn sealed_corpus() -> CorpusManifest {
 }
 
 fn qualify_campaign(path: &Path) -> Output {
+    #[cfg(unix)]
     let fake_program = Path::new("/usr/bin/true");
+    #[cfg(windows)]
+    let fake_program = Path::new(env!("CARGO_BIN_EXE_ao-next"));
     let fake_digest = digest_bytes(&std::fs::read(fake_program).expect("fake program bytes"));
     run(&[
         "qualify-live-campaign",

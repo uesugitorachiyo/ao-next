@@ -1,13 +1,16 @@
 use std::path::Path;
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::Duration;
 
 use ao_next_core::adapter::claude;
 use ao_next_core::adapter::codex;
 use ao_next_core::adapter::{
-    AdapterIdentity, AdapterTurn, CancellationToken, InvocationError, InvocationLimits,
-    PreparedInvocation, execute_bounded, live_adapter_tests_enabled,
+    AdapterIdentity, AdapterTurn, InvocationLimits, PreparedInvocation, live_adapter_tests_enabled,
 };
+#[cfg(unix)]
+use ao_next_core::adapter::{CancellationToken, InvocationError, execute_bounded};
 use schemars::schema_for;
 use tempfile::TempDir;
 
@@ -451,6 +454,7 @@ fn malformed_oversized_and_identity_drift_outputs_fail_closed() {
     assert!(codex::normalize_output(identity("codex", "v1"), CODEX_EVENTS, 8).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn process_runner_handles_missing_executable_timeout_cancellation_and_output_limit() {
     let temporary = TempDir::new().expect("temporary");
@@ -463,6 +467,7 @@ fn process_runner_handles_missing_executable_timeout_cancellation_and_output_lim
         args: Vec::new(),
         stdin: Vec::new(),
         cwd: temporary.path().to_path_buf(),
+        environment: None,
         limits: limits(),
     };
     assert!(matches!(
@@ -475,6 +480,7 @@ fn process_runner_handles_missing_executable_timeout_cancellation_and_output_lim
         args: vec!["1".into()],
         stdin: Vec::new(),
         cwd: temporary.path().to_path_buf(),
+        environment: None,
         limits: InvocationLimits {
             timeout_ms: 10,
             ..limits()
@@ -508,6 +514,7 @@ fn process_runner_handles_missing_executable_timeout_cancellation_and_output_lim
         args: vec!["0123456789".into()],
         stdin: Vec::new(),
         cwd: temporary.path().to_path_buf(),
+        environment: None,
         limits: InvocationLimits {
             max_output_bytes: 4,
             ..limits()

@@ -150,7 +150,13 @@ fn path_containment_rejects_outside_traversal_symlink_and_non_regular_inputs() {
                     PolicyDenial::SymlinkNotAllowed(link)
                 );
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(error)
+                if (error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314))
+                    && matches!(
+                        std::fs::symlink_metadata(&link),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                    ) => {}
             Err(error) => panic!("symlink fixture: {error}"),
         }
     }

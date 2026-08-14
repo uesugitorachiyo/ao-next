@@ -16,6 +16,22 @@ The Rust workspace contains:
 
 The [offline evaluation policy](docs/evaluation/decision-policy.md) compares three trials per task and variant. Offline and fake-process records can conclude only `AO_NEXT_NOT_YET_SUPERIOR` or `AO_NEXT_READY_FOR_LIVE_EVALUATION`. They cannot authorize promotion, fan-out, or a live-passed result.
 
+## Source Checkout
+
+AO Next requires Git, `jq`, and Rust 1.95 or newer. The repository can be
+checked and built without provider credentials or live-provider calls:
+
+```sh
+git clone https://github.com/uesugitorachiyo/ao-next.git
+cd ao-next
+bash tests/bootstrap_contract.sh
+cargo test --workspace
+cargo build --workspace --release
+```
+
+AO Next is licensed under [Apache-2.0](LICENSE). Report suspected security
+issues using the private process in [SECURITY.md](SECURITY.md).
+
 ## Local Verification
 
 ```sh
@@ -23,6 +39,7 @@ cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace --release
+bash tests/bootstrap_contract.sh
 git diff --check
 ```
 

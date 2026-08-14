@@ -1,10 +1,14 @@
-use ao_next_eval::comparison::{ComparisonRequest, evaluate_live_authorized, evaluate_offline};
+use ao_next_eval::comparison::{
+    ComparisonRequest, RecoveryQualification, evaluate_live_authorized_with_recovery_qualification,
+    evaluate_offline_with_recovery_qualification,
+};
 
-use super::{CommandFailure, CommandOutput, EvaluateArgs, decode_file};
+use super::{CommandFailure, CommandOutput, EvaluateArgs, campaign, decode_file};
 
 pub fn execute(args: &EvaluateArgs) -> Result<CommandOutput, CommandFailure> {
     let request: ComparisonRequest = decode_file(&args.comparison)?;
-    let report = evaluate_offline(&request)
+    let recovery = recovery_qualification(args, &request)?;
+    let report = evaluate_offline_with_recovery_qualification(&request, recovery.as_ref())
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let summary = format!("evaluated sealed corpus: {:?}", report.decision);
     let value = serde_json::to_value(report)
@@ -19,10 +23,21 @@ pub fn execute_live(args: &EvaluateArgs) -> Result<CommandOutput, CommandFailure
         ));
     }
     let request: ComparisonRequest = decode_file(&args.comparison)?;
-    let report = evaluate_live_authorized(&request)
+    let recovery = recovery_qualification(args, &request)?;
+    let report = evaluate_live_authorized_with_recovery_qualification(&request, recovery.as_ref())
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let summary = format!("evaluated sealed live corpus: {:?}", report.decision);
     let value = serde_json::to_value(report)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     Ok(CommandOutput::new(value, summary, 0))
+}
+
+fn recovery_qualification(
+    args: &EvaluateArgs,
+    request: &ComparisonRequest,
+) -> Result<Option<RecoveryQualification>, CommandFailure> {
+    args.recovery_evidence_root
+        .as_ref()
+        .map(|root| campaign::qualify_recovery(&request.corpus, root))
+        .transpose()
 }

@@ -198,8 +198,6 @@ fn ready_comparison_json() -> serde_json::Value {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
-        recovery_qualification: None,
-        recovery_qualification_digest: None,
     })
     .expect("comparison JSON")
 }
@@ -776,7 +774,7 @@ fn instantiate_corpus_binds_exact_model_effort_and_adapter_identities() {
 fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
     let temporary = TempDir::new().expect("temporary");
     let corpus = sealed_corpus();
-    let runs = corpus
+    let mut runs: Vec<RunMeasurement> = corpus
         .tasks
         .iter()
         .flat_map(|task| {
@@ -787,12 +785,14 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
             })
         })
         .collect();
+    for run in &mut runs {
+        run.recovery_attempted = false;
+        run.recovery_no_duplicate_effect = false;
+    }
     let request = ComparisonRequest {
         schema_version: "ao.next.comparison-request.v2".into(),
         corpus,
         runs,
-        recovery_qualification: None,
-        recovery_qualification_digest: None,
     };
     let path = temporary.path().join("live-comparison.json");
     write_json(&path, &request);
@@ -807,11 +807,47 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
     );
     assert_eq!(output.status.code(), Some(0));
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).expect("live comparison");
+    assert_eq!(live["decision"], "AO_NEXT_NOT_YET_SUPERIOR");
+
+    let output = run_with_live_environment(
+        &[
+            "evaluate-live",
+            "--comparison",
+            path.to_str().expect("path"),
+            "--recovery-evidence-root",
+            temporary
+                .path()
+                .join("live-recovery")
+                .to_str()
+                .expect("recovery root"),
+        ],
+        temporary.path(),
+        Some("operator-authorized"),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).expect("live comparison");
     assert_eq!(live["decision"], "AO_NEXT_LIVE_EVALUATION_PASSED");
 
     let output = run(&["evaluate", "--comparison", path.to_str().expect("path")]);
     assert_eq!(output.status.code(), Some(0));
     let offline: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("offline comparison");
+    assert_eq!(offline["decision"], "AO_NEXT_NOT_YET_SUPERIOR");
+
+    let output = run(&[
+        "evaluate",
+        "--comparison",
+        path.to_str().expect("path"),
+        "--recovery-evidence-root",
+        temporary
+            .path()
+            .join("offline-recovery")
+            .to_str()
+            .expect("recovery root"),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let offline: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("offline comparison");
     assert_eq!(offline["decision"], "AO_NEXT_READY_FOR_LIVE_EVALUATION");
+    assert!(offline["recovery_qualification_digest"].is_string());
 }

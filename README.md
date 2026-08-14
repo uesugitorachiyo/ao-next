@@ -32,9 +32,8 @@ cargo build --workspace --release
 AO Next is licensed under [Apache-2.0](LICENSE). Report suspected security
 issues using the private process in [SECURITY.md](SECURITY.md).
 
-Native file effects use descriptor-bound Unix filesystem operations. Windows
-builds compile the complete test surface but native file effects fail closed;
-Windows execution is not yet qualified.
+Native file effects use descriptor-bound Unix filesystem operations. AO Next
+currently supports Linux and macOS; Windows is not supported or qualified.
 
 ## Local Verification
 

@@ -828,7 +828,13 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
         temporary.path(),
         Some("operator-authorized"),
     );
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).expect("live comparison");
     assert_eq!(live["decision"], "AO_NEXT_LIVE_EVALUATION_PASSED");
 

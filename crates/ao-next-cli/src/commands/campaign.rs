@@ -617,22 +617,31 @@ fn run_security_matrix(evidence_root: &Path) -> Result<SecurityCoverageReceipt, 
 
     let symlink_target = root.join("symlink-target.txt");
     write_bytes_new(&symlink_target, b"outside")?;
-    create_symlink(&symlink_target, &workspace.join("link.txt"))?;
-    let mut symlink = probe_effect(EffectKind::ReadFile);
-    symlink.paths = vec!["link.txt".into()];
-    if !matches!(
-        broker.authorize(&symlink, &authority),
-        Err(PolicyDenial::SymlinkNotAllowed(_))
-    ) {
-        return invalid("symlink denial coverage probe drifted");
-    }
+    let symlink_path = workspace.join("link.txt");
+    let symlink_created = create_symlink(&symlink_target, &symlink_path)?;
+    let enforcement = if symlink_created {
+        let mut symlink = probe_effect(EffectKind::ReadFile);
+        symlink.paths = vec!["link.txt".into()];
+        if !matches!(
+            broker.authorize(&symlink, &authority),
+            Err(PolicyDenial::SymlinkNotAllowed(_))
+        ) {
+            return invalid("symlink denial coverage probe drifted");
+        }
+        std::fs::remove_file(&symlink_path)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        "broker-policy"
+    } else {
+        "windows-os-privilege-boundary"
+    };
     record_probe(
         &mut probe_digests,
         "denied-symlink",
-        serde_json::json!(digest_bytes(b"outside")),
+        serde_json::json!({
+            "enforcement": enforcement,
+            "target_digest": digest_bytes(b"outside")
+        }),
     )?;
-    std::fs::remove_file(workspace.join("link.txt"))
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
 
     let mut oversized = probe_effect(EffectKind::WriteFile);
     oversized.paths = vec!["oversized.txt".into()];
@@ -1103,15 +1112,28 @@ fn write_bytes_new(path: &Path, bytes: &[u8]) -> Result<(), CommandFailure> {
 }
 
 #[cfg(unix)]
-fn create_symlink(target: &Path, link: &Path) -> Result<(), CommandFailure> {
+fn create_symlink(target: &Path, link: &Path) -> Result<bool, CommandFailure> {
     std::os::unix::fs::symlink(target, link)
+        .map(|()| true)
         .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
 #[cfg(windows)]
-fn create_symlink(target: &Path, link: &Path) -> Result<(), CommandFailure> {
-    std::os::windows::fs::symlink_file(target, link)
-        .map_err(|error| CommandFailure::evidence(error.to_string()))
+fn create_symlink(target: &Path, link: &Path) -> Result<bool, CommandFailure> {
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => Ok(true),
+        Err(error) if windows_symlink_privilege_denied(&error, link) => Ok(false),
+        Err(error) => Err(CommandFailure::evidence(error.to_string())),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_symlink_privilege_denied(error: &std::io::Error, link: &Path) -> bool {
+    error.raw_os_error() == Some(1314)
+        && matches!(
+            std::fs::symlink_metadata(link),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
 }
 
 fn string_at(value: &serde_json::Value, pointer: &str) -> Result<String, CommandFailure> {
@@ -1163,6 +1185,21 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn windows_privilege_denial_counts_only_when_no_link_was_created() {
+        let temporary = TempDir::new().expect("temporary");
+        let link = temporary.path().join("link.txt");
+        let privilege_denied = std::io::Error::from_raw_os_error(1314);
+        assert!(windows_symlink_privilege_denied(&privilege_denied, &link));
+
+        std::fs::write(&link, b"not a link").expect("link path");
+        assert!(!windows_symlink_privilege_denied(&privilege_denied, &link));
+        assert!(!windows_symlink_privilege_denied(
+            &std::io::Error::from_raw_os_error(5),
+            &temporary.path().join("missing.txt")
+        ));
+    }
 
     #[test]
     fn campaign_record_rejects_an_unbound_capture_index() {

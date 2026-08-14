@@ -12,6 +12,8 @@ struct CliError<'a> {
     schema_version: &'static str,
     code: &'a str,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<&'a serde_json::Value>,
 }
 
 fn main() -> ExitCode {
@@ -53,6 +55,7 @@ fn finish(result: Result<CommandOutput, CommandFailure>) -> ExitCode {
                 schema_version: "ao.next.cli-error.v1",
                 code: error.code,
                 message: &error.message,
+                diagnostic: error.diagnostic.as_ref(),
             });
             eprintln!("ao-next: {}", error.message);
             ExitCode::from(error.status)

@@ -1,11 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
+pub mod campaign;
 pub mod evaluate;
 pub mod inspect;
+pub mod instantiate_corpus;
+pub mod live;
 pub mod replay;
 pub mod run;
+pub mod verify_corpus;
 pub mod verify_evidence;
 
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
@@ -20,10 +24,61 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Run(RunArgs),
+    RunLive(LiveRunArgs),
+    RunCurrentAoBaseline(LiveRunArgs),
+    RunDirectBaseline(LiveRunArgs),
+    PreflightLiveInput(PreflightLiveInputArgs),
+    QualifyLiveCampaign(QualifyLiveCampaignArgs),
     Inspect(InspectArgs),
     VerifyEvidence(VerifyEvidenceArgs),
     Replay(ReplayArgs),
     Evaluate(EvaluateArgs),
+    EvaluateLive(EvaluateArgs),
+    InstantiateCorpus(InstantiateCorpusArgs),
+    VerifyCorpus(VerifyCorpusArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LiveRunArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long)]
+    pub trusted_corpus_digest: Option<String>,
+    #[arg(long)]
+    pub trusted_verifier_profile_digest: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum LiveVariantArg {
+    N0,
+    N4,
+    N7,
+}
+
+#[derive(Debug, Args)]
+pub struct PreflightLiveInputArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_enum, ignore_case = false)]
+    pub variant: LiveVariantArg,
+    #[arg(long)]
+    pub trusted_corpus_digest: Option<String>,
+    #[arg(long)]
+    pub trusted_verifier_profile_digest: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct QualifyLiveCampaignArgs {
+    #[arg(long)]
+    pub qualification: PathBuf,
+    #[arg(long)]
+    pub trusted_corpus_digest: String,
+    #[arg(long = "trusted-verifier-profile", value_name = "TASK_ID=SHA256")]
+    pub trusted_verifier_profiles: Vec<String>,
+    #[arg(long)]
+    pub fake_provider_program: PathBuf,
+    #[arg(long)]
+    pub fake_provider_program_digest: String,
 }
 
 #[derive(Debug, Args)]
@@ -68,6 +123,20 @@ pub struct EvaluateArgs {
     pub comparison: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct VerifyCorpusArgs {
+    #[arg(long)]
+    pub corpus: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct InstantiateCorpusArgs {
+    #[arg(long)]
+    pub corpus: PathBuf,
+    #[arg(long)]
+    pub bindings: PathBuf,
+}
+
 #[derive(Debug)]
 pub struct CommandOutput {
     pub value: serde_json::Value,
@@ -91,6 +160,7 @@ pub struct CommandFailure {
     pub status: u8,
     pub code: &'static str,
     pub message: String,
+    pub diagnostic: Option<serde_json::Value>,
 }
 
 impl CommandFailure {
@@ -100,6 +170,7 @@ impl CommandFailure {
             status: 2,
             code: "usage",
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -109,6 +180,7 @@ impl CommandFailure {
             status: 3,
             code: "invalid_input",
             message: message.into(),
+            diagnostic: None,
         }
     }
 
@@ -118,6 +190,40 @@ impl CommandFailure {
             status: 7,
             code: "evidence_failure",
             message: message.into(),
+            diagnostic: None,
+        }
+    }
+
+    #[must_use]
+    pub fn authorization(message: impl Into<String>) -> Self {
+        Self {
+            status: 8,
+            code: "authorization_denied",
+            message: message.into(),
+            diagnostic: None,
+        }
+    }
+
+    #[must_use]
+    pub fn runtime(message: impl Into<String>) -> Self {
+        Self {
+            status: 4,
+            code: "runtime_failure",
+            message: message.into(),
+            diagnostic: None,
+        }
+    }
+
+    #[must_use]
+    pub fn runtime_with_diagnostic(
+        message: impl Into<String>,
+        diagnostic: serde_json::Value,
+    ) -> Self {
+        Self {
+            status: 4,
+            code: "runtime_failure",
+            message: message.into(),
+            diagnostic: Some(diagnostic),
         }
     }
 }
@@ -125,10 +231,18 @@ impl CommandFailure {
 pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
     match cli.command {
         Command::Run(args) => run::execute(&args),
+        Command::RunLive(args) => live::execute(&args, live::LiveVariant::N7),
+        Command::RunCurrentAoBaseline(args) => live::execute(&args, live::LiveVariant::N0),
+        Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
+        Command::PreflightLiveInput(args) => live::preflight(&args),
+        Command::QualifyLiveCampaign(args) => campaign::execute(&args),
         Command::Inspect(args) => inspect::execute(&args),
         Command::VerifyEvidence(args) => verify_evidence::execute(&args),
         Command::Replay(args) => replay::execute(&args),
         Command::Evaluate(args) => evaluate::execute(&args),
+        Command::EvaluateLive(args) => evaluate::execute_live(&args),
+        Command::InstantiateCorpus(args) => instantiate_corpus::execute(&args),
+        Command::VerifyCorpus(args) => verify_corpus::execute(&args),
     }
 }
 

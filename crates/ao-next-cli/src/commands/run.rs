@@ -98,8 +98,13 @@ pub fn execute(args: &RunArgs) -> Result<CommandOutput, CommandFailure> {
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
 
+    let input_limit = usize::try_from(request.limits.max_input_bytes).unwrap_or(usize::MAX);
     let output_limit = usize::try_from(request.limits.max_output_bytes).unwrap_or(usize::MAX);
-    let broker = LocalEffectBroker::new(request.limits.max_effect_timeout_ms, output_limit);
+    let broker = LocalEffectBroker::new(
+        request.limits.max_effect_timeout_ms,
+        input_limit,
+        output_limit,
+    );
     let mut adapter = ScriptedAdapter::new(
         plan.adapter_identity.clone(),
         plan.turns.into_iter().map(Ok),

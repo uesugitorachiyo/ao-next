@@ -15,6 +15,10 @@ operator objective and authority
 
 The deterministic kernel owns capability checks, program and path admission, limits, verifier configuration, evidence retention, checkpoint identity, and terminal classification. The worker may inspect, edit, test, and repair within those boundaries, but cannot alter them.
 
+Future provider trials use two explicit paths. N7 normalizes a bounded provider envelope into structured AO actions, admits each effect, runs the sealed command verifier, and records trusted usage. N4 gives native Codex workspace-write access, then runs the same verifier and records the same measurement fields. Both paths preserve one worker and bind the sealed corpus, task, trial, source, workspace, model, prompt, policy, verifier, adapter, and runtime identities before process spawn.
+
+Hidden tests remain outside worker workspaces and authority roots. Verifier commands are fixed by their profile digest and run after worker activity. The harness scans the final workspace for hidden-file digests before it can report success.
+
 The launch candidate has no dynamic worker creation, runtime graph growth, permanent planner or reviewer roles, workflow compiler, or generic workflow language. Those remain future questions only if paired evaluation shows the direct candidate repeatedly needs them.
 
 Prompt and tool instructions begin small for each model profile. Instructions are added only after repeated measured failure. Verification, safety, permissions, and evidence remain deterministic harness responsibilities rather than prompt conventions.

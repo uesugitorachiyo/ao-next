@@ -5,6 +5,13 @@ use std::process::{Command, Output};
 use ao_next_core::contracts::{
     AdapterIdentity, Digest, RunState, SourceIdentity, TerminalReadback, WorkspaceIdentity,
 };
+use ao_next_core::evidence::digest_bytes;
+use ao_next_eval::comparison::ComparisonRequest;
+use ao_next_eval::corpus::{
+    CorpusKind, CorpusManifest, EvaluationTask, ScheduleEntry, VariantProfile,
+    counterbalanced_schedule,
+};
+use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
 use chrono::{DateTime, Utc};
 use tempfile::TempDir;
 
@@ -61,6 +68,20 @@ fn run(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("run ao-next")
+}
+
+fn run_with_live_environment(args: &[&str], path: &Path, gate: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ao-next"));
+    command.args(args).env("PATH", path);
+    match gate {
+        Some(value) => {
+            command.env("AO_NEXT_LIVE_PROVIDER_CALLS", value);
+        }
+        None => {
+            command.env_remove("AO_NEXT_LIVE_PROVIDER_CALLS");
+        }
+    }
+    command.output().expect("run ao-next")
 }
 
 fn write_json(path: &Path, value: &impl serde::Serialize) {
@@ -129,102 +150,146 @@ fn run_request_json(root: &Path) -> serde_json::Value {
 }
 
 fn ready_comparison_json() -> serde_json::Value {
-    let task = serde_json::json!({
-        "task_id": "cli-evaluation",
-        "task_kind": "bounded_public_defect_repair",
-        "source_digest": ZERO_DIGEST,
-        "objective_digest": ONE_DIGEST,
-        "workspace_seed_digest": ZERO_DIGEST,
-        "visible_fixtures_digest": ONE_DIGEST,
-        "hidden_tests_digest": ZERO_DIGEST,
-        "verifier_profile_digest": ONE_DIGEST,
-        "variant_profiles": [
-            {
-                "variant": "N0",
-                "runtime": "N0",
-                "model_identifier": "fixture-model",
-                "prompt_digest": ONE_DIGEST,
-                "policy_digest": ZERO_DIGEST,
-                "adapter_version": "fixture-v1"
-            },
-            {
-                "variant": "N4",
-                "runtime": "N4",
-                "model_identifier": "fixture-model",
-                "prompt_digest": ONE_DIGEST,
-                "policy_digest": ZERO_DIGEST,
-                "adapter_version": "fixture-v1"
-            },
-            {
-                "variant": "N7",
-                "runtime": "N7",
-                "model_identifier": "fixture-model",
-                "prompt_digest": ONE_DIGEST,
-                "policy_digest": ZERO_DIGEST,
-                "adapter_version": "fixture-v1"
-            }
-        ]
-    });
-    let corpus_digest =
-        ao_next_core::strict_json::canonical_digest(&vec![task.clone()]).expect("corpus digest");
-    let measurement = |variant: &str, tokens: u64, wall_clock_ms: u64| {
-        serde_json::json!({
-            "schema_version": "ao.next.run-measurement.v1",
-            "corpus_digest": corpus_digest,
-            "task_id": "cli-evaluation",
-            "variant": variant,
-            "source_digest": ZERO_DIGEST,
-            "objective_digest": ONE_DIGEST,
-            "workspace_seed_digest": ZERO_DIGEST,
-            "visible_fixtures_digest": ONE_DIGEST,
-            "hidden_tests_digest": ZERO_DIGEST,
-            "verifier_profile_digest": ONE_DIGEST,
-            "runtime": variant,
-            "model_identifier": "fixture-model",
-            "prompt_digest": ONE_DIGEST,
-            "policy_digest": ZERO_DIGEST,
-            "adapter_version": "fixture-v1",
-            "tokens": {
-                "input_tokens": tokens,
-                "cached_input_tokens": 0,
-                "reasoning_tokens": 0,
-                "output_tokens": 0,
-                "reported_total_tokens": tokens
-            },
-            "wall_clock_ms": wall_clock_ms,
-            "model_wait_ms": wall_clock_ms / 2,
-            "worker_turns": 1,
-            "repair_attempts": 0,
-            "operator_interventions": 0,
-            "changed_files": 1,
-            "accepted_changed_files": 1,
-            "task_success": true,
-            "hidden_tests_passed": 10,
-            "hidden_tests_total": 10,
-            "regressions": 0,
-            "unauthorized_effects": 0,
-            "evidence_complete": true,
-            "evidence_digest_valid": true,
-            "recovery_attempted": variant == "N7",
-            "recovery_no_duplicate_effect": true,
-            "cross_runtime_agreement": true,
-            "worker_count": 1,
-            "dynamic_fanout": false
-        })
-    };
-    serde_json::json!({
-        "schema_version": "ao.next.comparison-request.v1",
-        "corpus": {
-            "schema_version": "ao.next.evaluation-corpus.v1",
-            "corpus_digest": corpus_digest,
-            "tasks": [task]
-        },
-        "runs": [
-            measurement("N0", 400, 400),
-            measurement("N4", 100, 200),
-            measurement("N7", 110, 250)
-        ]
+    let profiles = [
+        (ExecutionVariant::N0, "N0"),
+        (ExecutionVariant::N4, "N4"),
+        (ExecutionVariant::N7, "N7"),
+    ]
+    .into_iter()
+    .map(|(variant, runtime)| VariantProfile {
+        variant,
+        runtime: runtime.into(),
+        runtime_digest: digest_bytes(format!("{runtime}:runtime").as_bytes()),
+        model_identifier: "fixture-model".into(),
+        model_digest: digest_bytes(format!("{runtime}:model").as_bytes()),
+        prompt_digest: digest(ONE_DIGEST),
+        policy_digest: digest(ZERO_DIGEST),
+        adapter_version: "fixture-v1".into(),
+        adapter_digest: digest_bytes(format!("{runtime}:adapter").as_bytes()),
     })
+    .collect::<Vec<_>>();
+    let task = EvaluationTask {
+        task_id: "cli-evaluation".into(),
+        task_kind: "bounded_public_defect_repair".into(),
+        source_digest: digest(ZERO_DIGEST),
+        objective_digest: digest(ONE_DIGEST),
+        workspace_seed_digest: digest(ZERO_DIGEST),
+        visible_fixtures_digest: digest(ONE_DIGEST),
+        hidden_tests_digest: digest(ZERO_DIGEST),
+        verifier_profile_digest: digest(ONE_DIGEST),
+        variant_profiles: profiles,
+    };
+    let mut corpus = CorpusManifest {
+        schema_version: "ao.next.evaluation-corpus.v2".into(),
+        corpus_kind: CorpusKind::SyntheticUnitTest,
+        corpus_digest: digest(ZERO_DIGEST),
+        required_trial_count: 3,
+        schedule: counterbalanced_schedule(),
+        tasks: vec![task],
+    };
+    corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
+    let task = &corpus.tasks[0];
+    let runs = corpus
+        .schedule
+        .iter()
+        .map(|entry| comparison_measurement(&corpus, task, entry))
+        .collect();
+    serde_json::to_value(ComparisonRequest {
+        schema_version: "ao.next.comparison-request.v2".into(),
+        corpus,
+        runs,
+    })
+    .expect("comparison JSON")
+}
+
+fn comparison_measurement(
+    corpus: &CorpusManifest,
+    task: &EvaluationTask,
+    entry: &ScheduleEntry,
+) -> RunMeasurement {
+    let (tokens, wall_clock_ms) = match entry.variant {
+        ExecutionVariant::N0 => (400, 400),
+        ExecutionVariant::N4 => (100, 200),
+        ExecutionVariant::N7 => (110, 250),
+    };
+    let profile = task
+        .variant_profiles
+        .iter()
+        .find(|profile| profile.variant == entry.variant)
+        .expect("variant profile");
+    let raw_capture_digests = vec![digest_bytes(
+        format!(
+            "cli-capture-{}-{:?}-{}",
+            task.task_id, entry.variant, entry.trial_index
+        )
+        .as_bytes(),
+    )];
+    RunMeasurement {
+        schema_version: "ao.next.run-measurement.v2".into(),
+        corpus_digest: corpus.corpus_digest.clone(),
+        run_id: format!(
+            "cli-run-{}-{:?}-{}",
+            task.task_id, entry.variant, entry.trial_index
+        ),
+        trial_id: format!(
+            "cli-trial-{}-{:?}-{}",
+            task.task_id, entry.variant, entry.trial_index
+        ),
+        trial_index: entry.trial_index,
+        schedule_position: entry.schedule_position,
+        raw_capture_digest: ao_next_core::strict_json::canonical_digest(&raw_capture_digests)
+            .expect("capture manifest"),
+        raw_capture_digests,
+        workspace_instance_id: format!(
+            "cli-workspace-{}-{:?}-{}",
+            task.task_id, entry.variant, entry.trial_index
+        ),
+        task_id: task.task_id.clone(),
+        variant: entry.variant,
+        source_digest: task.source_digest.clone(),
+        objective_digest: task.objective_digest.clone(),
+        workspace_seed_digest: task.workspace_seed_digest.clone(),
+        visible_fixtures_digest: task.visible_fixtures_digest.clone(),
+        hidden_tests_digest: task.hidden_tests_digest.clone(),
+        verifier_profile_digest: task.verifier_profile_digest.clone(),
+        runtime: profile.runtime.clone(),
+        runtime_digest: profile.runtime_digest.clone(),
+        model_identifier: profile.model_identifier.clone(),
+        model_digest: profile.model_digest.clone(),
+        prompt_digest: profile.prompt_digest.clone(),
+        policy_digest: profile.policy_digest.clone(),
+        adapter_version: profile.adapter_version.clone(),
+        adapter_digest: profile.adapter_digest.clone(),
+        measurement_origin: MeasurementOrigin::OfflineFixture,
+        provider_usage_trusted: true,
+        tokens: TokenRow {
+            input_tokens: Some(tokens),
+            cached_input_tokens: Some(0),
+            reasoning_tokens: Some(0),
+            output_tokens: Some(0),
+            reported_total_tokens: tokens,
+        },
+        wall_clock_ms,
+        model_wait_ms: wall_clock_ms / 2,
+        worker_turns: 1,
+        repair_attempts: 0,
+        operator_interventions: 0,
+        changed_files: 1,
+        accepted_changed_files: 1,
+        task_success: true,
+        hidden_tests_passed: 10,
+        hidden_tests_total: 10,
+        regressions: 0,
+        unauthorized_effects: 0,
+        evidence_complete: true,
+        evidence_digest_valid: true,
+        recovery_attempted: entry.variant == ExecutionVariant::N7,
+        recovery_no_duplicate_effect: true,
+        cross_runtime_agreement: true,
+        worker_count: 1,
+        dynamic_fanout: false,
+        hidden_test_exposure: false,
+    }
 }
 
 fn scripted_plan(action: &serde_json::Value, passed: bool) -> serde_json::Value {
@@ -428,4 +493,321 @@ fn run_maps_success_denial_failure_interruption_and_evidence_failure() {
         "2026-08-05T12:00:00Z",
     ]);
     assert_json_error(&output, 7, "evidence_failure");
+}
+
+#[test]
+fn live_commands_deny_before_input_or_process_resolution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = TempDir::new().expect("temporary");
+    let marker = temporary.path().join("fake-provider-started");
+    let executable = temporary.path().join("codex");
+    std::fs::write(
+        &executable,
+        format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+    )
+    .expect("fake executable");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("fake executable metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("fake executable permissions");
+    let missing_input = temporary.path().join("missing-live-input.json");
+
+    for command in ["run-current-ao-baseline", "run-live", "run-direct-baseline"] {
+        for gate in [None, Some("wrong")] {
+            let output = run_with_live_environment(
+                &[command, "--input", missing_input.to_str().expect("path")],
+                temporary.path(),
+                gate,
+            );
+            assert_json_error(&output, 8, "authorization_denied");
+            assert!(
+                !marker.exists(),
+                "unauthorized live command started a child"
+            );
+        }
+    }
+
+    for gate in [None, Some("wrong")] {
+        let output = run_with_live_environment(
+            &[
+                "evaluate-live",
+                "--comparison",
+                missing_input.to_str().expect("path"),
+            ],
+            temporary.path(),
+            gate,
+        );
+        assert_json_error(&output, 8, "authorization_denied");
+        assert!(
+            !marker.exists(),
+            "unauthorized live evaluator started a child"
+        );
+    }
+
+    let output = run_with_live_environment(
+        &[
+            "preflight-live-input",
+            "--input",
+            missing_input.to_str().expect("path"),
+            "--variant",
+            "n0",
+        ],
+        temporary.path(),
+        Some("operator-authorized"),
+    );
+    assert_json_error(&output, 8, "authorization_denied");
+    let output = run(&[
+        "preflight-live-input",
+        "--input",
+        missing_input.to_str().expect("path"),
+        "--variant",
+        "n0",
+    ]);
+    assert_json_error(&output, 2, "usage");
+}
+
+#[test]
+fn live_commands_require_operator_owned_corpus_and_verifier_anchors() {
+    let temporary = TempDir::new().expect("temporary");
+    let missing_input = temporary.path().join("missing-live-input.json");
+    for command in ["run-current-ao-baseline", "run-live", "run-direct-baseline"] {
+        let output = run_with_live_environment(
+            &[command, "--input", missing_input.to_str().expect("path")],
+            temporary.path(),
+            Some("operator-authorized"),
+        );
+        assert_json_error(&output, 2, "usage");
+    }
+    let output = run(&[
+        "preflight-live-input",
+        "--input",
+        missing_input.to_str().expect("path"),
+        "--variant",
+        "n7",
+    ]);
+    assert_json_error(&output, 2, "usage");
+}
+
+fn sealed_corpus() -> CorpusManifest {
+    let variants = [
+        (ExecutionVariant::N0, "current-ao", "current-ao-native-v1"),
+        (ExecutionVariant::N4, "codex", "native-codex-direct-v1"),
+        (ExecutionVariant::N7, "ao-next-codex", "ao-next-process-v1"),
+    ];
+    let tasks = [
+        "greenfield-engineering-app",
+        "bounded-defect-repair",
+        "artifact-reconciliation",
+    ]
+    .into_iter()
+    .map(|task_id| EvaluationTask {
+        task_id: task_id.into(),
+        task_kind: "sealed-local-task".into(),
+        source_digest: digest_bytes(format!("{task_id}:source").as_bytes()),
+        objective_digest: digest_bytes(format!("{task_id}:objective").as_bytes()),
+        workspace_seed_digest: digest_bytes(format!("{task_id}:seed").as_bytes()),
+        visible_fixtures_digest: digest_bytes(format!("{task_id}:visible").as_bytes()),
+        hidden_tests_digest: digest_bytes(format!("{task_id}:hidden").as_bytes()),
+        verifier_profile_digest: digest_bytes(format!("{task_id}:verifier").as_bytes()),
+        variant_profiles: variants
+            .iter()
+            .map(|(variant, runtime, adapter)| VariantProfile {
+                variant: *variant,
+                runtime: (*runtime).into(),
+                runtime_digest: digest_bytes(format!("{task_id}:{runtime}:runtime").as_bytes()),
+                model_identifier: "operator-selected-live-model".into(),
+                model_digest: digest_bytes(format!("{task_id}:{runtime}:model").as_bytes()),
+                prompt_digest: digest_bytes(format!("{task_id}:{runtime}:prompt").as_bytes()),
+                policy_digest: digest_bytes(format!("{task_id}:{runtime}:policy").as_bytes()),
+                adapter_version: (*adapter).into(),
+                adapter_digest: digest_bytes(format!("{task_id}:{runtime}:adapter").as_bytes()),
+            })
+            .collect(),
+    })
+    .collect();
+    let mut corpus = CorpusManifest {
+        schema_version: "ao.next.evaluation-corpus.v2".into(),
+        corpus_kind: CorpusKind::SealedLive,
+        corpus_digest: digest_bytes(b"unsealed-live-corpus"),
+        required_trial_count: 3,
+        schedule: counterbalanced_schedule(),
+        tasks,
+    };
+    corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
+    corpus
+}
+
+fn qualify_campaign(path: &Path) -> Output {
+    let fake_program = Path::new("/usr/bin/true");
+    let fake_digest = digest_bytes(&std::fs::read(fake_program).expect("fake program bytes"));
+    run(&[
+        "qualify-live-campaign",
+        "--qualification",
+        path.to_str().expect("path"),
+        "--trusted-corpus-digest",
+        ZERO_DIGEST,
+        "--trusted-verifier-profile",
+        &format!("greenfield-engineering-app={ONE_DIGEST}"),
+        "--trusted-verifier-profile",
+        &format!("bounded-defect-repair={ONE_DIGEST}"),
+        "--trusted-verifier-profile",
+        &format!("artifact-reconciliation={ONE_DIGEST}"),
+        "--fake-provider-program",
+        fake_program.to_str().expect("fake program path"),
+        "--fake-provider-program-digest",
+        fake_digest.as_str(),
+    ])
+}
+
+#[test]
+fn campaign_rejects_caller_authored_attestations_without_executing_a_fake_process() {
+    let temporary = TempDir::new().expect("temporary");
+    let path = temporary.path().join("qualification.json");
+    write_json(
+        &path,
+        &serde_json::json!({
+            "schema_version":"ao.next.provider-free-campaign-qualification.v1",
+            "rows":27,
+            "negative_mutations":[{"name":"duplicate-top-level-key","rejected":true}],
+            "provider_processes":27,
+            "provider_calls":0
+        }),
+    );
+    let output = qualify_campaign(&path);
+    assert_json_error(&output, 3, "invalid_input");
+}
+
+#[test]
+fn campaign_parser_rejects_malformed_and_over_one_mib_inputs_separately() {
+    let temporary = TempDir::new().expect("temporary");
+    let malformed = temporary.path().join("malformed.json");
+    std::fs::write(&malformed, b"{").expect("malformed input");
+    assert_json_error(&qualify_campaign(&malformed), 3, "invalid_input");
+
+    let oversized = temporary.path().join("oversized.json");
+    std::fs::write(&oversized, vec![b' '; 1024 * 1024 + 1]).expect("oversized input");
+    assert_json_error(&qualify_campaign(&oversized), 3, "invalid_input");
+}
+
+#[test]
+fn verify_corpus_accepts_a_digest_bound_live_manifest() {
+    let temporary = TempDir::new().expect("temporary");
+    let corpus = sealed_corpus();
+    let path = temporary.path().join("corpus.json");
+    write_json(&path, &corpus);
+
+    let output = run(&["verify-corpus", "--corpus", path.to_str().expect("path")]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("machine JSON output");
+    assert_eq!(value["schema_version"], "ao.next.corpus-verification.v1");
+    assert_eq!(value["corpus_digest"], corpus.corpus_digest.as_str());
+    assert_eq!(value["task_count"], 3);
+    assert_eq!(value["required_trial_count"], 3);
+    assert_eq!(value["live_eligible"], true);
+}
+
+#[test]
+fn instantiate_corpus_binds_exact_model_effort_and_adapter_identities() {
+    let temporary = TempDir::new().expect("temporary");
+    let corpus = sealed_corpus();
+    let corpus_path = temporary.path().join("corpus.json");
+    let bindings_path = temporary.path().join("bindings.json");
+    write_json(&corpus_path, &corpus);
+    write_json(
+        &bindings_path,
+        &serde_json::json!({
+            "schema_version": "ao.next.live-corpus-bindings.v1",
+            "model_identifier": "gpt-5.6-sol",
+            "reasoning_effort": "xhigh",
+            "variants": [
+                {
+                    "variant": "N0",
+                    "runtime": "current-ao",
+                    "runtime_digest": digest_bytes(b"current-ao@3309137"),
+                    "adapter_version": "current-ao-native-v1+3309137",
+                    "adapter_digest": digest_bytes(b"current-ao-binding")
+                },
+                {
+                    "variant": "N4",
+                    "runtime": "codex",
+                    "runtime_digest": digest_bytes(b"codex-cli@0.146.0"),
+                    "adapter_version": "native-codex-direct-v1+0.146.0",
+                    "adapter_digest": digest_bytes(b"native-codex-binding")
+                },
+                {
+                    "variant": "N7",
+                    "runtime": "ao-next-codex",
+                    "runtime_digest": digest_bytes(b"ao-next@repair+codex-cli@0.146.0"),
+                    "adapter_version": "ao-next-process-v1+0.146.0",
+                    "adapter_digest": digest_bytes(b"ao-next-process-binding")
+                }
+            ]
+        }),
+    );
+    let output = run(&[
+        "instantiate-corpus",
+        "--corpus",
+        corpus_path.to_str().expect("path"),
+        "--bindings",
+        bindings_path.to_str().expect("path"),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("instantiation JSON");
+    assert_eq!(value["parent_corpus_digest"], corpus.corpus_digest.as_str());
+    assert_eq!(value["model_identifier"], "gpt-5.6-sol");
+    assert_eq!(value["reasoning_effort"], "xhigh");
+    assert!(
+        value["corpus"]["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .flat_map(|task| task["variant_profiles"].as_array().expect("profiles"))
+            .all(|profile| profile["model_identifier"] == "gpt-5.6-sol")
+    );
+}
+
+#[test]
+fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
+    let temporary = TempDir::new().expect("temporary");
+    let corpus = sealed_corpus();
+    let runs = corpus
+        .tasks
+        .iter()
+        .flat_map(|task| {
+            corpus.schedule.iter().map(|entry| {
+                let mut measurement = comparison_measurement(&corpus, task, entry);
+                measurement.measurement_origin = MeasurementOrigin::LiveProvider;
+                measurement
+            })
+        })
+        .collect();
+    let request = ComparisonRequest {
+        schema_version: "ao.next.comparison-request.v2".into(),
+        corpus,
+        runs,
+    };
+    let path = temporary.path().join("live-comparison.json");
+    write_json(&path, &request);
+    let output = run_with_live_environment(
+        &[
+            "evaluate-live",
+            "--comparison",
+            path.to_str().expect("path"),
+        ],
+        temporary.path(),
+        Some("operator-authorized"),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).expect("live comparison");
+    assert_eq!(live["decision"], "AO_NEXT_LIVE_EVALUATION_PASSED");
+
+    let output = run(&["evaluate", "--comparison", path.to_str().expect("path")]);
+    assert_eq!(output.status.code(), Some(0));
+    let offline: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("offline comparison");
+    assert_eq!(offline["decision"], "AO_NEXT_READY_FOR_LIVE_EVALUATION");
 }

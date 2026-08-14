@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -6,11 +6,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::contracts::{
-    AuthorityEnvelope, Digest, EffectKind, EffectRequest, StructuredCommand, VerifierProfile,
-    VerifierReport, VerifierResult,
+use crate::adapter::process::ProcessRunner;
+use crate::adapter::{
+    CancellationToken, InvocationLimits, InvocationOutput, PreparedInvocation, execute_bounded,
 };
-use crate::effects::{EffectBrokerError, LocalEffectBroker};
+use crate::contracts::{
+    Digest, StructuredCommand, VerifierProfile, VerifierReport, VerifierResult,
+};
+use crate::engine::{EngineVerifier, VerificationOutcome};
 use crate::evidence::{EvidenceError, digest_bytes, digest_file, read_regular_file};
 use crate::strict_json::{StrictJsonError, canonical_digest, decode_strict_json};
 
@@ -118,18 +121,10 @@ pub enum VerificationError {
     UnsafeWorkspace(PathBuf),
     #[error("verifier I/O failed: {0}")]
     Io(String),
-    #[error("effect broker failed: {0}")]
-    Effect(String),
     #[error("strict JSON failed: {0}")]
     StrictJson(#[from] StrictJsonError),
     #[error("evidence helper failed: {0}")]
     Evidence(String),
-}
-
-impl From<EffectBrokerError> for VerificationError {
-    fn from(error: EffectBrokerError) -> Self {
-        Self::Effect(error.to_string())
-    }
 }
 
 impl From<EvidenceError> for VerificationError {
@@ -155,8 +150,6 @@ pub trait ProductVerifier {
 
 pub struct LocalProductVerifier<'a> {
     run_id: &'a str,
-    authority: &'a AuthorityEnvelope,
-    broker: &'a LocalEffectBroker,
     registry: &'a VerifierRegistry,
     recorded_at: DateTime<Utc>,
 }
@@ -165,15 +158,11 @@ impl<'a> LocalProductVerifier<'a> {
     #[must_use]
     pub const fn new(
         run_id: &'a str,
-        authority: &'a AuthorityEnvelope,
-        broker: &'a LocalEffectBroker,
         registry: &'a VerifierRegistry,
         recorded_at: DateTime<Utc>,
     ) -> Self {
         Self {
             run_id,
-            authority,
-            broker,
             registry,
             recorded_at,
         }
@@ -199,7 +188,12 @@ impl ProductVerifier for LocalProductVerifier<'_> {
 
         let mut results = Vec::new();
         for (index, command) in plan.commands.iter().enumerate() {
-            results.push(self.verify_command(workspace, command, index)?);
+            results.push(Self::verify_command(
+                workspace,
+                command,
+                index,
+                plan.max_file_bytes,
+            ));
         }
         for path in &plan.required_files {
             results.push(verify_required_file(workspace, path, plan.max_file_bytes));
@@ -234,25 +228,34 @@ impl ProductVerifier for LocalProductVerifier<'_> {
 
 impl LocalProductVerifier<'_> {
     fn verify_command(
-        &self,
         workspace: &VerifiedWorkspace,
         command: &StructuredCommand,
         index: usize,
-    ) -> Result<VerifierResult, VerificationError> {
-        let request = EffectRequest {
-            effect_id: format!("verifier-command-{index}"),
-            run_id: self.run_id.to_owned(),
-            kind: EffectKind::RunProgram,
-            program: Some(command.program.clone()),
+        maximum_output_bytes: u64,
+    ) -> VerifierResult {
+        let invocation = PreparedInvocation {
+            program: command.program.clone(),
             args: command.args.clone(),
-            paths: vec![workspace.root.clone()],
-            timeout_ms: command.timeout_ms,
-            input_digest: canonical_digest(command)?,
+            stdin: Vec::new(),
+            cwd: workspace.root.clone(),
+            limits: InvocationLimits {
+                max_input_bytes: 0,
+                max_output_bytes: usize::try_from(maximum_output_bytes).unwrap_or(usize::MAX),
+                timeout_ms: command.timeout_ms,
+            },
         };
-        let output = self.broker.execute(&request, self.authority)?;
+        let output = match execute_bounded(&invocation, &CancellationToken::new()) {
+            Ok(output) => output,
+            Err(error) => {
+                return failed_result(
+                    format!("command:{index}:{}", command.program),
+                    &error.to_string(),
+                );
+            }
+        };
         let mut combined = output.stdout;
         combined.extend_from_slice(&output.stderr);
-        Ok(VerifierResult {
+        VerifierResult {
             verifier_id: format!("command:{index}:{}", command.program),
             passed: output.status == 0,
             exit_status: Some(output.status),
@@ -262,7 +265,7 @@ impl LocalProductVerifier<'_> {
             } else {
                 format!("structured command exited {}", output.status)
             },
-        })
+        }
     }
 }
 
@@ -371,4 +374,345 @@ fn resolve_file(
         return Err(VerificationError::UnsafeWorkspace(canonical));
     }
     Ok(canonical)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredArtifactExpectation {
+    pub path: PathBuf,
+    pub digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandVerifierEntry {
+    pub verifier_id: String,
+    pub verifier_digest: Digest,
+    pub program: String,
+    pub args: Vec<String>,
+    pub working_directory: PathBuf,
+    pub timeout_ms: u64,
+    pub max_output_bytes: usize,
+    pub expected_exit_status: i32,
+    pub required_artifacts: Vec<RequiredArtifactExpectation>,
+}
+
+impl CommandVerifierEntry {
+    /// Calculates the digest of every immutable entry field except the digest
+    /// field itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a verification error when canonical serialization fails.
+    pub fn calculated_digest(&self) -> Result<Digest, VerificationError> {
+        #[derive(Serialize)]
+        struct Material<'a> {
+            verifier_id: &'a str,
+            program: &'a str,
+            args: &'a [String],
+            working_directory: &'a Path,
+            timeout_ms: u64,
+            max_output_bytes: usize,
+            expected_exit_status: i32,
+            required_artifacts: &'a [RequiredArtifactExpectation],
+        }
+        Ok(canonical_digest(&Material {
+            verifier_id: &self.verifier_id,
+            program: &self.program,
+            args: &self.args,
+            working_directory: &self.working_directory,
+            timeout_ms: self.timeout_ms,
+            max_output_bytes: self.max_output_bytes,
+            expected_exit_status: self.expected_exit_status,
+            required_artifacts: &self.required_artifacts,
+        })?)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandVerifierProfile {
+    pub schema_version: String,
+    pub profile_id: String,
+    pub profile_digest: Digest,
+    pub entries: Vec<CommandVerifierEntry>,
+}
+
+impl CommandVerifierProfile {
+    /// Calculates the digest of the profile identity and ordered entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns a verification error when canonical serialization fails.
+    pub fn calculated_digest(&self) -> Result<Digest, VerificationError> {
+        #[derive(Serialize)]
+        struct Material<'a> {
+            schema_version: &'a str,
+            profile_id: &'a str,
+            entries: &'a [CommandVerifierEntry],
+        }
+        Ok(canonical_digest(&Material {
+            schema_version: &self.schema_version,
+            profile_id: &self.profile_id,
+            entries: &self.entries,
+        })?)
+    }
+
+    fn validate_for(
+        &self,
+        request: &crate::contracts::RunRequest,
+    ) -> Result<(), VerificationError> {
+        if self.schema_version != "ao.next.command-verifier-profile.v1"
+            || self.profile_id.trim().is_empty()
+            || self.entries.is_empty()
+            || self.calculated_digest()? != self.profile_digest
+        {
+            return Err(VerificationError::ProfileDigestMismatch);
+        }
+        let mut identifiers = BTreeSet::new();
+        for entry in &self.entries {
+            if entry.verifier_id.trim().is_empty()
+                || !identifiers.insert(&entry.verifier_id)
+                || entry.program.trim().is_empty()
+                || entry.timeout_ms == 0
+                || entry.timeout_ms > request.limits.max_effect_timeout_ms
+                || entry.max_output_bytes == 0
+                || entry.max_output_bytes
+                    > usize::try_from(request.limits.max_output_bytes).unwrap_or(usize::MAX)
+                || entry.calculated_digest()? != entry.verifier_digest
+                || !is_safe_relative(&entry.working_directory, true)
+                || entry
+                    .required_artifacts
+                    .iter()
+                    .any(|artifact| !is_safe_relative(&artifact.path, false))
+            {
+                return Err(VerificationError::ProfileContractMismatch);
+            }
+        }
+        let commands = self
+            .entries
+            .iter()
+            .map(|entry| StructuredCommand {
+                program: entry.program.clone(),
+                args: entry.args.clone(),
+                timeout_ms: entry.timeout_ms,
+            })
+            .collect::<Vec<_>>();
+        let required_artifacts = self
+            .entries
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .required_artifacts
+                    .iter()
+                    .map(|artifact| artifact.path.clone())
+            })
+            .collect::<Vec<_>>();
+        if request.verifier_profile.profile_id != self.profile_id
+            || request.verifier_profile.profile_digest != self.profile_digest
+            || request.verifier_profile.commands != commands
+            || request.verifier_profile.required_artifacts != required_artifacts
+        {
+            return Err(VerificationError::ProfileContractMismatch);
+        }
+        Ok(())
+    }
+}
+
+pub struct CommandEngineVerifier<R> {
+    request_digest: Digest,
+    workspace: VerifiedWorkspace,
+    profile: CommandVerifierProfile,
+    runner: R,
+    cancellation: CancellationToken,
+    recorded_at: DateTime<Utc>,
+    max_artifact_bytes: u64,
+    reports: Vec<VerifierReport>,
+}
+
+impl<R> CommandEngineVerifier<R> {
+    /// Creates a verifier whose request and profile cannot change between
+    /// construction and execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a verification error for unsafe paths, identity drift, invalid
+    /// digests, or authority/profile disagreement.
+    pub fn new(
+        request: &crate::contracts::RunRequest,
+        profile: CommandVerifierProfile,
+        runner: R,
+        cancellation: CancellationToken,
+        recorded_at: DateTime<Utc>,
+    ) -> Result<Self, VerificationError> {
+        profile.validate_for(request)?;
+        let workspace =
+            VerifiedWorkspace::new(&request.workspace.root, &request.authority.allowed_roots)?;
+        Ok(Self {
+            request_digest: canonical_digest(request)?,
+            workspace,
+            profile,
+            runner,
+            cancellation,
+            recorded_at,
+            max_artifact_bytes: request.limits.max_input_bytes,
+            reports: Vec::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn reports(&self) -> &[VerifierReport] {
+        &self.reports
+    }
+
+    #[must_use]
+    pub const fn runner(&self) -> &R {
+        &self.runner
+    }
+}
+
+impl<R: ProcessRunner> EngineVerifier for CommandEngineVerifier<R> {
+    fn verify(&mut self, request: &crate::contracts::RunRequest) -> VerificationOutcome {
+        if canonical_digest(request).ok().as_ref() != Some(&self.request_digest) {
+            return failed_verification_outcome("verifier request identity drifted");
+        }
+        let mut results = Vec::new();
+        for entry in &self.profile.entries {
+            results.push(run_command_entry(
+                &mut self.runner,
+                &self.cancellation,
+                &self.workspace,
+                entry,
+            ));
+            for artifact in &entry.required_artifacts {
+                let mut result = verify_digest(
+                    &self.workspace,
+                    &artifact.path,
+                    &artifact.digest,
+                    self.max_artifact_bytes,
+                );
+                result.verifier_id =
+                    format!("{}:artifact:{}", entry.verifier_id, artifact.path.display());
+                results.push(result);
+            }
+        }
+        let passed = results.iter().all(|result| result.passed);
+        let report = VerifierReport {
+            schema_version: "ao.next.verifier-report.v1".into(),
+            run_id: request.run_id.clone(),
+            verifier_profile_digest: self.profile.profile_digest.clone(),
+            started_at: self.recorded_at,
+            completed_at: self.recorded_at,
+            passed,
+            results,
+        };
+        let report_digest = canonical_digest(&report)
+            .unwrap_or_else(|_| digest_bytes(b"command verifier report digest failure"));
+        self.reports.push(report);
+        VerificationOutcome {
+            passed,
+            report_digest,
+            summary: if passed {
+                "deterministic command verifier passed".into()
+            } else {
+                "deterministic command verifier failed".into()
+            },
+        }
+    }
+}
+
+fn run_command_entry(
+    runner: &mut impl ProcessRunner,
+    cancellation: &CancellationToken,
+    workspace: &VerifiedWorkspace,
+    entry: &CommandVerifierEntry,
+) -> VerifierResult {
+    if cancellation.is_cancelled() {
+        return failed_result(
+            format!("command:{}", entry.verifier_id),
+            "verifier invocation was cancelled",
+        );
+    }
+    let cwd = match resolve_directory(workspace, &entry.working_directory) {
+        Ok(path) => path,
+        Err(error) => {
+            return failed_result(format!("command:{}", entry.verifier_id), &error.to_string());
+        }
+    };
+    let invocation = PreparedInvocation {
+        program: entry.program.clone(),
+        args: entry.args.clone(),
+        stdin: Vec::new(),
+        cwd,
+        limits: InvocationLimits {
+            max_input_bytes: 0,
+            max_output_bytes: entry.max_output_bytes,
+            timeout_ms: entry.timeout_ms,
+        },
+    };
+    match runner.run(&invocation, cancellation) {
+        Ok(output) => command_result(entry, &output),
+        Err(error) => failed_result(format!("command:{}", entry.verifier_id), &error.to_string()),
+    }
+}
+
+fn command_result(entry: &CommandVerifierEntry, output: &InvocationOutput) -> VerifierResult {
+    let within_bound =
+        output.stdout.len().saturating_add(output.stderr.len()) <= entry.max_output_bytes;
+    let output_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
+        .unwrap_or_else(|_| digest_bytes(b"command verifier output digest failure"));
+    let passed = within_bound && output.status == entry.expected_exit_status;
+    VerifierResult {
+        verifier_id: format!("command:{}", entry.verifier_id),
+        passed,
+        exit_status: Some(output.status),
+        output_digest,
+        message: if !within_bound {
+            "structured command output exceeded its bound".into()
+        } else if passed {
+            "structured command matched expected status".into()
+        } else {
+            format!(
+                "structured command exited {}; expected {}",
+                output.status, entry.expected_exit_status
+            )
+        },
+    }
+}
+
+fn failed_verification_outcome(message: &str) -> VerificationOutcome {
+    VerificationOutcome {
+        passed: false,
+        report_digest: digest_bytes(message.as_bytes()),
+        summary: message.into(),
+    }
+}
+
+fn resolve_directory(
+    workspace: &VerifiedWorkspace,
+    relative: &Path,
+) -> Result<PathBuf, VerificationError> {
+    if !is_safe_relative(relative, true) {
+        return Err(VerificationError::UnsafeWorkspace(relative.to_path_buf()));
+    }
+    let path = workspace.root.join(relative);
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| VerificationError::Io(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(VerificationError::UnsafeWorkspace(path));
+    }
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|error| VerificationError::Io(error.to_string()))?;
+    if !canonical.starts_with(&workspace.root) {
+        return Err(VerificationError::UnsafeWorkspace(canonical));
+    }
+    Ok(canonical)
+}
+
+fn is_safe_relative(path: &Path, allow_empty: bool) -> bool {
+    !path.is_absolute()
+        && (allow_empty || path.components().next().is_some())
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }

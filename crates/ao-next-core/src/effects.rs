@@ -1,16 +1,41 @@
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
+use rustix::io::Errno;
 use thiserror::Error;
 
-use crate::contracts::{AuthorityEnvelope, EffectKind, EffectRequest};
-use crate::policy::{PolicyDenial, validate_effect_request};
+use crate::contracts::{AuthorityEnvelope, Digest, EffectKind, EffectRequest};
+use crate::evidence::digest_bytes;
+use crate::policy::{PolicyDenial, resolve_effect_paths, validate_effect_request};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+const NONEXISTENT_FILE_BINDING: &[u8] = b"ao.next.file-does-not-exist.v1";
+
+#[derive(Clone, Debug)]
 pub struct AuthorizedEffect {
     request: EffectRequest,
+    authority: AuthorityEnvelope,
+    target: DescriptorTarget,
+}
+
+#[derive(Clone, Debug)]
+enum DescriptorTarget {
+    Read {
+        root: Arc<File>,
+        root_path: PathBuf,
+        file: Arc<File>,
+        relative: PathBuf,
+    },
+    Write {
+        root: Arc<File>,
+        root_path: PathBuf,
+        parent: Arc<File>,
+        parent_relative: PathBuf,
+        name: OsString,
+    },
 }
 
 impl AuthorizedEffect {
@@ -33,14 +58,16 @@ pub enum EffectBrokerError {
     Denied(#[from] PolicyDenial),
     #[error("effect I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("effect exceeded its admitted timeout")]
-    TimedOut,
+    #[error("effect input exceeded {limit} bytes")]
+    InputTooLarge { limit: usize },
     #[error("effect output exceeded {limit} bytes")]
     OutputTooLarge { limit: usize },
+    #[error("native file content is not UTF-8")]
+    InvalidUtf8,
+    #[error("native file preimage does not match the admitted digest")]
+    PreimageMismatch,
     #[error("the admitted effect kind has no local executor: {0:?}")]
     UnsupportedEffect(EffectKind),
-    #[error("effect output reader failed")]
-    OutputReaderFailed,
 }
 
 pub trait EffectBroker {
@@ -48,7 +75,7 @@ pub trait EffectBroker {
     ///
     /// # Errors
     ///
-    /// Returns [`PolicyDenial`] when any capability, program, path, timeout, or
+    /// Returns [`PolicyDenial`] when any capability, path, byte-bound shape, or
     /// external-effect rule fails.
     fn authorize(
         &self,
@@ -61,8 +88,8 @@ pub trait EffectBroker {
     ///
     /// # Errors
     ///
-    /// Returns [`EffectBrokerError`] for I/O, timeout, output bounds, or an
-    /// admitted effect kind without a local executor.
+    /// Returns [`EffectBrokerError`] for I/O, byte bounds, UTF-8, preimage, or
+    /// an admitted effect kind without a native executor.
     fn execute_authorized(
         &self,
         authorized: &AuthorizedEffect,
@@ -71,26 +98,30 @@ pub trait EffectBroker {
 
 #[derive(Clone, Debug)]
 pub struct LocalEffectBroker {
-    maximum_timeout_ms: u64,
-    maximum_output_bytes: usize,
+    timeout_ms: u64,
+    input_bytes: usize,
+    output_bytes: usize,
 }
 
 impl LocalEffectBroker {
     #[must_use]
-    pub const fn new(maximum_timeout_ms: u64, maximum_output_bytes: usize) -> Self {
+    pub const fn new(
+        maximum_timeout_ms: u64,
+        maximum_input_bytes: usize,
+        maximum_output_bytes: usize,
+    ) -> Self {
         Self {
-            maximum_timeout_ms,
-            maximum_output_bytes,
+            timeout_ms: maximum_timeout_ms,
+            input_bytes: maximum_input_bytes,
+            output_bytes: maximum_output_bytes,
         }
     }
 
-    /// Authorizes and executes one structured local effect without a shell.
+    /// Authorizes and executes one bounded native workspace effect.
     ///
     /// # Errors
     ///
-    /// Returns [`EffectBrokerError`] when admission fails, the process cannot be
-    /// started, its timeout or output bound is exceeded, or no local executor
-    /// exists for the admitted effect kind.
+    /// Returns [`EffectBrokerError`] when admission or native execution fails.
     pub fn execute(
         &self,
         request: &EffectRequest,
@@ -104,68 +135,83 @@ impl LocalEffectBroker {
         &self,
         authorized: &AuthorizedEffect,
     ) -> Result<EffectOutput, EffectBrokerError> {
-        let request = authorized.request();
-        if request.kind != EffectKind::RunProgram {
-            return Err(EffectBrokerError::UnsupportedEffect(request.kind.clone()));
+        validate_effect_request(&authorized.request, &authorized.authority, self.timeout_ms)?;
+        verify_descriptor_binding(&authorized.target)?;
+        match (&authorized.request.kind, &authorized.target) {
+            (EffectKind::ReadFile, DescriptorTarget::Read { file, .. }) => {
+                self.read_file(&authorized.request, file)
+            }
+            (EffectKind::WriteFile, DescriptorTarget::Write { parent, name, .. }) => {
+                self.write_file(&authorized.request, parent, name)
+            }
+            _ => Err(EffectBrokerError::UnsupportedEffect(
+                authorized.request.kind.clone(),
+            )),
         }
-        let program = request
-            .program
-            .as_deref()
-            .ok_or(EffectBrokerError::Denied(PolicyDenial::MissingProgram))?;
-        let mut child = Command::new(program)
-            .args(&request.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+    }
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(EffectBrokerError::OutputReaderFailed)?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(EffectBrokerError::OutputReaderFailed)?;
-        let output_limit = self.maximum_output_bytes.saturating_add(1);
-        let stdout_reader = thread::spawn(move || read_limited(stdout, output_limit));
-        let stderr_reader = thread::spawn(move || read_limited(stderr, output_limit));
-        let started = Instant::now();
-        let timeout = Duration::from_millis(request.timeout_ms);
+    fn read_file(
+        &self,
+        request: &EffectRequest,
+        file: &File,
+    ) -> Result<EffectOutput, EffectBrokerError> {
+        let bytes = read_descriptor_utf8(file, self.input_bytes)?;
+        require_digest(&bytes, &request.input_digest)?;
+        Ok(EffectOutput {
+            status: 0,
+            stdout: bytes,
+            stderr: Vec::new(),
+        })
+    }
 
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if started.elapsed() >= timeout {
-                child.kill()?;
-                child.wait()?;
-                stdout_reader
-                    .join()
-                    .map_err(|_| EffectBrokerError::OutputReaderFailed)??;
-                stderr_reader
-                    .join()
-                    .map_err(|_| EffectBrokerError::OutputReaderFailed)??;
-                return Err(EffectBrokerError::TimedOut);
-            }
-            thread::sleep(Duration::from_millis(5));
-        };
-
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| EffectBrokerError::OutputReaderFailed)??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| EffectBrokerError::OutputReaderFailed)??;
-        if stdout.len().saturating_add(stderr.len()) > self.maximum_output_bytes {
+    fn write_file(
+        &self,
+        request: &EffectRequest,
+        parent: &File,
+        name: &OsStr,
+    ) -> Result<EffectOutput, EffectBrokerError> {
+        let content = request.content.as_deref().unwrap_or_default().as_bytes();
+        if content.len() > self.output_bytes {
             return Err(EffectBrokerError::OutputTooLarge {
-                limit: self.maximum_output_bytes,
+                limit: self.output_bytes,
             });
         }
+        let existing = open_regular_at(parent, name)?;
+        match &existing {
+            Some(file) => require_digest(
+                &read_descriptor_utf8(file, self.input_bytes)?,
+                &request.input_digest,
+            )?,
+            None => require_digest(NONEXISTENT_FILE_BINDING, &request.input_digest)?,
+        }
+        let temporary = temporary_name(name, request);
+        let temporary_fd = rustix::fs::openat(
+            parent,
+            &temporary,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(std::io::Error::from)?;
+        let mut temporary_file = File::from(temporary_fd);
+        let result: Result<(), EffectBrokerError> = (|| {
+            temporary_file.write_all(content)?;
+            temporary_file.sync_all()?;
+            drop(temporary_file);
+            if let Some(existing) = existing {
+                publish_replace(parent, name, &temporary, &existing)?;
+            } else {
+                publish_create(parent, name, &temporary)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = rustix::fs::unlinkat(parent, &temporary, AtFlags::empty());
+        }
+        result?;
         Ok(EffectOutput {
-            status: status.code().unwrap_or(-1),
-            stdout,
-            stderr,
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
         })
     }
 }
@@ -176,9 +222,15 @@ impl EffectBroker for LocalEffectBroker {
         request: &EffectRequest,
         authority: &AuthorityEnvelope,
     ) -> Result<AuthorizedEffect, PolicyDenial> {
-        validate_effect_request(request, authority, self.maximum_timeout_ms)?;
+        validate_effect_request(request, authority, self.timeout_ms)?;
+        let resolved_paths =
+            resolve_effect_paths(request, authority, request.kind == EffectKind::ReadFile)?;
+        let target = open_descriptor_target(request, authority, &resolved_paths[0])
+            .map_err(|_| PolicyDenial::NonRegularFile(request.paths[0].clone()))?;
         Ok(AuthorizedEffect {
             request: request.clone(),
+            authority: authority.clone(),
+            target,
         })
     }
 
@@ -190,8 +242,232 @@ impl EffectBroker for LocalEffectBroker {
     }
 }
 
-fn read_limited(reader: impl Read, limit: usize) -> Result<Vec<u8>, std::io::Error> {
+fn open_descriptor_target(
+    request: &EffectRequest,
+    authority: &AuthorityEnvelope,
+    resolved: &Path,
+) -> Result<DescriptorTarget, std::io::Error> {
+    let root = authority
+        .allowed_roots
+        .iter()
+        .find(|root| resolved.starts_with(root))
+        .ok_or_else(invalid_target)?;
+    let relative = request.paths[0].as_path();
+    let name = relative
+        .file_name()
+        .ok_or_else(invalid_target)?
+        .to_os_string();
+    let root_fd = rustix::fs::open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let root_file = File::from(root_fd);
+    let root_descriptor = Arc::new(root_file);
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_parent_at(&root_descriptor, parent_relative)?;
+    match request.kind {
+        EffectKind::ReadFile => open_regular_at(&parent, &name)?
+            .map(|file| DescriptorTarget::Read {
+                root: root_descriptor,
+                root_path: root.clone(),
+                file: Arc::new(file),
+                relative: relative.to_path_buf(),
+            })
+            .ok_or_else(invalid_target),
+        EffectKind::WriteFile => Ok(DescriptorTarget::Write {
+            root: root_descriptor,
+            root_path: root.clone(),
+            parent: Arc::new(parent),
+            parent_relative: parent_relative.to_path_buf(),
+            name,
+        }),
+        _ => Err(invalid_target()),
+    }
+}
+
+fn verify_descriptor_binding(target: &DescriptorTarget) -> Result<(), EffectBrokerError> {
+    let (root, root_path) = match target {
+        DescriptorTarget::Read {
+            root, root_path, ..
+        }
+        | DescriptorTarget::Write {
+            root, root_path, ..
+        } => (root, root_path),
+    };
+    let current_root = File::from(
+        rustix::fs::open(
+            root_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    if !same_file(root, &current_root) {
+        return Err(EffectBrokerError::PreimageMismatch);
+    }
+    match target {
+        DescriptorTarget::Read { file, relative, .. } => {
+            let parent = open_parent_at(root, relative.parent().unwrap_or_else(|| Path::new("")))?;
+            let current =
+                open_regular_at(&parent, relative.file_name().ok_or_else(invalid_target)?)?
+                    .ok_or(EffectBrokerError::PreimageMismatch)?;
+            if !same_file(file, &current) {
+                return Err(EffectBrokerError::PreimageMismatch);
+            }
+        }
+        DescriptorTarget::Write {
+            parent,
+            parent_relative,
+            ..
+        } => {
+            let current = open_parent_at(root, parent_relative)?;
+            if !same_file(parent, &current) {
+                return Err(EffectBrokerError::PreimageMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn open_parent_at(root: &File, relative: &Path) -> Result<File, std::io::Error> {
+    let mut parent = root.try_clone()?;
+    for component in relative.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err(invalid_target());
+        };
+        let next = rustix::fs::openat(
+            &parent,
+            segment,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        parent = File::from(next);
+    }
+    Ok(parent)
+}
+
+fn open_regular_at(parent: &File, name: &OsStr) -> Result<Option<File>, std::io::Error> {
+    match rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => {
+            let file = File::from(fd);
+            let stat = rustix::fs::fstat(&file).map_err(std::io::Error::from)?;
+            if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(invalid_target());
+            }
+            Ok(Some(file))
+        }
+        Err(Errno::NOENT) => Ok(None),
+        Err(error) => Err(std::io::Error::from(error)),
+    }
+}
+
+fn publish_create(parent: &File, name: &OsStr, temporary: &OsStr) -> Result<(), EffectBrokerError> {
+    rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::NOREPLACE)
+        .map_err(std::io::Error::from)?;
+    if let Err(error) = rustix::fs::fsync(parent) {
+        let _ = rustix::fs::unlinkat(parent, name, AtFlags::empty());
+        let _ = rustix::fs::fsync(parent);
+        return Err(std::io::Error::from(error).into());
+    }
+    Ok(())
+}
+
+fn publish_replace(
+    parent: &File,
+    name: &OsStr,
+    temporary: &OsStr,
+    expected: &File,
+) -> Result<(), EffectBrokerError> {
+    rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::EXCHANGE)
+        .map_err(std::io::Error::from)?;
+    let swapped = open_regular_at(parent, temporary);
+    let identity_matches = swapped
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .is_some_and(|observed| same_file(expected, observed));
+    if !identity_matches {
+        rollback_exchange(parent, name, temporary);
+        return Err(EffectBrokerError::PreimageMismatch);
+    }
+    if let Err(error) = rustix::fs::unlinkat(parent, temporary, AtFlags::empty()) {
+        rollback_exchange(parent, name, temporary);
+        return Err(std::io::Error::from(error).into());
+    }
+    if let Err(error) = rustix::fs::fsync(parent) {
+        return Err(std::io::Error::from(error).into());
+    }
+    Ok(())
+}
+
+fn rollback_exchange(parent: &File, name: &OsStr, temporary: &OsStr) {
+    let _ = rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::EXCHANGE);
+    let _ = rustix::fs::unlinkat(parent, temporary, AtFlags::empty());
+    let _ = rustix::fs::fsync(parent);
+}
+
+fn same_file(expected: &File, observed: &File) -> bool {
+    match (rustix::fs::fstat(expected), rustix::fs::fstat(observed)) {
+        (Ok(expected), Ok(observed)) => {
+            expected.st_dev == observed.st_dev && expected.st_ino == observed.st_ino
+        }
+        _ => false,
+    }
+}
+
+fn invalid_target() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "native effect target is not descriptor-bound regular workspace data",
+    )
+}
+
+fn read_descriptor_utf8(file: &File, limit: usize) -> Result<Vec<u8>, EffectBrokerError> {
+    let stat = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(invalid_target().into());
+    }
+    if stat.st_size < 0 || u64::try_from(stat.st_size).unwrap_or(u64::MAX) > limit as u64 {
+        return Err(EffectBrokerError::InputTooLarge { limit });
+    }
+    let mut file = file.try_clone()?;
+    file.rewind()?;
     let mut bytes = Vec::new();
-    reader.take(limit as u64).read_to_end(&mut bytes)?;
+    file.take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(EffectBrokerError::InputTooLarge { limit });
+    }
+    std::str::from_utf8(&bytes).map_err(|_| EffectBrokerError::InvalidUtf8)?;
     Ok(bytes)
+}
+
+fn require_digest(bytes: &[u8], expected: &Digest) -> Result<(), EffectBrokerError> {
+    if &digest_bytes(bytes) == expected {
+        Ok(())
+    } else {
+        Err(EffectBrokerError::PreimageMismatch)
+    }
+}
+
+fn temporary_name(target: &OsStr, request: &EffectRequest) -> OsString {
+    let binding = digest_bytes(
+        format!(
+            "{}\0{}\0{}",
+            request.run_id,
+            request.effect_id,
+            target.to_string_lossy()
+        )
+        .as_bytes(),
+    );
+    let suffix = &binding.as_str()[binding.as_str().len().saturating_sub(16)..];
+    format!(".ao-next-{}-{suffix}.tmp", std::process::id()).into()
 }

@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AdapterAction": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["effect"], "type": "string" },
+            "value": { "$ref": "#/definitions/EffectRequest" }
+          },
+          "required": ["kind", "value"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": { "kind": { "enum": ["verify"], "type": "string" } },
+          "required": ["kind"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["blocked"], "type": "string" },
+            "value": { "type": "string" }
+          },
+          "required": ["kind", "value"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": { "kind": { "enum": ["interrupt"], "type": "string" } },
+          "required": ["kind"],
+          "type": "object"
+        }
+      ]
+    },
+    "ControlMutation": {
+      "enum": ["authority", "policy", "verifier", "terminal_state"],
+      "type": "string"
+    },
+    "EffectKind": {
+      "enum": ["read_file", "write_file", "network", "credential", "remote_mutation", "release", "deployment", "publication"],
+      "type": "string"
+    },
+    "EffectRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "args": { "items": { "type": "string" }, "type": "array" },
+        "content": { "type": ["string", "null"] },
+        "effect_id": { "type": "string" },
+        "input_digest": { "type": "string" },
+        "kind": { "$ref": "#/definitions/EffectKind" },
+        "paths": { "items": { "type": "string" }, "type": "array" },
+        "program": { "type": ["string", "null"] },
+        "run_id": { "type": "string" },
+        "timeout_ms": { "format": "uint64", "minimum": 0.0, "type": "integer" }
+      },
+      "required": ["args", "effect_id", "input_digest", "kind", "paths", "run_id", "timeout_ms"],
+      "type": "object"
+    },
+    "TokenUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "cached_input_tokens": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "input_tokens": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "output_bytes": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "output_tokens": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+        "reasoning_tokens": { "format": "uint64", "minimum": 0.0, "type": "integer" }
+      },
+      "required": ["cached_input_tokens", "input_tokens", "output_bytes", "output_tokens", "reasoning_tokens"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "actions": { "items": { "$ref": "#/definitions/AdapterAction" }, "type": "array" },
+    "control_mutations": { "items": { "$ref": "#/definitions/ControlMutation" }, "type": "array" },
+    "model_claimed_success": { "type": "boolean" },
+    "usage": { "$ref": "#/definitions/TokenUsage" }
+  },
+  "required": ["actions", "control_mutations", "model_claimed_success", "usage"],
+  "title": "AdapterTurn",
+  "type": "object"
+}

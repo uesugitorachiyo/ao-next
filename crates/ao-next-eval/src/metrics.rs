@@ -1,4 +1,5 @@
 use ao_next_core::contracts::Digest;
+use ao_next_core::strict_json::canonical_digest;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -8,6 +9,14 @@ pub enum ExecutionVariant {
     N0,
     N4,
     N7,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementOrigin {
+    Synthetic,
+    OfflineFixture,
+    LiveProvider,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -29,6 +38,13 @@ pub struct TokenRow {
 pub struct RunMeasurement {
     pub schema_version: String,
     pub corpus_digest: Digest,
+    pub run_id: String,
+    pub trial_id: String,
+    pub trial_index: u32,
+    pub schedule_position: u32,
+    pub raw_capture_digest: Digest,
+    pub raw_capture_digests: Vec<Digest>,
+    pub workspace_instance_id: String,
     pub task_id: String,
     pub variant: ExecutionVariant,
     pub source_digest: Digest,
@@ -38,10 +54,15 @@ pub struct RunMeasurement {
     pub hidden_tests_digest: Digest,
     pub verifier_profile_digest: Digest,
     pub runtime: String,
+    pub runtime_digest: Digest,
     pub model_identifier: String,
+    pub model_digest: Digest,
     pub prompt_digest: Digest,
     pub policy_digest: Digest,
     pub adapter_version: String,
+    pub adapter_digest: Digest,
+    pub measurement_origin: MeasurementOrigin,
+    pub provider_usage_trusted: bool,
     pub tokens: TokenRow,
     pub wall_clock_ms: u64,
     pub model_wait_ms: u64,
@@ -62,6 +83,7 @@ pub struct RunMeasurement {
     pub cross_runtime_agreement: bool,
     pub worker_count: u32,
     pub dynamic_fanout: bool,
+    pub hidden_test_exposure: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -93,6 +115,16 @@ pub enum MetricsError {
     EmptyIdentity,
     #[error("run measurement worker count is zero")]
     ZeroWorkers,
+    #[error("run measurement exposed hidden-test material")]
+    HiddenTestExposure,
+    #[error("run measurement trusted usage provenance is missing")]
+    UntrustedUsage,
+    #[error("run measurement raw-capture manifest is invalid")]
+    RawCaptureMismatch,
+    #[error("run measurement reports an unauthorized effect")]
+    UnauthorizedEffect,
+    #[error("N7 run measurement violates the one-worker no-fan-out boundary")]
+    WorkerBoundary,
 }
 
 /// Calculates all derived metrics from raw counters and rejects supplied-total
@@ -103,10 +135,13 @@ pub enum MetricsError {
 /// Returns [`MetricsError`] for missing tokens, overflow, reported-total drift,
 /// impossible timing/quality counters, empty identities, or zero workers.
 pub fn derive_metrics(measurement: &RunMeasurement) -> Result<MetricRow, MetricsError> {
-    if measurement.schema_version != "ao.next.run-measurement.v1" {
+    if measurement.schema_version != "ao.next.run-measurement.v2" {
         return Err(MetricsError::UnsupportedSchema);
     }
-    if measurement.task_id.trim().is_empty()
+    if measurement.run_id.trim().is_empty()
+        || measurement.trial_id.trim().is_empty()
+        || measurement.workspace_instance_id.trim().is_empty()
+        || measurement.task_id.trim().is_empty()
         || measurement.runtime.trim().is_empty()
         || measurement.model_identifier.trim().is_empty()
         || measurement.adapter_version.trim().is_empty()
@@ -115,6 +150,28 @@ pub fn derive_metrics(measurement: &RunMeasurement) -> Result<MetricRow, Metrics
     }
     if measurement.worker_count == 0 {
         return Err(MetricsError::ZeroWorkers);
+    }
+    if measurement.hidden_test_exposure {
+        return Err(MetricsError::HiddenTestExposure);
+    }
+    if !measurement.provider_usage_trusted {
+        return Err(MetricsError::UntrustedUsage);
+    }
+    if measurement.raw_capture_digests.is_empty()
+        || canonical_digest(&measurement.raw_capture_digests)
+            .ok()
+            .as_ref()
+            != Some(&measurement.raw_capture_digest)
+    {
+        return Err(MetricsError::RawCaptureMismatch);
+    }
+    if measurement.unauthorized_effects != 0 {
+        return Err(MetricsError::UnauthorizedEffect);
+    }
+    if measurement.variant == ExecutionVariant::N7
+        && (measurement.worker_count != 1 || measurement.dynamic_fanout)
+    {
+        return Err(MetricsError::WorkerBoundary);
     }
     let tokens = [
         measurement.tokens.input_tokens,

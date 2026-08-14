@@ -6,6 +6,18 @@ AO Next compares three variants over identical source, objective, workspace seed
 - N4: direct frontier model in its native harness.
 - N7: the same task through AO Next.
 
-The offline harness stores canonical metric rows and rejects missing baselines, unequal hidden tests, incomplete token rows, corpus drift, identity mismatch, and reported-total manipulation. The ordered three-task fixture is sealed by the canonical digest of its task list. [The decision policy](decision-policy.md) defines every calculated gate. The harness may determine local readiness but cannot produce `AO_NEXT_LIVE_EVALUATION_PASSED` from scripted fixtures.
+Each variant runs exactly three times per task in this counterbalanced order:
+
+- Trial 0: N0, N4, N7.
+- Trial 1: N4, N7, N0.
+- Trial 2: N7, N0, N4.
+
+Every trial uses a new workspace instance reconstructed from the sealed seed. The harness binds the run, trial, schedule position, raw captures, runtime, model, adapter, and all task inputs. Reused runs, trials, captures, or workspace instances invalidate the comparison.
+
+The operator-owned corpus contains a greenfield engineering application, a bounded defect repair, and an artifact-reconciliation task. Hidden tests stay outside worker workspaces and authority roots. The checked-in zero/one corpus is named `synthetic-corpus-v1.json` and cannot decode as the live v2 contract.
+
+A separately authorized one-process functional N7 sentinel may replace only the greenfield task identity with `greenfield-native-write-sentinel` in an otherwise exact sealed live corpus. That alternate identity is accepted only by live input validation; it is not a valid comparison or campaign corpus.
+
+The evaluator calculates a median for each task and variant before it calculates cross-task medians. It rejects missing baselines, incomplete token rows, corpus or identity drift, schedule errors, raw-capture mismatch, hidden exposure, timing contradictions, unauthorized effects, and N7 worker or fan-out violations. [The decision policy](decision-policy.md) defines the score gates. Scripted and fake-process rows cannot produce `AO_NEXT_LIVE_EVALUATION_PASSED`.
 
 Provider calls, credentials, network access, remote mutation, publication, release, deployment, AO migration, and superiority claims are outside local qualification authority.

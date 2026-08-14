@@ -69,8 +69,10 @@ dependencies = [
  "ao-next-eval",
  "chrono",
  "clap",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -79,6 +81,7 @@ name = "ao-next-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",
@@ -93,6 +96,7 @@ version = "0.1.0"
 dependencies = [
  "ao-next-core",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

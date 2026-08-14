@@ -1,8 +1,10 @@
 # Offline Evaluation Decision Policy
 
-The evaluator compares N0 (current supported AO), N4 (the direct model baseline), and N7 (AO Next) only after every sealed task has exactly one identity-matched row for each variant. The ordered task list and its three expected variant profiles are bound by `corpus_digest`. Each row must exactly match the sealed source, objective, workspace seed, visible-fixture, hidden-test, verifier, runtime, model, prompt, policy, adapter, and corpus identities.
+The evaluator compares N0 (current supported AO), N4 (the direct model baseline), and N7 (AO Next) only after every sealed task has exactly three identity-matched rows for each variant. The ordered task list, required trial count, schedule, and variant profiles are bound by `corpus_digest`. Each row must match the sealed source, objective, workspace seed, visible-fixture, hidden-test, verifier, runtime, model, prompt, policy, adapter, and corpus identities.
 
-Raw measurements include complete input, cached-input, reasoning, and output token counters; wall-clock and model-wait time; turns and repairs; interventions; changed-file precision; task and hidden-test results; regressions; unauthorized effects; evidence validity; recovery behavior; runtime agreement; worker count; and dynamic-fanout use. The evaluator recalculates token totals, hidden-test rates, and changed-file precision. Missing counters, impossible values, overflow, or a reported total that differs from the calculated total invalidate the comparison rather than becoming a failed promotion gate.
+Raw measurements include complete input, cached-input, reasoning, and output token counters; wall-clock and model-wait time; turns and repairs; interventions; changed-file precision; task and hidden-test results; regressions; unauthorized effects; evidence validity; recovery behavior; runtime agreement; worker count; and dynamic-fanout use. The evaluator recalculates token totals, raw-capture-manifest digests, hidden-test rates, and changed-file precision. Missing counters, impossible values, overflow, hidden exposure, unauthorized effects, or a supplied digest or total that differs from the calculated value invalidates the comparison.
+
+The evaluator first takes the median across the three trials for each task and variant. It then takes the median of those per-task values for the aggregate. An easy task cannot hide a failed task.
 
 `AO_NEXT_READY_FOR_LIVE_EVALUATION` requires all of these local gates:
 
@@ -16,4 +18,4 @@ Raw measurements include complete input, cached-input, reasoning, and output tok
 - cross-runtime contract agreement for every N7 task; and
 - exactly one N7 worker with no dynamic fan-out.
 
-Any missed gate yields `AO_NEXT_NOT_YET_SUPERIOR`. That result grants no scope expansion. A passing local comparison yields `AO_NEXT_READY_FOR_LIVE_EVALUATION`, not promotion or superiority. The decision enum reserves `AO_NEXT_LIVE_EVALUATION_PASSED` for a future separately authorized process, but the offline evaluator has no code path that can emit it. Every report sets `promotion_authorized` and `dynamic_fanout_authorized` to false.
+Any missed gate yields `AO_NEXT_NOT_YET_SUPERIOR`. That result grants no scope expansion. A passing offline comparison yields `AO_NEXT_READY_FOR_LIVE_EVALUATION`, not promotion or superiority. `AO_NEXT_LIVE_EVALUATION_PASSED` additionally requires the exact provider-call environment gate, a sealed live corpus, and provider-origin rows with trusted usage. Synthetic and fake-process rows cannot satisfy those conditions. Every report sets `promotion_authorized` and `dynamic_fanout_authorized` to false.

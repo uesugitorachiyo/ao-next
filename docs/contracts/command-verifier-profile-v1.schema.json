@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CommandVerifierEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expected_exit_status": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "max_output_bytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "program": {
+          "type": "string"
+        },
+        "required_artifacts": {
+          "items": {
+            "$ref": "#/definitions/RequiredArtifactExpectation"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "verifier_digest": {
+          "type": "string"
+        },
+        "verifier_id": {
+          "type": "string"
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "args",
+        "expected_exit_status",
+        "max_output_bytes",
+        "program",
+        "required_artifacts",
+        "timeout_ms",
+        "verifier_digest",
+        "verifier_id",
+        "working_directory"
+      ],
+      "type": "object"
+    },
+    "RequiredArtifactExpectation": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "entries": {
+      "items": {
+        "$ref": "#/definitions/CommandVerifierEntry"
+      },
+      "type": "array"
+    },
+    "profile_digest": {
+      "type": "string"
+    },
+    "profile_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "entries",
+    "profile_digest",
+    "profile_id",
+    "schema_version"
+  ],
+  "title": "CommandVerifierProfile",
+  "type": "object"
+}

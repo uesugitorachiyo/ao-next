@@ -16,6 +16,7 @@ use crate::contracts::{Digest, EffectRequest, SourceIdentity, WorkspaceIdentity}
 
 pub mod claude;
 pub mod codex;
+pub mod process;
 pub mod scripted;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,21 +270,27 @@ pub struct TokenUsage {
 
 impl TokenUsage {
     #[must_use]
-    pub fn total_tokens(&self) -> u64 {
+    pub fn checked_total_tokens(&self) -> Option<u64> {
         self.input_tokens
-            .saturating_add(self.cached_input_tokens)
-            .saturating_add(self.reasoning_tokens)
-            .saturating_add(self.output_tokens)
+            .checked_add(self.cached_input_tokens)?
+            .checked_add(self.reasoning_tokens)?
+            .checked_add(self.output_tokens)
     }
 
-    pub(crate) fn accumulate(&mut self, other: &Self) {
-        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
-        self.cached_input_tokens = self
+    pub(crate) fn checked_accumulate(&mut self, other: &Self) -> Option<()> {
+        let input_tokens = self.input_tokens.checked_add(other.input_tokens)?;
+        let cached_input_tokens = self
             .cached_input_tokens
-            .saturating_add(other.cached_input_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.output_bytes = self.output_bytes.saturating_add(other.output_bytes);
+            .checked_add(other.cached_input_tokens)?;
+        let reasoning_tokens = self.reasoning_tokens.checked_add(other.reasoning_tokens)?;
+        let output_tokens = self.output_tokens.checked_add(other.output_tokens)?;
+        let output_bytes = self.output_bytes.checked_add(other.output_bytes)?;
+        self.input_tokens = input_tokens;
+        self.cached_input_tokens = cached_input_tokens;
+        self.reasoning_tokens = reasoning_tokens;
+        self.output_tokens = output_tokens;
+        self.output_bytes = output_bytes;
+        Some(())
     }
 }
 
@@ -297,7 +304,12 @@ pub enum ControlMutation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    tag = "kind",
+    content = "value"
+)]
 pub enum AdapterAction {
     Effect(EffectRequest),
     Verify,

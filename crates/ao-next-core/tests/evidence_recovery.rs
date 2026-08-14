@@ -6,7 +6,6 @@ use ao_next_core::contracts::{
     AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile, NetworkPolicy,
     RunLimits, RunRequest, SourceIdentity, StructuredCommand, VerifierProfile, WorkspaceIdentity,
 };
-use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::evidence::{
     ArtifactSpec, ArtifactStore, EvidenceError, StoreLimits, seal_verified_run, verify_evidence,
     verify_sealed_run,
@@ -133,11 +132,8 @@ fn command_file_json_and_digest_verifiers_produce_one_bound_report() {
     request.verifier_profile.profile_digest = profile_digest;
     let verified_workspace = VerifiedWorkspace::new(workspace.path(), &[workspace.path().into()])
         .expect("verified workspace");
-    let broker = LocalEffectBroker::new(1_000, 4_096);
     let verifier = LocalProductVerifier::new(
         &request.run_id,
-        &request.authority,
-        &broker,
         &registry,
         timestamp("2026-08-05T12:00:00Z"),
     );
@@ -169,11 +165,8 @@ fn missing_or_altered_verifier_inputs_cannot_pass() {
     request.verifier_profile.profile_digest = profile_digest;
     let verified_workspace = VerifiedWorkspace::new(workspace.path(), &[workspace.path().into()])
         .expect("verified workspace");
-    let broker = LocalEffectBroker::new(1_000, 4_096);
     let verifier = LocalProductVerifier::new(
         &request.run_id,
-        &request.authority,
-        &broker,
         &registry,
         timestamp("2026-08-05T12:00:00Z"),
     );
@@ -462,10 +455,14 @@ fn recovery_events() -> Vec<JournalEvent> {
 }
 
 #[test]
-fn interrupted_resume_skips_committed_effect_and_requires_durable_verifier_events() {
+fn interrupted_n7_resume_skips_committed_effect_and_requires_durable_verifier_events() {
     let workspace = TempDir::new().expect("workspace");
     let recovery = TempDir::new().expect("recovery");
-    let request = request(workspace.path());
+    let mut request = request(workspace.path());
+    request.run_id = "run-n7-recovery-01".into();
+    request.model_profile.runtime = "codex".into();
+    request.model_profile.model_identifier = "fixed-live-model".into();
+    request.model_profile.adapter_version = "ao-next-process-v1".into();
     let identity = CheckpointIdentity::from_request(&request).expect("checkpoint identity");
     let events_path = recovery.path().join("events.jsonl");
     let events_digest =

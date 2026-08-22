@@ -2,6 +2,8 @@
 
 AO Next is a separate Rust modular monolith supervised by AO Mission. Mission retains objective identity, checkpoints, and terminal reconciliation while AO Next owns strict intake, one-worker direct execution, effect admission, product verification, evidence, and recovery.
 
+The N7 execution path binds a request-identity journal before dispatch. Each authorized native effect records create-only intent before execution and content-addressed completion afterward; intent without completion is unknown and cannot be retried automatically. Verification starts and reports are journaled, and the final mechanically verified N7 record is retained at a content-addressed terminal path before the CLI returns it.
+
 ```text
 operator objective and authority
         -> strict intake validation

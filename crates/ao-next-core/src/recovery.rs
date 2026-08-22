@@ -58,8 +58,14 @@ pub enum JournalEventKind {
     EffectCompleted {
         observation: EffectObservation,
     },
+    VerificationStarted {
+        attempt: u32,
+    },
     VerifierRecorded {
         report_digest: Digest,
+    },
+    TerminalPublished {
+        record_digest: Digest,
     },
 }
 
@@ -208,17 +214,23 @@ impl CheckpointJournal {
         self.bind_request(request)?;
         let effect_digest = canonical_digest(effect)?;
         let mut effects = BTreeMap::<String, (Digest, Option<EffectObservation>)>::new();
+        let mut terminal_published = false;
         for event in self.load_execution_events()? {
             match event.kind {
                 JournalEventKind::EffectIntent {
                     effect_id,
                     effect_digest,
                 } => {
-                    if effects.insert(effect_id, (effect_digest, None)).is_some() {
+                    if terminal_published
+                        || effects.insert(effect_id, (effect_digest, None)).is_some()
+                    {
                         return Err(RecoveryError::EffectIdentityMismatch);
                     }
                 }
                 JournalEventKind::EffectCompleted { observation } => {
+                    if terminal_published {
+                        return Err(RecoveryError::EventSequenceInvalid);
+                    }
                     let Some((_, completion)) = effects.get_mut(&observation.effect_id) else {
                         return Err(RecoveryError::EventSequenceInvalid);
                     };
@@ -226,9 +238,16 @@ impl CheckpointJournal {
                         return Err(RecoveryError::EventSequenceInvalid);
                     }
                 }
-                JournalEventKind::EffectCommitted { .. }
-                | JournalEventKind::VerifierRecorded { .. } => {
+                JournalEventKind::EffectCommitted { .. } => {
                     return Err(RecoveryError::EventSequenceInvalid);
+                }
+                JournalEventKind::VerificationStarted { .. }
+                | JournalEventKind::VerifierRecorded { .. } => {}
+                JournalEventKind::TerminalPublished { .. } => {
+                    if terminal_published {
+                        return Err(RecoveryError::EventSequenceInvalid);
+                    }
+                    terminal_published = true;
                 }
             }
         }
@@ -283,6 +302,134 @@ impl CheckpointJournal {
         self.append_execution_event(JournalEventKind::EffectCompleted {
             observation: observation.clone(),
         })
+    }
+
+    /// Durably marks verification as started, or resumes one unmatched start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for identity drift or contradictory journal
+    /// sequencing.
+    pub fn begin_verification(&self, request: &RunRequest) -> Result<(), RecoveryError> {
+        self.bind_request(request)?;
+        let events = self.load_execution_events()?;
+        let starts = events
+            .iter()
+            .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
+            .count();
+        let records = events
+            .iter()
+            .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
+            .count();
+        if events
+            .iter()
+            .any(|event| matches!(event.kind, JournalEventKind::TerminalPublished { .. }))
+            || starts < records
+            || starts > records.saturating_add(1)
+        {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        if starts == records.saturating_add(1) {
+            return Ok(());
+        }
+        let attempt = u32::try_from(records).map_err(|_| RecoveryError::EventSequenceInvalid)?;
+        self.append_execution_event(JournalEventKind::VerificationStarted { attempt })
+    }
+
+    /// Durably records the verifier report for one started attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless exactly one verification start remains
+    /// unmatched.
+    pub fn record_verifier(
+        &self,
+        request: &RunRequest,
+        report_digest: &Digest,
+    ) -> Result<(), RecoveryError> {
+        self.bind_request(request)?;
+        let events = self.load_execution_events()?;
+        let starts = events
+            .iter()
+            .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
+            .count();
+        let records = events
+            .iter()
+            .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
+            .count();
+        if starts != records.saturating_add(1) {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.append_execution_event(JournalEventKind::VerifierRecorded {
+            report_digest: report_digest.clone(),
+        })
+    }
+
+    /// Publishes canonical terminal bytes at a content-addressed create-only
+    /// path and then appends their durable journal event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] when verification is incomplete, a terminal
+    /// contradicts an existing terminal, or retained bytes/path integrity fail.
+    pub fn publish_terminal_record(
+        &self,
+        request: &RunRequest,
+        bytes: &[u8],
+    ) -> Result<Digest, RecoveryError> {
+        self.bind_request(request)?;
+        if bytes.len() as u64 > self.maximum_bytes {
+            return Err(RecoveryError::Oversized {
+                actual: bytes.len() as u64,
+                limit: self.maximum_bytes,
+            });
+        }
+        let digest = digest_bytes(bytes);
+        let events = self.load_execution_events()?;
+        let starts = events
+            .iter()
+            .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
+            .count();
+        let records = events
+            .iter()
+            .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
+            .count();
+        let terminals = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                JournalEventKind::TerminalPublished { record_digest } => Some(record_digest),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if terminals.len() > 1 {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        let terminal = terminals.first().copied();
+        if starts == 0 || starts != records {
+            return Err(RecoveryError::VerifierEventMissing);
+        }
+        let digest_hex = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or(RecoveryError::EventDigestMismatch)?;
+        let path = self.root.join(format!("terminal-{digest_hex}.json"));
+        if let Some(recorded) = terminal {
+            if recorded != &digest || read_regular_file(&path, self.maximum_bytes)? != bytes {
+                return Err(RecoveryError::EventDigestMismatch);
+            }
+            return Ok(digest);
+        }
+        if path.exists() || path.is_symlink() {
+            if read_regular_file(&path, self.maximum_bytes)? != bytes {
+                return Err(RecoveryError::EventDigestMismatch);
+            }
+        } else {
+            durable_create_new(&path, bytes)?;
+        }
+        self.append_execution_event(JournalEventKind::TerminalPublished {
+            record_digest: digest.clone(),
+        })?;
+        Ok(digest)
     }
 
     fn append_execution_event(&self, kind: JournalEventKind) -> Result<(), RecoveryError> {
@@ -401,13 +548,15 @@ impl CheckpointJournal {
                 return Err(RecoveryError::EventSequenceInvalid);
             }
             match &event.kind {
-                JournalEventKind::EffectIntent { .. } => {}
                 JournalEventKind::EffectCommitted { effect_id } => {
                     committed.insert(effect_id.clone());
                 }
                 JournalEventKind::EffectCompleted { observation } => {
                     committed.insert(observation.effect_id.clone());
                 }
+                JournalEventKind::EffectIntent { .. }
+                | JournalEventKind::VerificationStarted { .. }
+                | JournalEventKind::TerminalPublished { .. } => {}
                 JournalEventKind::VerifierRecorded { .. } => verifier_recorded = true,
             }
         }

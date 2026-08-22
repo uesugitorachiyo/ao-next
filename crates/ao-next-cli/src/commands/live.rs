@@ -27,7 +27,8 @@ use ao_next_core::contracts::{
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOutcome};
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
+use ao_next_core::recovery::CheckpointJournal;
+use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{CommandEngineVerifier, CommandVerifierProfile};
 use ao_next_eval::corpus::{
     CorpusManifest, EvaluationTask, FUNCTIONAL_SENTINEL_TASK_ID, VariantProfile,
@@ -1367,6 +1368,16 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         RunState::Failed if report.is_some() => 5,
         _ => 4,
     };
+    if variant == LiveVariant::N7 && report.is_some() {
+        let terminal_bytes = canonical_json_bytes(&record)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        CheckpointJournal::new(
+            execution_journal_root(input),
+            execution_journal_maximum_bytes(&input.request),
+        )
+        .and_then(|journal| journal.publish_terminal_record(&input.request, &terminal_bytes))
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    }
     let value = serde_json::to_value(record)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     Ok(CommandOutput::new(
@@ -1783,7 +1794,13 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
         usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
     );
-    let outcome = DirectEngine::new(&broker).run(&input.request, &mut adapter, verifier);
+    let journal = CheckpointJournal::new(
+        execution_journal_root(input),
+        execution_journal_maximum_bytes(&input.request),
+    )
+    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let outcome =
+        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, &journal);
     let terminal_state = outcome.terminal_state.clone();
     Ok((
         terminal_state,
@@ -1793,6 +1810,20 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         None,
         Vec::new(),
     ))
+}
+
+fn execution_journal_root(input: &LiveRunInput) -> PathBuf {
+    let mut root = input.raw_capture_root.as_os_str().to_os_string();
+    root.push(".journal");
+    PathBuf::from(root)
+}
+
+fn execution_journal_maximum_bytes(request: &RunRequest) -> u64 {
+    request
+        .limits
+        .max_input_bytes
+        .saturating_add(request.limits.max_output_bytes)
+        .max(64 * 1024)
 }
 
 fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
@@ -4205,6 +4236,40 @@ mod tests {
             result.output.value["native_effect_observations"][0]["effect_id"],
             "write-product"
         );
+        let journal_root = execution_journal_root(&n7.input);
+        assert!(journal_root.join("execution-identity.json").is_file());
+        let mut event_kinds = std::fs::read_dir(journal_root.join("execution-events"))
+            .expect("execution events")
+            .map(|entry| {
+                let bytes = std::fs::read(entry.expect("event entry").path()).expect("event");
+                serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")["kind"]
+                    ["kind"]
+                    .as_str()
+                    .expect("event kind")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        event_kinds.sort();
+        assert_eq!(
+            event_kinds,
+            [
+                "effect_completed",
+                "effect_intent",
+                "terminal_published",
+                "verification_started",
+                "verifier_recorded",
+            ]
+        );
+        let terminal_records = std::fs::read_dir(&journal_root)
+            .expect("journal root")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with("terminal-") && name.as_bytes().ends_with(b".json")
+                })
+            })
+            .count();
+        assert_eq!(terminal_records, 1);
     }
 
     #[cfg(unix)]

@@ -324,9 +324,11 @@ impl CheckpointJournal {
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| RecoveryError::UnsafePath(path.clone()))?;
-            if name.len() != 90
-                || !name.starts_with(&format!("{expected_sequence:020}-"))
-                || &name[85..] != ".json"
+            let name_bytes = name.as_bytes();
+            let expected_prefix = format!("{expected_sequence:020}-");
+            if name_bytes.len() != 90
+                || !name_bytes.starts_with(expected_prefix.as_bytes())
+                || &name_bytes[85..] != b".json"
             {
                 return Err(RecoveryError::EventSequenceInvalid);
             }
@@ -347,7 +349,7 @@ impl CheckpointJournal {
                 .as_str()
                 .strip_prefix("sha256:")
                 .ok_or(RecoveryError::EventDigestMismatch)?;
-            if &name[21..85] != observed_hex {
+            if &name_bytes[21..85] != observed_hex.as_bytes() {
                 return Err(RecoveryError::EventDigestMismatch);
             }
             let maximum_bytes = usize::try_from(self.maximum_bytes).unwrap_or(usize::MAX);

@@ -10,6 +10,7 @@ use crate::adapter::{
 };
 use crate::contracts::{Digest, RunRequest, RunState};
 use crate::effects::EffectBroker;
+use crate::recovery::{CheckpointJournal, JournalEffectState};
 use crate::strict_json::canonical_digest;
 use crate::terminal::RunLifecycle;
 
@@ -86,11 +87,42 @@ where
         Self { broker }
     }
 
+    pub fn run<A, V>(&self, request: &RunRequest, adapter: &mut A, verifier: &mut V) -> RunOutcome
+    where
+        A: RuntimeAdapter,
+        V: EngineVerifier,
+    {
+        self.run_inner(request, adapter, verifier, None)
+    }
+
+    /// Runs one worker through a request-bound append-only execution journal.
+    /// An effect with durable intent and no durable completion is returned as
+    /// unknown and is never executed again automatically.
+    pub fn run_durable<A, V>(
+        &self,
+        request: &RunRequest,
+        adapter: &mut A,
+        verifier: &mut V,
+        journal: &CheckpointJournal,
+    ) -> RunOutcome
+    where
+        A: RuntimeAdapter,
+        V: EngineVerifier,
+    {
+        self.run_inner(request, adapter, verifier, Some(journal))
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the audited state machine stays linear so every terminal path is visible"
     )]
-    pub fn run<A, V>(&self, request: &RunRequest, adapter: &mut A, verifier: &mut V) -> RunOutcome
+    fn run_inner<A, V>(
+        &self,
+        request: &RunRequest,
+        adapter: &mut A,
+        verifier: &mut V,
+        journal: Option<&CheckpointJournal>,
+    ) -> RunOutcome
     where
         A: RuntimeAdapter,
         V: EngineVerifier,
@@ -110,6 +142,19 @@ where
                 verifier_report_digest,
                 "adapter_identity_mismatch",
                 "adapter identity does not match the model profile",
+                RunState::Failed,
+            );
+        }
+        if let Some(journal) = journal
+            && let Err(error) = journal.bind_request(request)
+        {
+            return fail_outcome(
+                identity,
+                metrics,
+                events,
+                verifier_report_digest,
+                "journal_failure",
+                &error.to_string(),
                 RunState::Failed,
             );
         }
@@ -330,8 +375,62 @@ where
                                 "adapter repeated an effect identity",
                             );
                         }
+                        if let Some(journal) = journal {
+                            match journal.effect_state(request, &effect) {
+                                Ok(JournalEffectState::Fresh) => {}
+                                Ok(JournalEffectState::Unknown) => {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Interrupted,
+                                        "effect_completion_unknown",
+                                        "durable effect intent exists without durable completion; automatic retry is forbidden",
+                                    );
+                                }
+                                Ok(JournalEffectState::Completed(observation)) => {
+                                    effect_observations.push(observation.clone());
+                                    push_event(
+                                        &mut events,
+                                        &lifecycle,
+                                        EngineEventKind::EffectCompleted(observation),
+                                        Some(&identity.worker_id),
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Failed,
+                                        "journal_failure",
+                                        &error.to_string(),
+                                    );
+                                }
+                            }
+                        }
                         match self.broker.authorize(&effect, &request.authority) {
                             Ok(authorized) => {
+                                if let Some(journal) = journal
+                                    && let Err(error) =
+                                        journal.record_effect_intent(request, &effect)
+                                {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Failed,
+                                        "journal_failure",
+                                        &error.to_string(),
+                                    );
+                                }
                                 push_event(
                                     &mut events,
                                     &lifecycle,
@@ -341,6 +440,18 @@ where
                                 let output = match self.broker.execute_authorized(&authorized) {
                                     Ok(output) => output,
                                     Err(error) => {
+                                        if journal.is_some() {
+                                            return transition_and_finish(
+                                                lifecycle,
+                                                identity,
+                                                metrics,
+                                                events,
+                                                verifier_report_digest,
+                                                RunState::Interrupted,
+                                                "effect_completion_unknown",
+                                                "native effect returned without durable completion; automatic retry is forbidden",
+                                            );
+                                        }
                                         return transition_and_finish(
                                             lifecycle,
                                             identity,
@@ -394,6 +505,26 @@ where
                                     stderr: output.stderr,
                                     output_digest,
                                 };
+                                if let Some(journal) = journal
+                                    && let Err(error) = journal.record_effect_completion(
+                                        request,
+                                        &effect,
+                                        &observation,
+                                    )
+                                {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Interrupted,
+                                        "effect_completion_unknown",
+                                        &format!(
+                                            "native effect completed but durable completion failed: {error}"
+                                        ),
+                                    );
+                                }
                                 effect_observations.push(observation.clone());
                                 push_event(
                                     &mut events,

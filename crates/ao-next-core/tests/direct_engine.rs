@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -10,9 +11,13 @@ use ao_next_core::contracts::{
     ModelProfile, NetworkPolicy, RunLimits, RunRequest, RunState, SourceIdentity, VerifierProfile,
     WorkspaceIdentity,
 };
-use ao_next_core::effects::LocalEffectBroker;
+use ao_next_core::effects::{
+    AuthorizedEffect, EffectBroker, EffectBrokerError, EffectOutput, LocalEffectBroker,
+};
 use ao_next_core::engine::{DirectEngine, EngineVerifier, VerificationOutcome};
 use ao_next_core::evidence::digest_bytes;
+use ao_next_core::policy::PolicyDenial;
+use ao_next_core::recovery::CheckpointJournal;
 use ao_next_core::terminal::{InvalidTransition, RunLifecycle};
 use chrono::{DateTime, Utc};
 use tempfile::TempDir;
@@ -138,6 +143,30 @@ struct FileVerifier {
     path: PathBuf,
     expected: Vec<u8>,
     calls: usize,
+}
+
+struct FailAfterMutationBroker {
+    inner: LocalEffectBroker,
+    executions: Cell<usize>,
+}
+
+impl EffectBroker for FailAfterMutationBroker {
+    fn authorize(
+        &self,
+        request: &EffectRequest,
+        authority: &AuthorityEnvelope,
+    ) -> Result<AuthorizedEffect, PolicyDenial> {
+        self.inner.authorize(request, authority)
+    }
+
+    fn execute_authorized(
+        &self,
+        authorized: &AuthorizedEffect,
+    ) -> Result<EffectOutput, EffectBrokerError> {
+        self.inner.execute_authorized(authorized)?;
+        self.executions.set(self.executions.get() + 1);
+        Err(std::io::Error::other("interrupted after mutation").into())
+    }
 }
 
 impl EngineVerifier for FileVerifier {
@@ -414,6 +443,118 @@ fn denied_or_duplicate_native_write_prevents_verification() {
     assert_eq!(verifier.calls, 0);
     assert!(first.is_file());
     assert!(!second.exists());
+}
+
+#[test]
+fn durable_intent_without_completion_is_unknown_and_never_retried() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let target = workspace.path().join("product.txt");
+    let mut request = request(workspace.path());
+    request.limits.max_turns = 1;
+    request
+        .authority
+        .capabilities
+        .insert(Capability::WriteWorkspace);
+    let effect = EffectRequest {
+        effect_id: "create-product".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
+    };
+    let broker = FailAfterMutationBroker {
+        inner: LocalEffectBroker::new(1_000, 4_096, 4_096),
+        executions: Cell::new(0),
+    };
+    let engine = DirectEngine::new(&broker);
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+
+    let mut first_adapter = ScriptedAdapter::new(
+        identity(),
+        [Ok(turn(vec![AdapterAction::Effect(effect.clone())]))],
+    );
+    let mut first_verifier = ScriptedVerifier::new([]);
+    let first = engine.run_durable(&request, &mut first_adapter, &mut first_verifier, &journal);
+
+    assert_eq!(first.terminal_state, RunState::Interrupted);
+    assert_eq!(
+        first.failure_code.as_deref(),
+        Some("effect_completion_unknown")
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("mutated target"),
+        b"product\n"
+    );
+    assert_eq!(broker.executions.get(), 1);
+
+    let mut resumed_adapter =
+        ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Effect(effect)]))]);
+    let mut resumed_verifier = ScriptedVerifier::new([]);
+    let resumed = engine.run_durable(
+        &request,
+        &mut resumed_adapter,
+        &mut resumed_verifier,
+        &journal,
+    );
+
+    assert_eq!(resumed.terminal_state, RunState::Interrupted);
+    assert_eq!(
+        resumed.failure_code.as_deref(),
+        Some("effect_completion_unknown")
+    );
+    assert_eq!(broker.executions.get(), 1);
+}
+
+#[test]
+fn durable_completion_is_reused_without_executing_the_effect_again() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let target = workspace.path().join("product.txt");
+    let mut request = request(workspace.path());
+    request.limits.max_turns = 1;
+    request
+        .authority
+        .capabilities
+        .insert(Capability::WriteWorkspace);
+    let effect = EffectRequest {
+        effect_id: "create-product".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
+    };
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let engine = DirectEngine::new(&broker);
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+
+    for _ in 0..2 {
+        let mut adapter = ScriptedAdapter::new(
+            identity(),
+            [Ok(turn(vec![
+                AdapterAction::Effect(effect.clone()),
+                AdapterAction::Verify,
+            ]))],
+        );
+        let mut verifier = FileVerifier {
+            path: target.clone(),
+            expected: b"product\n".to_vec(),
+            calls: 0,
+        };
+        let outcome = engine.run_durable(&request, &mut adapter, &mut verifier, &journal);
+        assert_eq!(outcome.terminal_state, RunState::Passed);
+        assert_eq!(verifier.calls, 1);
+    }
+
+    assert_eq!(std::fs::read(target).expect("product"), b"product\n");
 }
 
 #[test]

@@ -7,8 +7,8 @@ use ao_next_core::contracts::{
     RunLimits, RunRequest, SourceIdentity, StructuredCommand, VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::evidence::{
-    ArtifactSpec, ArtifactStore, EvidenceError, StoreLimits, seal_verified_run, verify_evidence,
-    verify_sealed_run,
+    ArtifactSpec, ArtifactStore, EvidenceError, StoreLimits, digest_bytes, seal_verified_run,
+    verify_evidence, verify_sealed_run,
 };
 use ao_next_core::recovery::{
     Checkpoint, CheckpointIdentity, CheckpointJournal, JournalEvent, JournalEventKind,
@@ -567,6 +567,101 @@ fn recovery_rejects_every_changed_identity_and_checkpoint_digest() {
     assert!(matches!(
         journal.resume(&identity, &["effect-01".into()]),
         Err(RecoveryError::CheckpointDigestMismatch { .. })
+    ));
+}
+
+#[test]
+fn append_only_execution_journal_rejects_identity_effect_and_sequence_drift() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal =
+        CheckpointJournal::new(recovery.path().join("journal"), 4_096).expect("execution journal");
+    let effect = ao_next_core::contracts::EffectRequest {
+        effect_id: "effect-01".into(),
+        run_id: request.run_id.clone(),
+        kind: ao_next_core::contracts::EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
+    };
+    journal
+        .record_effect_intent(&request, &effect)
+        .expect("durable intent");
+
+    let mut changed_request = request.clone();
+    changed_request.run_id = "changed-run".into();
+    assert!(matches!(
+        journal.effect_state(&changed_request, &effect),
+        Err(RecoveryError::IdentityMismatch)
+    ));
+
+    let mut changed_effect = effect.clone();
+    changed_effect.content = Some("changed\n".into());
+    assert!(matches!(
+        journal.effect_state(&request, &changed_effect),
+        Err(RecoveryError::EffectIdentityMismatch)
+    ));
+
+    let events = recovery.path().join("journal/execution-events");
+    let event_path = std::fs::read_dir(&events)
+        .expect("events")
+        .next()
+        .expect("one event")
+        .expect("event entry")
+        .path();
+    let original = std::fs::read(&event_path).expect("event bytes");
+    let mut altered = original.clone();
+    altered.push(b' ');
+    std::fs::write(&event_path, altered).expect("digest drift");
+    assert!(matches!(
+        journal.effect_state(&request, &effect),
+        Err(RecoveryError::EventDigestMismatch)
+    ));
+    std::fs::write(&event_path, original).expect("restore event");
+
+    let name = event_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("event name");
+    std::fs::rename(
+        &event_path,
+        events.join(format!("{:020}{}", 1, &name[20..])),
+    )
+    .expect("sequence drift");
+    assert!(matches!(
+        journal.effect_state(&request, &effect),
+        Err(RecoveryError::EventSequenceInvalid)
+    ));
+}
+
+#[test]
+fn append_only_execution_journal_rejects_non_ascii_event_name_without_panicking() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal_root = recovery.path().join("journal");
+    let journal = CheckpointJournal::new(&journal_root, 4_096).expect("execution journal");
+    let events = journal_root.join("execution-events");
+    std::fs::create_dir_all(&events).expect("events");
+    let unsafe_name = format!("{:020}-{}éxxxx", 0, "a".repeat(63));
+    assert_eq!(unsafe_name.len(), 90);
+    std::fs::write(events.join(unsafe_name), b"{}").expect("invalid event");
+    let effect = ao_next_core::contracts::EffectRequest {
+        effect_id: "effect-01".into(),
+        run_id: request.run_id.clone(),
+        kind: ao_next_core::contracts::EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
+    };
+    assert!(matches!(
+        journal.effect_state(&request, &effect),
+        Err(RecoveryError::EventSequenceInvalid)
     ));
 }
 

@@ -666,6 +666,39 @@ fn append_only_execution_journal_rejects_non_ascii_event_name_without_panicking(
 }
 
 #[test]
+fn verification_resume_and_terminal_publication_are_identity_bound_and_idempotent() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("execution journal");
+
+    journal
+        .begin_verification(&request)
+        .expect("verification start");
+    journal
+        .begin_verification(&request)
+        .expect("same interrupted verification resumes");
+    journal
+        .record_verifier(&request, &digest(ONE_DIGEST))
+        .expect("verifier record");
+
+    let terminal = br#"{"schema_version":"ao.next.test-terminal.v1"}"#;
+    let digest = journal
+        .publish_terminal_record(&request, terminal)
+        .expect("terminal publication");
+    assert_eq!(
+        journal
+            .publish_terminal_record(&request, terminal)
+            .expect("idempotent terminal"),
+        digest
+    );
+    assert!(matches!(
+        journal.publish_terminal_record(&request, b"{}"),
+        Err(RecoveryError::EventDigestMismatch)
+    ));
+}
+
+#[test]
 fn checkpoint_identity_binds_the_exact_request() {
     let workspace = TempDir::new().expect("workspace");
     let request = request(workspace.path());

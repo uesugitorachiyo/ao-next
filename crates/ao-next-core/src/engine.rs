@@ -557,8 +557,39 @@ where
                         if lifecycle.transition(RunState::Verifying).is_err() {
                             return internal_transition_failure(identity, metrics, events);
                         }
+                        if let Some(journal) = journal
+                            && let Err(error) = journal.begin_verification(request)
+                        {
+                            return transition_and_finish(
+                                lifecycle,
+                                identity,
+                                metrics,
+                                events,
+                                verifier_report_digest,
+                                RunState::Failed,
+                                "journal_failure",
+                                &error.to_string(),
+                            );
+                        }
                         let verification = verifier.verify(request);
                         verifier_report_digest = Some(verification.report_digest.clone());
+                        if let Some(journal) = journal
+                            && let Err(error) =
+                                journal.record_verifier(request, &verification.report_digest)
+                        {
+                            return transition_and_finish(
+                                lifecycle,
+                                identity,
+                                metrics,
+                                events,
+                                verifier_report_digest,
+                                RunState::Interrupted,
+                                "verification_completion_unknown",
+                                &format!(
+                                    "verification completed but durable report recording failed: {error}"
+                                ),
+                            );
+                        }
                         if verification.passed {
                             push_event(
                                 &mut events,

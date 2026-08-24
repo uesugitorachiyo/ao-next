@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use ao_next_core::contracts::{
     AdapterIdentity, ArtifactEntry, ArtifactManifest, AuthorityEnvelope, Capability, Digest,
     EffectDecision, EffectEvent, EffectKind, EffectRequest, ExternalEffectPolicy,
-    IntakeExpectation, ModelProfile, NetworkPolicy, RunLimits, RunRequest, RunState,
-    SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport,
+    IntakeExpectation, ModelProfile, NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest,
+    RunState, SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport,
     VerifierResult, WorkspaceIdentity, generated_contract_schemas, validate_intake,
 };
-use ao_next_core::strict_json::{StrictJsonError, canonical_digest, decode_strict_json};
+use ao_next_core::strict_json::{
+    StrictJsonError, canonical_digest, canonical_json_bytes, decode_strict_json,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -196,6 +198,32 @@ fn terminal_readback() -> TerminalReadback {
     }
 }
 
+#[test]
+fn prepared_run_receipt_round_trips_with_exact_git_identity() {
+    let receipt = PreparedRunReceipt {
+        schema_version: "ao.next.prepared-run.v1".into(),
+        run_id: "run-prepared-01".into(),
+        input_digest: digest(ZERO_DIGEST),
+        request_digest: digest(ONE_DIGEST),
+        repository_root: PathBuf::from("workspace"),
+        common_directory: PathBuf::from("workspace/.git"),
+        branch: "ao-next-sealed-seed".into(),
+        base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        control_digest: digest(ZERO_DIGEST),
+        index_digest: digest(ONE_DIGEST),
+        workspace_digest: digest(ZERO_DIGEST),
+        journal_identity_digest: digest(ONE_DIGEST),
+        prepared_at: timestamp("2026-08-23T00:00:00Z"),
+        expires_at: timestamp("2026-08-24T00:00:00Z"),
+        provider_calls: 0,
+        safe_to_execute: false,
+    };
+    let bytes = canonical_json_bytes(&receipt).expect("receipt bytes");
+    let decoded: PreparedRunReceipt =
+        decode_strict_json(&bytes, 64 * 1024).expect("receipt decode");
+    assert_eq!(decoded, receipt);
+}
+
 fn assert_round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq,
@@ -316,6 +344,10 @@ fn checked_in_contract_schemas_match_generated_types() {
     assert!(
         generated_contracts.contains_key("command-verifier-profile-v1.schema.json"),
         "live command verifier contract must be checked in"
+    );
+    assert!(
+        generated_contracts.contains_key("prepared-run-v1.schema.json"),
+        "prepared-run receipt contract must be checked in"
     );
     for (file_name, generated) in generated_contracts {
         let path = repository_root.join("docs/contracts").join(file_name);

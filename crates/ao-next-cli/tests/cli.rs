@@ -1,18 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use ao_next_core::contracts::{
-    AdapterIdentity, Digest, RunState, SourceIdentity, TerminalReadback, WorkspaceIdentity,
+    AdapterIdentity, AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile,
+    NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest, RunState, SourceIdentity,
+    StructuredCommand, TerminalReadback, VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::evidence::digest_bytes;
+use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes};
+use ao_next_core::verifier::{CommandVerifierEntry, CommandVerifierProfile};
 use ao_next_eval::comparison::ComparisonRequest;
 use ao_next_eval::corpus::{
     CorpusKind, CorpusManifest, EvaluationTask, ScheduleEntry, VariantProfile,
     counterbalanced_schedule,
 };
 use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use tempfile::TempDir;
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -68,6 +72,14 @@ fn run(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("run ao-next")
+}
+
+fn run_without_live_authority(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ao-next"))
+        .args(args)
+        .env_remove("AO_NEXT_LIVE_PROVIDER_CALLS")
+        .output()
+        .expect("run provider-free ao-next")
 }
 
 fn run_with_live_environment(args: &[&str], path: &Path, gate: Option<&str>) -> Output {
@@ -638,6 +650,501 @@ fn sealed_corpus() -> CorpusManifest {
     };
     corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
     corpus
+}
+
+struct PrepareLiveFixture {
+    _root: TempDir,
+    input_path: PathBuf,
+    input: serde_json::Value,
+    source_snapshot: PathBuf,
+    workspace: PathBuf,
+    corpus_digest: Digest,
+    verifier_digest: Digest,
+    provider_marker: PathBuf,
+}
+
+fn prepare_live_profile(
+    variant: ExecutionVariant,
+    runtime: &str,
+    adapter_version: &str,
+) -> VariantProfile {
+    VariantProfile {
+        variant,
+        runtime: runtime.into(),
+        runtime_digest: digest_bytes(format!("{runtime}:runtime").as_bytes()),
+        model_identifier: "operator-selected-live-model".into(),
+        model_digest: canonical_digest(&("operator-selected-live-model", "high"))
+            .expect("model digest"),
+        prompt_digest: digest_bytes(format!("{runtime}:prompt").as_bytes()),
+        policy_digest: digest_bytes(format!("{runtime}:policy").as_bytes()),
+        adapter_version: adapter_version.into(),
+        adapter_digest: digest_bytes(format!("{runtime}:{adapter_version}").as_bytes()),
+    }
+}
+
+fn prepare_live_placeholder_task(task_id: &str, profiles: &[VariantProfile]) -> EvaluationTask {
+    EvaluationTask {
+        task_id: task_id.into(),
+        task_kind: "sealed_local_task".into(),
+        source_digest: digest_bytes(format!("{task_id}:source").as_bytes()),
+        objective_digest: digest_bytes(format!("{task_id}:objective").as_bytes()),
+        workspace_seed_digest: digest_bytes(format!("{task_id}:workspace").as_bytes()),
+        visible_fixtures_digest: digest_bytes(format!("{task_id}:visible").as_bytes()),
+        hidden_tests_digest: digest_bytes(format!("{task_id}:hidden").as_bytes()),
+        verifier_profile_digest: digest_bytes(format!("{task_id}:verifier").as_bytes()),
+        variant_profiles: profiles.to_vec(),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the CLI fixture keeps every sealed identity explicit and internally consistent"
+)]
+fn prepare_live_fixture() -> PrepareLiveFixture {
+    let root = TempDir::new().expect("temporary");
+    let workspace = root.path().join("workspace");
+    let protected = root.path().join("protected");
+    let visible = protected.join("visible");
+    let hidden = protected.join("hidden");
+    let raw_capture_root = protected.join("raw-captures");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::create_dir_all(&visible).expect("visible fixtures");
+    std::fs::create_dir(&hidden).expect("hidden tests");
+    std::fs::create_dir(&raw_capture_root).expect("capture root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&raw_capture_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private capture root");
+    }
+
+    let objective_text = "Prepare the sealed live workspace.";
+    let objective = protected.join("objective.md");
+    std::fs::write(&objective, objective_text).expect("objective");
+    let output_schema = protected.join("adapter-turn.schema.json");
+    std::fs::write(
+        &output_schema,
+        include_bytes!("../../../docs/contracts/adapter-turn-v1.schema.json"),
+    )
+    .expect("output schema");
+
+    let empty_tree = Vec::<serde_json::Value>::new();
+    let workspace_digest = canonical_digest(&empty_tree).expect("empty workspace digest");
+    let source = serde_json::json!({
+        "schema_version": "ao.next.source-snapshot.v1",
+        "task_id": "greenfield-engineering-app",
+        "tree_digest": workspace_digest,
+        "files": []
+    });
+    let source_digest = canonical_digest(&source).expect("source digest");
+    let source_snapshot = protected.join("source-snapshot.json");
+    write_json(&source_snapshot, &source);
+    let visible_digest = canonical_digest(&empty_tree).expect("visible digest");
+    let hidden_digest = canonical_digest(&empty_tree).expect("hidden digest");
+
+    let mut verifier_entry = CommandVerifierEntry {
+        verifier_id: "sealed-prepare-check".into(),
+        verifier_digest: digest_bytes(b"unsealed verifier entry"),
+        program: "git".into(),
+        args: vec!["status".into(), "--short".into()],
+        working_directory: PathBuf::new(),
+        timeout_ms: 5_000,
+        max_output_bytes: 16 * 1024,
+        expected_exit_status: 0,
+        required_artifacts: Vec::new(),
+    };
+    verifier_entry.verifier_digest = verifier_entry
+        .calculated_digest()
+        .expect("verifier entry digest");
+    let mut command_verifier = CommandVerifierProfile {
+        schema_version: "ao.next.command-verifier-profile.v1".into(),
+        profile_id: "sealed-prepare-verifier-v1".into(),
+        profile_digest: digest_bytes(b"unsealed verifier profile"),
+        entries: vec![verifier_entry.clone()],
+    };
+    command_verifier.profile_digest = command_verifier
+        .calculated_digest()
+        .expect("verifier profile digest");
+
+    let profiles = vec![
+        prepare_live_profile(ExecutionVariant::N0, "current-ao", "current-ao-native-v1"),
+        prepare_live_profile(ExecutionVariant::N4, "codex", "native-codex-direct-v1"),
+        prepare_live_profile(ExecutionVariant::N7, "ao-next-codex", "ao-next-process-v1"),
+    ];
+    let selected_profile = profiles
+        .iter()
+        .find(|profile| profile.variant == ExecutionVariant::N7)
+        .expect("N7 profile")
+        .clone();
+    let selected_task = EvaluationTask {
+        task_id: "greenfield-engineering-app".into(),
+        task_kind: "greenfield_engineering_application".into(),
+        source_digest: source_digest.clone(),
+        objective_digest: digest_bytes(objective_text.as_bytes()),
+        workspace_seed_digest: workspace_digest.clone(),
+        visible_fixtures_digest: visible_digest,
+        hidden_tests_digest: hidden_digest,
+        verifier_profile_digest: command_verifier.profile_digest.clone(),
+        variant_profiles: profiles.clone(),
+    };
+    let mut corpus = CorpusManifest {
+        schema_version: "ao.next.evaluation-corpus.v2".into(),
+        corpus_kind: CorpusKind::SealedLive,
+        corpus_digest: digest_bytes(b"unsealed prepare corpus"),
+        required_trial_count: 3,
+        schedule: counterbalanced_schedule(),
+        tasks: vec![
+            selected_task,
+            prepare_live_placeholder_task("bounded-defect-repair", &profiles),
+            prepare_live_placeholder_task("artifact-reconciliation", &profiles),
+        ],
+    };
+    corpus.corpus_digest = corpus.calculated_digest().expect("corpus digest");
+
+    let now = Utc::now();
+    let request = RunRequest {
+        schema_version: "ao.next.run-request.v1".into(),
+        run_id: "prepare-live-run-01".into(),
+        objective: objective_text.into(),
+        source: SourceIdentity {
+            repository: "sealed-local/greenfield-engineering-app".into(),
+            head: source_digest,
+        },
+        workspace: WorkspaceIdentity {
+            workspace_id: "prepare-live-workspace-01".into(),
+            root: workspace.clone(),
+            seed_digest: workspace_digest,
+        },
+        model_profile: ModelProfile {
+            runtime: "codex".into(),
+            model_identifier: selected_profile.model_identifier.clone(),
+            reasoning_effort: "high".into(),
+            system_prompt_digest: selected_profile.prompt_digest.clone(),
+            tool_contract_digest: selected_profile.adapter_digest.clone(),
+            context_limit: 262_144,
+            output_limit: 20_000,
+            adapter_version: selected_profile.adapter_version.clone(),
+        },
+        authority: AuthorityEnvelope {
+            schema_version: "ao.next.authority-envelope.v1".into(),
+            issued_by: "operator".into(),
+            issued_at: now - Duration::minutes(1),
+            expires_at: now + Duration::hours(1),
+            capabilities: BTreeSet::from([Capability::ReadWorkspace, Capability::WriteWorkspace]),
+            allowed_roots: vec![workspace.clone()],
+            allowed_programs: BTreeSet::new(),
+            network: NetworkPolicy::Denied,
+            allowed_network_hosts: BTreeSet::new(),
+            external_effects: ExternalEffectPolicy::Denied,
+        },
+        verifier_profile: VerifierProfile {
+            profile_id: command_verifier.profile_id.clone(),
+            profile_digest: command_verifier.profile_digest.clone(),
+            commands: vec![StructuredCommand {
+                program: verifier_entry.program,
+                args: verifier_entry.args,
+                timeout_ms: verifier_entry.timeout_ms,
+            }],
+            required_artifacts: Vec::new(),
+        },
+        policy_digest: selected_profile.policy_digest,
+        limits: RunLimits {
+            max_input_bytes: 64 * 1024,
+            max_turns: 1,
+            max_repair_attempts: 0,
+            max_run_ms: 10_000,
+            max_effect_timeout_ms: 5_000,
+            max_output_bytes: 64 * 1024,
+            max_tokens: 564_288,
+        },
+    };
+    let input = serde_json::json!({
+        "schema_version": "ao.next.live-run-input.v1",
+        "corpus": corpus,
+        "task_id": "greenfield-engineering-app",
+        "trial_id": "prepare-live-trial-01",
+        "trial_index": 0,
+        "schedule_position": 2,
+        "workspace_instance_id": request.workspace.workspace_id,
+        "source_snapshot": source_snapshot,
+        "objective": objective,
+        "visible_fixtures": visible,
+        "hidden_tests": hidden,
+        "output_schema": output_schema,
+        "raw_capture_root": raw_capture_root,
+        "request": request,
+        "command_verifier": command_verifier
+    });
+    let input_path = protected.join("live-input.json");
+    write_json(&input_path, &input);
+    let corpus_digest = Digest::new(
+        input["corpus"]["corpus_digest"]
+            .as_str()
+            .expect("corpus digest"),
+    )
+    .expect("corpus digest");
+    let verifier_digest = Digest::new(
+        input["command_verifier"]["profile_digest"]
+            .as_str()
+            .expect("verifier digest"),
+    )
+    .expect("verifier digest");
+    PrepareLiveFixture {
+        provider_marker: protected.join("provider-started"),
+        _root: root,
+        input_path,
+        input,
+        source_snapshot,
+        workspace,
+        corpus_digest,
+        verifier_digest,
+    }
+}
+
+fn run_prepare_live(
+    fixture: &PrepareLiveFixture,
+    receipt_path: &Path,
+    corpus_digest: &str,
+    verifier_digest: &str,
+) -> Output {
+    run_without_live_authority(&[
+        "prepare-live",
+        "--input",
+        fixture.input_path.to_str().expect("input path"),
+        "--trusted-corpus-digest",
+        corpus_digest,
+        "--trusted-verifier-profile-digest",
+        verifier_digest,
+        "--out",
+        receipt_path.to_str().expect("receipt path"),
+    ])
+}
+
+fn git_head(workspace: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .expect("read Git HEAD");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 Git HEAD")
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn prepare_live_emits_actual_git_and_journal_identity_without_a_provider() {
+    let fixture = prepare_live_fixture();
+    let receipt_path = fixture.input_path.with_file_name("prepared-run.json");
+    let output = run_prepare_live(
+        &fixture,
+        &receipt_path,
+        fixture.corpus_digest.as_str(),
+        fixture.verifier_digest.as_str(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.workspace.join(".git").is_dir());
+    let receipt_bytes = std::fs::read(&receipt_path).expect("receipt bytes");
+    let receipt: PreparedRunReceipt = serde_json::from_slice(&receipt_bytes).expect("receipt");
+    let stdout_receipt: PreparedRunReceipt =
+        serde_json::from_slice(&output.stdout).expect("stdout receipt");
+    assert_eq!(
+        receipt_bytes,
+        canonical_json_bytes(&receipt).expect("canonical receipt")
+    );
+    assert_eq!(stdout_receipt, receipt);
+    assert_eq!(
+        receipt.repository_root,
+        std::fs::canonicalize(&fixture.workspace).expect("canonical workspace")
+    );
+    assert_eq!(
+        std::fs::canonicalize(&receipt.common_directory).expect("canonical receipt Git directory"),
+        std::fs::canonicalize(fixture.workspace.join(".git")).expect("canonical Git directory")
+    );
+    assert_eq!(receipt.branch, "ao-next-sealed-seed");
+    assert_eq!(receipt.base_commit, git_head(&fixture.workspace));
+    assert_eq!(
+        receipt.input_digest,
+        digest_bytes(&std::fs::read(&fixture.input_path).expect("input bytes"))
+    );
+    assert_eq!(
+        receipt.request_digest,
+        canonical_digest(&fixture.input["request"]).expect("request digest")
+    );
+    assert_eq!(
+        receipt.workspace_digest.as_str(),
+        fixture.input["request"]["workspace"]["seed_digest"]
+            .as_str()
+            .expect("workspace digest")
+    );
+    assert_eq!(receipt.provider_calls, 0);
+    assert!(!receipt.safe_to_execute);
+    assert!(!fixture.provider_marker.exists());
+    let journal_identity = PathBuf::from(format!(
+        "{}.journal/execution-identity.json",
+        fixture.input["raw_capture_root"]
+            .as_str()
+            .expect("capture root")
+    ));
+    assert!(journal_identity.is_file());
+    let journal_identity_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&journal_identity).expect("journal identity bytes"))
+            .expect("journal identity");
+    assert_eq!(
+        receipt.journal_identity_digest,
+        canonical_digest(&journal_identity_value).expect("journal identity digest")
+    );
+    assert!(!journal_identity.with_file_name("execution-events").exists());
+}
+
+#[test]
+fn prepare_live_rejects_existing_output_git_input_source_and_anchor_drift() {
+    let fixture = prepare_live_fixture();
+    let receipt_path = fixture.input_path.with_file_name("existing.json");
+    std::fs::write(&receipt_path, b"existing").expect("existing receipt");
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &receipt_path,
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+    assert!(!fixture.workspace.join(".git").exists());
+
+    let fixture = prepare_live_fixture();
+    std::fs::create_dir(fixture.workspace.join(".git")).expect("preexisting Git metadata");
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &fixture.input_path.with_file_name("git-drift.json"),
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+
+    let mut fixture = prepare_live_fixture();
+    fixture.input["workspace_instance_id"] = serde_json::json!("drifted-workspace");
+    write_json(&fixture.input_path, &fixture.input);
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &fixture.input_path.with_file_name("input-drift.json"),
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+
+    let fixture = prepare_live_fixture();
+    std::fs::write(
+        &fixture.source_snapshot,
+        br#"{"schema_version":"ao.next.source-snapshot.v1","task_id":"drifted","tree_digest":"sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e1bb663c2b8973f4842d2bc","files":[]}"#,
+    )
+    .expect("drifted source");
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &fixture.input_path.with_file_name("source-drift.json"),
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+
+    let fixture = prepare_live_fixture();
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &fixture.input_path.with_file_name("corpus-drift.json"),
+            ZERO_DIGEST,
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &fixture.input_path.with_file_name("verifier-drift.json"),
+            fixture.corpus_digest.as_str(),
+            ONE_DIGEST,
+        ),
+        3,
+        "invalid_input",
+    );
+    assert!(!fixture.workspace.join(".git").exists());
+}
+
+#[test]
+fn prepare_live_rejects_provider_authorization_before_preparation() {
+    let fixture = prepare_live_fixture();
+    let receipt_path = fixture.input_path.with_file_name("authorized.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_ao-next"))
+        .args([
+            "prepare-live",
+            "--input",
+            fixture.input_path.to_str().expect("input path"),
+            "--trusted-corpus-digest",
+            fixture.corpus_digest.as_str(),
+            "--trusted-verifier-profile-digest",
+            fixture.verifier_digest.as_str(),
+            "--out",
+            receipt_path.to_str().expect("receipt path"),
+        ])
+        .env("AO_NEXT_LIVE_PROVIDER_CALLS", "operator-authorized")
+        .output()
+        .expect("run authorized prepare-live");
+    assert_json_error(&output, 8, "authorization_denied");
+    assert!(!receipt_path.exists());
+    assert!(!fixture.workspace.join(".git").exists());
+    assert!(!fixture.provider_marker.exists());
+}
+
+#[test]
+fn prepare_live_rejects_a_symlinked_output() {
+    let fixture = prepare_live_fixture();
+    let target = fixture.input_path.with_file_name("receipt-target.json");
+    let receipt_path = fixture.input_path.with_file_name("receipt-link.json");
+    std::fs::write(&target, b"target").expect("symlink target");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &receipt_path).expect("symlink output");
+    #[cfg(windows)]
+    match std::os::windows::fs::symlink_file(&target, &receipt_path) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314) =>
+        {
+            return;
+        }
+        Err(error) => panic!("symlink output: {error}"),
+    }
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &receipt_path,
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+    assert_eq!(std::fs::read(&target).expect("unchanged target"), b"target");
+    assert!(!fixture.workspace.join(".git").exists());
 }
 
 fn qualify_campaign(path: &Path) -> Output {

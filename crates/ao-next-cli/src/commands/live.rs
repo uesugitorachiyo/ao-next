@@ -34,7 +34,7 @@ use ao_next_eval::corpus::{
     CorpusManifest, EvaluationTask, FUNCTIONAL_SENTINEL_TASK_ID, VariantProfile,
 };
 use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -57,7 +57,7 @@ const ADAPTER_TURN_SCHEMA_BYTES: &[u8] =
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum LiveVariant {
+pub(super) enum LiveVariant {
     N0,
     N4,
     N7,
@@ -75,7 +75,7 @@ impl LiveVariant {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct LiveRunInput {
+pub(super) struct LiveRunInput {
     schema_version: String,
     corpus: CorpusManifest,
     task_id: String,
@@ -88,8 +88,8 @@ struct LiveRunInput {
     visible_fixtures: PathBuf,
     hidden_tests: PathBuf,
     output_schema: PathBuf,
-    raw_capture_root: PathBuf,
-    request: RunRequest,
+    pub(super) raw_capture_root: PathBuf,
+    pub(super) request: RunRequest,
     command_verifier: CommandVerifierProfile,
     #[serde(default)]
     current_ao: Option<CurrentAoBinding>,
@@ -141,13 +141,13 @@ struct LiveRunRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct GitWorkspaceIdentity {
-    repository_root: PathBuf,
-    common_dir: PathBuf,
-    head_commit: String,
-    branch: &'static str,
-    control_digest: Digest,
-    index_digest: Digest,
+pub(super) struct GitWorkspaceIdentity {
+    pub(super) repository_root: PathBuf,
+    pub(super) common_dir: PathBuf,
+    pub(super) head_commit: String,
+    pub(super) branch: &'static str,
+    pub(super) control_digest: Digest,
+    pub(super) index_digest: Digest,
 }
 
 struct ValidatedInput<'a> {
@@ -446,7 +446,7 @@ pub(crate) fn provider_free_capture_root(input_path: &Path) -> Result<PathBuf, C
         .ok_or_else(|| CommandFailure::invalid_input("live input capture root is missing"))
 }
 
-pub(crate) fn verify_provider_free_capture(
+pub(super) fn verify_provider_free_capture(
     input_path: &Path,
     variant: LiveVariant,
     expected_index_digest: &Digest,
@@ -462,7 +462,7 @@ pub(crate) fn verify_provider_free_capture(
     )
 }
 
-pub(crate) fn preflight_provider_free_row(
+pub(super) fn preflight_provider_free_row(
     input_path: &Path,
     variant: LiveVariant,
     trusted_corpus_digest: &Digest,
@@ -555,7 +555,7 @@ pub(crate) fn preflight_provider_free_row(
     })
 }
 
-pub(crate) fn execute_provider_free_row(
+pub(super) fn execute_provider_free_row(
     input_path: &Path,
     variant: LiveVariant,
     trusted_corpus_digest: &Digest,
@@ -631,7 +631,7 @@ pub(crate) fn execute_provider_free_row(
     })
 }
 
-pub(crate) fn reject_provider_free_input(
+pub(super) fn reject_provider_free_input(
     input_path: &Path,
     variant: LiveVariant,
     trusted_corpus_digest: &Digest,
@@ -749,7 +749,10 @@ impl<R: ProcessRunner> ProcessRunner for SingleProviderProcess<R> {
     }
 }
 
-pub fn execute(args: &LiveRunArgs, variant: LiveVariant) -> Result<CommandOutput, CommandFailure> {
+pub(super) fn execute(
+    args: &LiveRunArgs,
+    variant: LiveVariant,
+) -> Result<CommandOutput, CommandFailure> {
     if std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").as_deref() != Ok("operator-authorized") {
         return Err(CommandFailure::authorization(
             "live provider calls require separate operator authorization",
@@ -847,6 +850,23 @@ fn validate_trusted_bindings(
         ));
     }
     Ok(())
+}
+
+pub(super) fn load_trusted_live_input(
+    path: &Path,
+    variant: LiveVariant,
+    trusted_corpus_digest: &str,
+    trusted_verifier_profile_digest: &str,
+    now: DateTime<Utc>,
+) -> Result<LiveRunInput, CommandFailure> {
+    let input: LiveRunInput = decode_file(path)?;
+    let trusted = trusted_bindings(
+        Some(trusted_corpus_digest),
+        Some(trusted_verifier_profile_digest),
+    )?;
+    validate_trusted_bindings(&input, &trusted)?;
+    validate_input(&input, variant, now)?;
+    Ok(input)
 }
 
 fn required_live_token_envelope(
@@ -1812,13 +1832,13 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     ))
 }
 
-fn execution_journal_root(input: &LiveRunInput) -> PathBuf {
+pub(super) fn execution_journal_root(input: &LiveRunInput) -> PathBuf {
     let mut root = input.raw_capture_root.as_os_str().to_os_string();
     root.push(".journal");
     PathBuf::from(root)
 }
 
-fn execution_journal_maximum_bytes(request: &RunRequest) -> u64 {
+pub(super) fn execution_journal_maximum_bytes(request: &RunRequest) -> u64 {
     request
         .limits
         .max_input_bytes
@@ -2627,7 +2647,7 @@ fn ensure_checked_output_schema(path: &Path, maximum_bytes: u64) -> Result<(), C
     clippy::too_many_lines,
     reason = "the deterministic seed repository contract is intentionally visible in one boundary"
 )]
-fn prepare_git_workspace(
+pub(super) fn prepare_git_workspace(
     root: &Path,
     allowed_roots: &[PathBuf],
     seed_digest: &Digest,

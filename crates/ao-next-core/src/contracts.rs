@@ -3,6 +3,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::{Schema, SchemaObject, StringValidation};
 use schemars::{JsonSchema, schema_for};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -316,6 +318,51 @@ pub struct TerminalReadback {
     pub exact_next_action: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedRunReceipt {
+    pub schema_version: String,
+    pub run_id: String,
+    pub input_digest: Digest,
+    pub request_digest: Digest,
+    pub repository_root: PathBuf,
+    pub common_directory: PathBuf,
+    pub branch: String,
+    #[schemars(schema_with = "git_commit_schema")]
+    pub base_commit: String,
+    pub control_digest: Digest,
+    pub index_digest: Digest,
+    pub workspace_digest: Digest,
+    pub journal_identity_digest: Digest,
+    pub prepared_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[schemars(schema_with = "zero_provider_calls_schema")]
+    pub provider_calls: u32,
+    #[schemars(schema_with = "unsafe_to_execute_schema")]
+    pub safe_to_execute: bool,
+}
+
+fn git_commit_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.string = Some(Box::new(StringValidation {
+        pattern: Some("^[0-9a-f]{40}$".into()),
+        ..StringValidation::default()
+    }));
+    schema.into()
+}
+
+fn zero_provider_calls_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = u32::json_schema(generator).into();
+    schema.const_value = Some(Value::from(0));
+    schema.into()
+}
+
+fn unsafe_to_execute_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = bool::json_schema(generator).into();
+    schema.const_value = Some(Value::from(false));
+    schema.into()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntakeExpectation {
     pub run_id: String,
@@ -425,6 +472,10 @@ pub fn generated_contract_schemas() -> BTreeMap<&'static str, Value> {
         (
             "terminal-readback-v1.schema.json",
             serde_json::to_value(schema_for!(TerminalReadback)).expect("schema serialization"),
+        ),
+        (
+            "prepared-run-v1.schema.json",
+            serde_json::to_value(schema_for!(PreparedRunReceipt)).expect("schema serialization"),
         ),
     ])
 }

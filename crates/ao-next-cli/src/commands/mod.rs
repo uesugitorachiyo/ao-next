@@ -7,6 +7,7 @@ pub mod evaluate;
 pub mod inspect;
 pub mod instantiate_corpus;
 pub mod live;
+pub mod live_prepare;
 pub mod replay;
 pub mod run;
 pub mod verify_corpus;
@@ -27,6 +28,7 @@ enum Command {
     RunLive(LiveRunArgs),
     RunCurrentAoBaseline(LiveRunArgs),
     RunDirectBaseline(LiveRunArgs),
+    PrepareLive(PrepareLiveArgs),
     PreflightLiveInput(PreflightLiveInputArgs),
     QualifyLiveCampaign(QualifyLiveCampaignArgs),
     QualifyRecovery(QualifyRecoveryArgs),
@@ -47,6 +49,18 @@ pub struct LiveRunArgs {
     pub trusted_corpus_digest: Option<String>,
     #[arg(long)]
     pub trusted_verifier_profile_digest: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PrepareLiveArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long)]
+    pub trusted_corpus_digest: String,
+    #[arg(long)]
+    pub trusted_verifier_profile_digest: String,
+    #[arg(long)]
+    pub out: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -245,6 +259,7 @@ pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
         Command::RunLive(args) => live::execute(&args, live::LiveVariant::N7),
         Command::RunCurrentAoBaseline(args) => live::execute(&args, live::LiveVariant::N0),
         Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
+        Command::PrepareLive(args) => live_prepare::execute(&args),
         Command::PreflightLiveInput(args) => live::preflight(&args),
         Command::QualifyLiveCampaign(args) => campaign::execute(&args),
         Command::QualifyRecovery(args) => campaign::execute_recovery(&args),

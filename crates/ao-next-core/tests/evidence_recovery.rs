@@ -15,7 +15,7 @@ use ao_next_core::recovery::{
     Checkpoint, CheckpointIdentity, CheckpointJournal, JournalEvent, JournalEventKind,
     RecoveryError, write_durable_event_log,
 };
-use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
+use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{
     LocalProductVerifier, ProductVerifier, VerificationPlan, VerifiedWorkspace, VerifierRegistry,
 };
@@ -495,6 +495,67 @@ fn recovery_events() -> Vec<JournalEvent> {
     ]
 }
 
+fn journal_event(sequence: u64, kind: JournalEventKind) -> JournalEvent {
+    JournalEvent {
+        schema_version: "ao.next.journal-event.v1".into(),
+        sequence,
+        kind,
+    }
+}
+
+fn provider_lifecycle_events() -> Vec<JournalEvent> {
+    vec![
+        journal_event(
+            0,
+            JournalEventKind::ProviderRequestIntent {
+                prepared_run_digest: digest_bytes(b"prepared"),
+            },
+        ),
+        journal_event(
+            1,
+            JournalEventKind::ProviderProcessStarted {
+                invocation_digest: digest_bytes(b"invocation"),
+            },
+        ),
+        journal_event(
+            2,
+            JournalEventKind::ProviderOutputRetained {
+                raw_capture_digest: digest_bytes(b"raw-capture"),
+            },
+        ),
+        journal_event(
+            3,
+            JournalEventKind::ProviderCaptureIndexPublished {
+                index_digest: digest_bytes(b"capture-index"),
+            },
+        ),
+        journal_event(
+            4,
+            JournalEventKind::ProviderCaptureVerified {
+                index_digest: digest_bytes(b"capture-index"),
+            },
+        ),
+        journal_event(
+            5,
+            JournalEventKind::AdapterTurnNormalized {
+                turn_digest: digest_bytes(b"adapter-turn"),
+            },
+        ),
+    ]
+}
+
+fn checkpoint_for_events(request: &RunRequest, sequence: u64, events_digest: Digest) -> Checkpoint {
+    Checkpoint {
+        schema_version: "ao.next.checkpoint.v1".into(),
+        run_id: request.run_id.clone(),
+        sequence,
+        identity: CheckpointIdentity::from_request(request).expect("checkpoint identity"),
+        committed_effects: BTreeSet::new(),
+        events_digest,
+        recorded_at: timestamp("2026-08-05T12:00:02Z"),
+    }
+}
+
 #[test]
 fn interrupted_n7_resume_skips_committed_effect_and_requires_durable_verifier_events() {
     let workspace = TempDir::new().expect("workspace");
@@ -702,6 +763,110 @@ fn provider_event_reordering_digest_drift_and_duplicates_fail_closed() {
             .record_provider_request_intent(&fixture.request, &digest_bytes(b"other"))
             .is_err()
     );
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &digest_bytes(b"invocation"))
+        .expect("started");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+        .expect("retained");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &digest_bytes(b"index"))
+        .expect("published");
+    assert!(
+        fixture
+            .journal
+            .record_provider_capture_verified(&fixture.request, &digest_bytes(b"other-index"))
+            .is_err()
+    );
+}
+
+#[test]
+fn provider_intent_blocks_verification_start() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .expect("intent");
+
+    assert!(
+        fixture
+            .journal
+            .begin_verification(&fixture.request)
+            .is_err()
+    );
+}
+
+#[test]
+fn provider_checkpoint_rejects_incomplete_lifecycle_with_terminal() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let events = vec![
+        journal_event(
+            0,
+            JournalEventKind::ProviderRequestIntent {
+                prepared_run_digest: digest_bytes(b"prepared"),
+            },
+        ),
+        journal_event(1, JournalEventKind::VerificationStarted { attempt: 0 }),
+        journal_event(
+            2,
+            JournalEventKind::VerifierRecorded {
+                report_digest: digest_bytes(b"report"),
+            },
+        ),
+        journal_event(
+            3,
+            JournalEventKind::TerminalPublished {
+                record_digest: digest_bytes(b"terminal"),
+            },
+        ),
+    ];
+    let events_path = recovery.path().join("events.jsonl");
+    let events_digest =
+        write_durable_event_log(&events_path, &events, 16 * 1024).expect("event log");
+    let checkpoint = checkpoint_for_events(&request, events.len() as u64, events_digest);
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("checkpoint journal");
+
+    assert!(journal.commit(&checkpoint, &events_path).is_err());
+}
+
+#[test]
+fn provider_checkpoint_rejects_unknown_event_fields() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let mut events = provider_lifecycle_events();
+    events.push(journal_event(
+        6,
+        JournalEventKind::VerificationStarted { attempt: 0 },
+    ));
+    events.push(journal_event(
+        7,
+        JournalEventKind::VerifierRecorded {
+            report_digest: digest_bytes(b"report"),
+        },
+    ));
+    let mut bytes = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        if index == 0 {
+            let mut value = serde_json::to_value(event).expect("event value");
+            value["kind"]["unexpected"] = serde_json::json!(true);
+            bytes.extend_from_slice(&canonical_json_bytes(&value).expect("extended event"));
+        } else {
+            bytes.extend_from_slice(&canonical_json_bytes(event).expect("event"));
+        }
+        bytes.push(b'\n');
+    }
+    let events_path = recovery.path().join("events.jsonl");
+    std::fs::write(&events_path, &bytes).expect("event log");
+    let checkpoint = checkpoint_for_events(&request, events.len() as u64, digest_bytes(&bytes));
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("checkpoint journal");
+
+    assert!(journal.commit(&checkpoint, &events_path).is_err());
 }
 
 #[test]

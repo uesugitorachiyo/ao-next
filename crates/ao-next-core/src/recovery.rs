@@ -46,7 +46,7 @@ impl CheckpointIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
 pub enum JournalEventKind {
     ProviderRequestIntent {
         prepared_run_digest: Digest,
@@ -240,18 +240,29 @@ fn provider_state_from_events(
             }
             JournalEventKind::VerificationStarted { .. }
             | JournalEventKind::VerifierRecorded { .. }
-            | JournalEventKind::TerminalPublished { .. } => {}
+            | JournalEventKind::TerminalPublished { .. }
+                if provider_step == 0 || provider_step == 6 => {}
             JournalEventKind::ProviderRequestIntent { .. }
             | JournalEventKind::ProviderProcessStarted { .. }
             | JournalEventKind::ProviderOutputRetained { .. }
             | JournalEventKind::ProviderCaptureIndexPublished { .. }
             | JournalEventKind::ProviderCaptureVerified { .. }
-            | JournalEventKind::AdapterTurnNormalized { .. } => {
+            | JournalEventKind::AdapterTurnNormalized { .. }
+            | JournalEventKind::VerificationStarted { .. }
+            | JournalEventKind::VerifierRecorded { .. }
+            | JournalEventKind::TerminalPublished { .. } => {
                 return Err(RecoveryError::EventSequenceInvalid);
             }
         }
     }
     Ok(state)
+}
+
+fn require_provider_ready(state: &ProviderJournalState) -> Result<(), RecoveryError> {
+    if state.prepared_run_digest.is_some() && state.adapter_turn_digest.is_none() {
+        return Err(RecoveryError::EventSequenceInvalid);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -485,11 +496,7 @@ impl CheckpointJournal {
         let mut terminal_published = false;
         let events = self.load_execution_events()?;
         let provider_state = provider_state_from_events(&events)?;
-        if provider_state.prepared_run_digest.is_some()
-            && provider_state.adapter_turn_digest.is_none()
-        {
-            return Err(RecoveryError::EventSequenceInvalid);
-        }
+        require_provider_ready(&provider_state)?;
         for event in events {
             match event.kind {
                 JournalEventKind::EffectIntent {
@@ -594,7 +601,7 @@ impl CheckpointJournal {
     pub fn begin_verification(&self, request: &RunRequest) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
-        provider_state_from_events(&events)?;
+        require_provider_ready(&provider_state_from_events(&events)?)?;
         let starts = events
             .iter()
             .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
@@ -631,7 +638,7 @@ impl CheckpointJournal {
     ) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
-        provider_state_from_events(&events)?;
+        require_provider_ready(&provider_state_from_events(&events)?)?;
         let starts = events
             .iter()
             .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
@@ -669,7 +676,7 @@ impl CheckpointJournal {
         }
         let digest = digest_bytes(bytes);
         let events = self.load_execution_events()?;
-        provider_state_from_events(&events)?;
+        require_provider_ready(&provider_state_from_events(&events)?)?;
         let starts = events
             .iter()
             .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
@@ -823,7 +830,7 @@ impl CheckpointJournal {
             return Err(RecoveryError::EventDigestMismatch);
         }
         let events = decode_event_log(&event_bytes, self.maximum_bytes)?;
-        provider_state_from_events(&events)?;
+        require_provider_ready(&provider_state_from_events(&events)?)?;
         let mut committed = BTreeSet::new();
         let mut verifier_recorded = false;
         for (expected_sequence, event) in events.iter().enumerate() {

@@ -7,6 +7,7 @@
 - Supported fallback: AO2
 - Initial native platforms: Windows x86_64, macOS arm64, Ubuntu x86_64
 - Stage-0 plan: [AO Next Engine Recovery Repair](../plans/2026-08-23-ao-next-engine-recovery-repair.md)
+- Stage-0 final-blocker amendment: [AO Next Stage-0 Final Blocker Closure](2026-08-24-ao-next-stage0-final-blocker-closure-design.md)
 
 ## Summary
 

@@ -391,11 +391,14 @@ fn provider_prompt_exposes_bound_native_authority_and_visible_inventory() {
 }
 
 #[test]
-fn live_visibility_binds_visible_fixtures_without_private_paths() {
+fn live_visibility_binds_visible_fixtures_in_relative_path_order_without_private_paths() {
     let workspace = TempDir::new().expect("workspace");
     let visible = TempDir::new().expect("visible fixtures");
     let controls = TempDir::new().expect("controls");
     std::fs::write(workspace.path().join("source.txt"), b"source\n").expect("source");
+    std::fs::write(visible.path().join("zeta.txt"), b"zeta\n").expect("later visible");
+    std::fs::create_dir(visible.path().join("nested")).expect("nested fixtures");
+    std::fs::write(visible.path().join("nested/alpha.txt"), b"alpha\n").expect("nested visible");
     std::fs::write(visible.path().join("example.txt"), b"example\n").expect("visible");
     let schema = controls.path().join("turn.schema.json");
     std::fs::write(&schema, b"{\"type\":\"object\"}").expect("schema");
@@ -405,11 +408,11 @@ fn live_visibility_binds_visible_fixtures_without_private_paths() {
         "size_bytes": 7
     })])
     .expect("source digest");
-    let visible_digest = canonical_digest(&[serde_json::json!({
-        "path": "example.txt",
-        "sha256": digest_bytes(b"example\n"),
-        "size_bytes": 8
-    })])
+    let visible_digest = canonical_digest(&serde_json::json!([
+        {"path": "example.txt", "sha256": digest_bytes(b"example\n"), "size_bytes": 8},
+        {"path": "nested/alpha.txt", "sha256": digest_bytes(b"alpha\n"), "size_bytes": 6},
+        {"path": "zeta.txt", "sha256": digest_bytes(b"zeta\n"), "size_bytes": 5}
+    ]))
     .expect("visible digest");
     let visibility = ProviderVisibility::from_live_roots(
         workspace.path(),
@@ -465,12 +468,21 @@ fn live_visibility_binds_visible_fixtures_without_private_paths() {
     let prompt: serde_json::Value = serde_json::from_str(&prompt_text).expect("prompt JSON");
     assert_eq!(
         prompt["visible_fixtures"],
-        serde_json::json!([{
-            "path": "example.txt",
-            "content": "example\n",
-            "digest": digest_bytes(b"example\n")
-        }])
+        serde_json::json!([
+            {"path": "example.txt", "content": "example\n", "digest": digest_bytes(b"example\n")},
+            {"path": "nested/alpha.txt", "content": "alpha\n", "digest": digest_bytes(b"alpha\n")},
+            {"path": "zeta.txt", "content": "zeta\n", "digest": digest_bytes(b"zeta\n")}
+        ])
     );
+    let paths = prompt["visible_fixtures"]
+        .as_array()
+        .expect("visible fixture array")
+        .iter()
+        .map(|file| file["path"].as_str().expect("relative path"))
+        .collect::<Vec<_>>();
+    let mut sorted = paths.clone();
+    sorted.sort_unstable();
+    assert_eq!(paths, sorted);
     assert!(!prompt_text.contains(workspace.path().to_str().expect("workspace path")));
     assert!(!prompt_text.contains(visible.path().to_str().expect("visible path")));
     assert!(!prompt_text.contains(controls.path().to_str().expect("controls path")));

@@ -170,20 +170,22 @@ fn live_record_digest(
 ) -> Result<Digest, CommandFailure> {
     let mut semantic_measurement = serde_json::to_value(measurement)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    let semantic_measurement = semantic_measurement
-        .as_object_mut()
-        .ok_or_else(|| CommandFailure::evidence("live measurement projection is not an object"))?;
-    if semantic_measurement.remove("wall_clock_ms").is_none()
-        || semantic_measurement.remove("model_wait_ms").is_none()
-    {
-        return Err(CommandFailure::evidence(
-            "live measurement timing projection is incomplete",
-        ));
+    if variant == LiveVariant::N7 {
+        let semantic_measurement = semantic_measurement.as_object_mut().ok_or_else(|| {
+            CommandFailure::evidence("live measurement projection is not an object")
+        })?;
+        if semantic_measurement.remove("wall_clock_ms").is_none()
+            || semantic_measurement.remove("model_wait_ms").is_none()
+        {
+            return Err(CommandFailure::evidence(
+                "live measurement timing projection is incomplete",
+            ));
+        }
     }
     canonical_digest(&(
         variant,
         terminal_state,
-        semantic_measurement,
+        &semantic_measurement,
         capture_digests,
         raw_capture_index_digest,
         verifier_report_digest,
@@ -6867,6 +6869,61 @@ else:
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn baseline_record_digest_binds_observed_timing() {
+        let fixture = fixture(LiveVariant::N4);
+        let output = execute_with_runners(
+            &fixture.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: Some(fixture.product.clone()),
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("captured N4 run");
+        let record: LiveRunRecord = serde_json::from_value(output.value).expect("live run record");
+
+        for variant in [LiveVariant::N0, LiveVariant::N4] {
+            let original = live_record_digest(
+                variant,
+                &record.terminal_state,
+                &record.measurement,
+                &record.capture_digests,
+                &record.raw_capture_index_digest,
+                record.verifier_report_digest.as_ref(),
+                &record.git_workspace,
+                &record.ao2_control_diagnostics,
+                &record.native_effect_observations,
+            )
+            .expect("original digest");
+            let mut wall_clock_changed = record.measurement.clone();
+            wall_clock_changed.wall_clock_ms = wall_clock_changed.wall_clock_ms.saturating_add(1);
+            let mut model_wait_changed = record.measurement.clone();
+            model_wait_changed.model_wait_ms = model_wait_changed.model_wait_ms.saturating_add(1);
+            for changed in [&wall_clock_changed, &model_wait_changed] {
+                assert_ne!(
+                    live_record_digest(
+                        variant,
+                        &record.terminal_state,
+                        changed,
+                        &record.capture_digests,
+                        &record.raw_capture_index_digest,
+                        record.verifier_report_digest.as_ref(),
+                        &record.git_workspace,
+                        &record.ao2_control_diagnostics,
+                        &record.native_effect_observations,
+                    )
+                    .expect("changed digest"),
+                    original,
+                    "{variant:?} digest ignored observed timing"
+                );
+            }
+        }
     }
 
     #[test]

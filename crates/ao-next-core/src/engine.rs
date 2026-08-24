@@ -242,6 +242,27 @@ where
                     );
                 }
             };
+            if let Some(journal) = journal {
+                let provider_result = journal.provider_state(request).and_then(|state| {
+                    if state.prepared_run_digest.is_some() {
+                        journal.record_adapter_turn_normalized(request, &canonical_digest(&turn)?)
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(error) = provider_result {
+                    return transition_and_finish(
+                        lifecycle,
+                        identity,
+                        metrics,
+                        events,
+                        verifier_report_digest,
+                        RunState::Failed,
+                        "journal_failure",
+                        &error.to_string(),
+                    );
+                }
+            }
             metrics.turns = metrics.turns.saturating_add(1);
             if metrics.usage.checked_accumulate(&turn.usage).is_none() {
                 return transition_and_finish(

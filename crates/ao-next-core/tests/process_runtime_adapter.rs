@@ -477,6 +477,83 @@ fn live_visibility_binds_visible_fixtures_without_private_paths() {
 }
 
 #[test]
+fn live_visibility_omits_only_an_ordinary_root_git_directory() {
+    let visible = TempDir::new().expect("visible fixtures");
+    let empty_digest = canonical_digest(&Vec::<serde_json::Value>::new()).expect("empty digest");
+    let source_digest = canonical_digest(&[serde_json::json!({
+        "path": "source.txt",
+        "sha256": digest_bytes(b"source\n"),
+        "size_bytes": 7
+    })])
+    .expect("source digest");
+
+    let prepared = TempDir::new().expect("prepared workspace");
+    std::fs::write(prepared.path().join("source.txt"), b"source\n").expect("source");
+    std::fs::create_dir(prepared.path().join(".git")).expect("root Git directory");
+    std::fs::write(prepared.path().join(".git/HEAD"), b"ref: refs/heads/main\n")
+        .expect("Git control file");
+    ProviderVisibility::from_live_roots(
+        prepared.path(),
+        &source_digest,
+        visible.path(),
+        &empty_digest,
+        64 * 1024,
+    )
+    .expect("ordinary root .git is omitted");
+
+    let visible_control = TempDir::new().expect("visible control root");
+    std::fs::create_dir(visible_control.path().join(".git")).expect("visible root Git directory");
+    assert!(
+        ProviderVisibility::from_live_roots(
+            prepared.path(),
+            &source_digest,
+            visible_control.path(),
+            &empty_digest,
+            64 * 1024,
+        )
+        .is_err(),
+        "only the workspace root .git may be omitted"
+    );
+
+    for control_path in ["nested/.git", ".GIT"] {
+        let workspace = TempDir::new().expect("control workspace");
+        std::fs::write(workspace.path().join("source.txt"), b"source\n").expect("source");
+        std::fs::create_dir_all(workspace.path().join(control_path)).expect("control directory");
+        assert!(
+            ProviderVisibility::from_live_roots(
+                workspace.path(),
+                &source_digest,
+                visible.path(),
+                &empty_digest,
+                64 * 1024,
+            )
+            .is_err(),
+            "{control_path} must remain rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let workspace = TempDir::new().expect("symlink workspace");
+        let target = TempDir::new().expect("Git target");
+        std::fs::write(workspace.path().join("source.txt"), b"source\n").expect("source");
+        std::os::unix::fs::symlink(target.path(), workspace.path().join(".git"))
+            .expect("root Git symlink");
+        assert!(
+            ProviderVisibility::from_live_roots(
+                workspace.path(),
+                &source_digest,
+                visible.path(),
+                &empty_digest,
+                64 * 1024,
+            )
+            .is_err(),
+            "root .git symlink must remain rejected"
+        );
+    }
+}
+
+#[test]
 fn claude_process_adapter_runs_through_engine_with_trusted_envelope_usage() {
     let workspace = TempDir::new().expect("workspace");
     let schema = workspace.path().join("turn.schema.json");

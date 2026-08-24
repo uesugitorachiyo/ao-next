@@ -1,6 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt as _;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -16,6 +19,9 @@ use crate::contracts::{
 use crate::engine::MAX_EFFECTS_PER_TURN;
 use crate::evidence::digest_bytes;
 use crate::strict_json::{canonical_digest, decode_strict_json};
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderVisibleFile {
@@ -44,9 +50,9 @@ impl ProviderVisibility {
         visible_fixture_digest: &Digest,
         maximum_bytes: usize,
     ) -> Result<Self, AdapterError> {
-        let (source_files, source_identity) = visible_files(workspace_root, maximum_bytes)?;
+        let (source_files, source_identity) = visible_files(workspace_root, maximum_bytes, true)?;
         let (visible_fixtures, fixture_identity) =
-            visible_files(visible_fixture_root, maximum_bytes)?;
+            visible_files(visible_fixture_root, maximum_bytes, false)?;
         if &canonical_digest(&source_identity)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?
             != workspace_seed_digest
@@ -62,7 +68,7 @@ impl ProviderVisibility {
     }
 
     fn from_workspace(root: &Path, maximum_bytes: usize) -> Result<Self, AdapterError> {
-        let (source_files, _) = visible_files(root, maximum_bytes)?;
+        let (source_files, _) = visible_files(root, maximum_bytes, true)?;
         Self::new(source_files, Vec::new())
     }
 
@@ -605,6 +611,7 @@ fn build_prompt(
 fn visible_files(
     root: &Path,
     maximum_bytes: usize,
+    omit_root_git: bool,
 ) -> Result<(Vec<ProviderVisibleFile>, Vec<VisibleFileIdentity>), AdapterError> {
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| AdapterError::Runtime(error.to_string()))?;
@@ -614,7 +621,7 @@ fn visible_files(
         ));
     }
     let mut paths = Vec::new();
-    collect_visible_paths(root, root, &mut paths)?;
+    collect_visible_paths(root, root, omit_root_git, &mut paths)?;
     paths.sort();
     let mut total = 0_usize;
     let mut files = Vec::with_capacity(paths.len());
@@ -662,6 +669,7 @@ fn visible_files(
 fn collect_visible_paths(
     root: &Path,
     directory: &Path,
+    omit_root_git: bool,
     paths: &mut Vec<PathBuf>,
 ) -> Result<(), AdapterError> {
     let mut entries = std::fs::read_dir(directory)
@@ -671,10 +679,6 @@ fn collect_visible_paths(
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        safe_relative_text(relative)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
         if metadata.file_type().is_symlink() {
@@ -682,8 +686,24 @@ fn collect_visible_paths(
                 "provider-visible inventory contains a symlink".into(),
             ));
         }
+        #[cfg(windows)]
+        let reparse_point = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        #[cfg(not(windows))]
+        let reparse_point = false;
+        if omit_root_git
+            && directory == root
+            && entry.file_name() == ".git"
+            && metadata.is_dir()
+            && !reparse_point
+        {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        safe_relative_text(relative)?;
         if metadata.is_dir() {
-            collect_visible_paths(root, &path, paths)?;
+            collect_visible_paths(root, &path, omit_root_git, paths)?;
         } else if metadata.is_file() {
             paths.push(path);
         } else {

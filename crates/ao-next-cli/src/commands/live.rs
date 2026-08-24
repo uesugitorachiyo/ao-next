@@ -21,13 +21,15 @@ use ao_next_core::adapter::{
     TokenUsage,
 };
 use ao_next_core::adapter::{EffectObservation, codex};
+use ao_next_core::capture::{CaptureIndexStore, CapturePublication};
 use ao_next_core::contracts::{
-    Capability, Digest, ExternalEffectPolicy, NetworkPolicy, RunRequest, RunState,
+    Capability, Digest, ExternalEffectPolicy, NetworkPolicy, PreparedRunReceipt, RunRequest,
+    RunState,
 };
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOutcome};
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::recovery::CheckpointJournal;
+use ao_next_core::recovery::{CheckpointIdentity, CheckpointJournal};
 use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{CommandEngineVerifier, CommandVerifierProfile};
 use ao_next_eval::corpus::{
@@ -665,7 +667,7 @@ pub(super) fn reject_provider_free_input(
     }
 }
 
-struct CaptureFirstRunner<R> {
+struct CaptureFirstRunner<'a, R> {
     runner: R,
     raw_capture_root: PathBuf,
     capture_context: CaptureContext,
@@ -673,9 +675,12 @@ struct CaptureFirstRunner<R> {
     retained_failure: Arc<Mutex<Option<CommandFailure>>>,
     runtime: String,
     max_tokens: u64,
+    journal: Option<&'a CheckpointJournal>,
+    request: &'a RunRequest,
+    prepared_run_digest: Digest,
 }
 
-impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
+impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
     fn run(
         &mut self,
         invocation: &PreparedInvocation,
@@ -691,14 +696,42 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
                 "duplicate provider capture identity".into(),
             ));
         }
+        if let Some(journal) = self.journal {
+            journal
+                .provider_may_start(self.request)
+                .and_then(|()| {
+                    journal.record_provider_request_intent(self.request, &self.prepared_run_digest)
+                })
+                .and_then(|()| {
+                    journal.record_provider_process_started(
+                        self.request,
+                        &invocation_digest(invocation)
+                            .map_err(|error| std::io::Error::other(error.message))?,
+                    )
+                })
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
         let output = self.runner.run(invocation, cancellation)?;
-        let digest = persist_raw_captures(
+        let (index, raw_digest) = retain_raw_capture_files(
             &self.raw_capture_root,
             &self.capture_context,
             &[],
             std::slice::from_ref(&output),
         )
         .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        if let Some(journal) = self.journal {
+            journal
+                .record_provider_output_retained(self.request, &raw_digest)
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
+        let publication = publish_raw_capture_index(&self.raw_capture_root, &index)
+            .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        let digest = publication.digest().clone();
+        if let Some(journal) = self.journal {
+            journal
+                .record_provider_capture_published(self.request, &digest)
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
         *self
             .retained_index
             .lock()
@@ -709,6 +742,18 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
             .map_err(|error| InvocationError::Io(error.to_string()))?
             .clone()
             .ok_or_else(|| InvocationError::Io("retained capture index is missing".into()))?;
+        verify_raw_capture_index(
+            &self.raw_capture_root,
+            &self.capture_context,
+            &expected_digest,
+            self.capture_context.maximum_output_bytes,
+        )
+        .map_err(|error| InvocationError::Io(error.message))?;
+        if let Some(journal) = self.journal {
+            journal
+                .record_provider_capture_verified(self.request, &expected_digest)
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
         if let Err(error) = verify_and_gate_capture(
             &self.raw_capture_root,
             &self.capture_context,
@@ -727,6 +772,36 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
         }
         Ok(output)
     }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderInvocationIdentity<'a> {
+    schema_version: &'static str,
+    program: &'a str,
+    args: &'a [String],
+    working_directory_digest: Digest,
+    stdin_digest: Digest,
+    environment_key_names: Vec<&'a str>,
+}
+
+fn invocation_digest(invocation: &PreparedInvocation) -> Result<Digest, CommandFailure> {
+    let working_directory_digest = canonical_digest(&invocation.cwd)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let environment_key_names = invocation
+        .environment
+        .as_ref()
+        .map(|environment| environment.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    canonical_digest(&ProviderInvocationIdentity {
+        schema_version: "ao.next.provider-invocation.v1",
+        program: &invocation.program,
+        args: &invocation.args,
+        working_directory_digest,
+        stdin_digest: digest_bytes(&invocation.stdin),
+        environment_key_names,
+    })
+    .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
 impl<R> SingleProviderProcess<R> {
@@ -763,19 +838,114 @@ pub(super) fn execute(
             "live provider calls require separate operator authorization",
         ));
     }
+    let prepared_run = match (variant, args.prepared_run.as_ref()) {
+        (LiveVariant::N7, Some(path)) => Some(path),
+        (LiveVariant::N7, None) => {
+            return Err(CommandFailure::invalid_input(
+                "--prepared-run is required for N7 live execution",
+            ));
+        }
+        (LiveVariant::N0 | LiveVariant::N4, Some(_)) => {
+            return Err(CommandFailure::invalid_input(
+                "--prepared-run is forbidden for live baselines",
+            ));
+        }
+        (LiveVariant::N0 | LiveVariant::N4, None) => None,
+    };
     let trusted = trusted_bindings(
         args.trusted_corpus_digest.as_deref(),
         args.trusted_verifier_profile_digest.as_deref(),
     )?;
-    let input: LiveRunInput = decode_file(&args.input)?;
-    validate_trusted_bindings(&input, &trusted)?;
-    execute_with_runners(
-        &input,
-        variant,
-        MeasurementOrigin::LiveProvider,
-        BoundedProcessRunner,
-        BoundedProcessRunner,
+    if let Some(prepared_run) = prepared_run {
+        let input_bytes = read_bounded_regular(&args.input)?;
+        let input: LiveRunInput = decode_strict_json(&input_bytes, 1024 * 1024)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        validate_trusted_bindings(&input, &trusted)?;
+        let receipt: PreparedRunReceipt = decode_file(prepared_run)?;
+        let prepared =
+            validate_prepared_run(&args.input, &input_bytes, &input, &receipt, Utc::now())?;
+        execute_with_prepared_runners(
+            &input,
+            variant,
+            MeasurementOrigin::LiveProvider,
+            BoundedProcessRunner,
+            BoundedProcessRunner,
+            Some(prepared),
+        )
+    } else {
+        let input: LiveRunInput = decode_file(&args.input)?;
+        validate_trusted_bindings(&input, &trusted)?;
+        execute_with_runners(
+            &input,
+            variant,
+            MeasurementOrigin::LiveProvider,
+            BoundedProcessRunner,
+            BoundedProcessRunner,
+        )
+    }
+}
+
+fn validate_prepared_run(
+    input_path: &Path,
+    input_bytes: &[u8],
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    now: DateTime<Utc>,
+) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
+    let request_digest = canonical_digest(&input.request)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let journal_identity = CheckpointIdentity::from_request(&input.request)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let repository_root = std::fs::canonicalize(&input.request.workspace.root)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if receipt.schema_version != "ao.next.prepared-run.v1"
+        || receipt.run_id != input.request.run_id
+        || receipt.input_digest != digest_bytes(input_bytes)
+        || receipt.request_digest != request_digest
+        || receipt.repository_root != repository_root
+        || receipt.branch != GIT_BRANCH
+        || receipt.workspace_digest != input.request.workspace.seed_digest
+        || receipt.journal_identity_digest
+            != canonical_digest(&journal_identity)
+                .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+        || receipt.expires_at != input.request.authority.expires_at
+        || receipt.prepared_at >= receipt.expires_at
+        || receipt.expires_at <= now
+        || receipt.provider_calls != 0
+        || receipt.safe_to_execute
+    {
+        return Err(CommandFailure::invalid_input(
+            "prepared-run identity or expiry drifted",
+        ));
+    }
+    let git_workspace = GitWorkspaceIdentity {
+        repository_root: receipt.repository_root.clone(),
+        common_dir: receipt.common_directory.clone(),
+        head_commit: receipt.base_commit.clone(),
+        branch: GIT_BRANCH,
+        control_digest: receipt.control_digest.clone(),
+        index_digest: receipt.index_digest.clone(),
+    };
+    verify_git_workspace(&git_workspace, true)
+        .map_err(|error| CommandFailure::invalid_input(error.message))?;
+    validate_prepared_input(input, LiveVariant::N7, now, &git_workspace)?;
+    revalidate_prepared_live_input(input, &git_workspace)?;
+    let journal = CheckpointJournal::new(
+        execution_journal_root(input),
+        execution_journal_maximum_bytes(&input.request),
     )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    journal
+        .bind_pristine_request(&input.request)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if read_bounded_regular(input_path)? != input_bytes {
+        return Err(CommandFailure::invalid_input(
+            "live input drifted after prepared-run validation",
+        ));
+    }
+    let prepared_run_digest = canonical_digest(receipt)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    Ok((git_workspace, prepared_run_digest))
 }
 
 pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, CommandFailure> {
@@ -1051,9 +1221,35 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     provider_runner: P,
     verifier_runner: V,
 ) -> Result<CommandOutput, CommandFailure> {
+    execute_with_prepared_runners(
+        input,
+        variant,
+        measurement_origin,
+        provider_runner,
+        verifier_runner,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the run record is assembled once so every measured field remains visibly source-bound"
+)]
+fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
+    input: &LiveRunInput,
+    variant: LiveVariant,
+    measurement_origin: MeasurementOrigin,
+    provider_runner: P,
+    verifier_runner: V,
+    prepared: Option<(GitWorkspaceIdentity, Digest)>,
+) -> Result<CommandOutput, CommandFailure> {
     let started_at = Utc::now();
     let started = Instant::now();
-    let validated = validate_input(input, variant, started_at)?;
+    let validated = if let Some((git_workspace, _)) = &prepared {
+        validate_prepared_input(input, variant, started_at, git_workspace)?
+    } else {
+        validate_input(input, variant, started_at)?
+    };
     let provider_visibility = if variant == LiveVariant::N7 {
         Some(
             ProviderVisibility::from_live_roots(
@@ -1068,11 +1264,23 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     } else {
         None
     };
-    let git_workspace = prepare_git_workspace(
-        &input.request.workspace.root,
-        &input.request.authority.allowed_roots,
-        &validated.task.workspace_seed_digest,
-    )?;
+    let (git_workspace, prepared_run_digest) = if let Some(prepared) = prepared {
+        if variant != LiveVariant::N7 {
+            return Err(CommandFailure::invalid_input(
+                "prepared-run context is restricted to N7",
+            ));
+        }
+        prepared
+    } else {
+        let git_workspace = prepare_git_workspace(
+            &input.request.workspace.root,
+            &input.request.authority.allowed_roots,
+            &validated.task.workspace_seed_digest,
+        )?;
+        let digest = canonical_digest(&git_workspace)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        (git_workspace, digest)
+    };
     let cancellation = CancellationToken::new();
     let invocation_limits = invocation_limits(&input.request)?;
     let mut verifier = CommandEngineVerifier::new(
@@ -1088,6 +1296,15 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     let capture_context = capture_context(input, variant);
     verify_git_workspace(&git_workspace, true)?;
     revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
+    let journal = (variant == LiveVariant::N7)
+        .then(|| {
+            CheckpointJournal::new(
+                execution_journal_root(input),
+                execution_journal_maximum_bytes(&input.request),
+            )
+        })
+        .transpose()
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
 
     let execution = match variant {
         LiveVariant::N0 => execute_n0(
@@ -1109,10 +1326,14 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
                 retained_failure: retained_failure.clone(),
                 runtime: input.request.model_profile.runtime.clone(),
                 max_tokens: input.request.limits.max_tokens,
+                journal: journal.as_ref(),
+                request: &input.request,
+                prepared_run_digest: prepared_run_digest.clone(),
             },
             &mut verifier,
             cancellation.clone(),
             invocation_limits,
+            journal.as_ref().expect("N7 journal constructed"),
         ),
         LiveVariant::N4 => execute_n4(
             input,
@@ -1124,6 +1345,9 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
                 retained_failure: retained_failure.clone(),
                 runtime: input.request.model_profile.runtime.clone(),
                 max_tokens: input.request.limits.max_tokens,
+                journal: None,
+                request: &input.request,
+                prepared_run_digest,
             },
             &mut verifier,
             &cancellation,
@@ -1491,12 +1715,15 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         stdout: run.stdout,
         stderr: run.stderr,
     };
-    let retained_capture_index = persist_raw_captures(
+    let (index, _) = retain_raw_capture_files(
         &input.raw_capture_root,
         capture_context,
         &[],
         std::slice::from_ref(&provider_output),
     )?;
+    let retained_capture_index = publish_raw_capture_index(&input.raw_capture_root, &index)?
+        .digest()
+        .clone();
     let capture = verify_and_gate_capture(
         &input.raw_capture_root,
         capture_context,
@@ -1804,6 +2031,7 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     verifier: &mut CommandEngineVerifier<V>,
     cancellation: CancellationToken,
     limits: InvocationLimits,
+    journal: &CheckpointJournal,
 ) -> Result<LiveExecution, CommandFailure> {
     let config = ProcessAdapterConfig::from_request_with_visibility(
         &input.request,
@@ -1821,13 +2049,8 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
         usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
     );
-    let journal = CheckpointJournal::new(
-        execution_journal_root(input),
-        execution_journal_maximum_bytes(&input.request),
-    )
-    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let outcome =
-        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, &journal);
+        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, journal);
     let terminal_state = outcome.terminal_state.clone();
     Ok((
         terminal_state,
@@ -1910,15 +2133,33 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
     ))
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the fail-closed intake audit stays linear so all identity comparisons remain visible"
-)]
 fn validate_input(
     input: &LiveRunInput,
     variant: LiveVariant,
     now: chrono::DateTime<Utc>,
 ) -> Result<ValidatedInput<'_>, CommandFailure> {
+    validate_input_with_git(input, variant, now, None)
+}
+
+fn validate_prepared_input<'a>(
+    input: &'a LiveRunInput,
+    variant: LiveVariant,
+    now: chrono::DateTime<Utc>,
+    git_workspace: &GitWorkspaceIdentity,
+) -> Result<ValidatedInput<'a>, CommandFailure> {
+    validate_input_with_git(input, variant, now, Some(git_workspace))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fail-closed intake audit stays linear so all identity comparisons remain visible"
+)]
+fn validate_input_with_git<'a>(
+    input: &'a LiveRunInput,
+    variant: LiveVariant,
+    now: chrono::DateTime<Utc>,
+    git_workspace: Option<&GitWorkspaceIdentity>,
+) -> Result<ValidatedInput<'a>, CommandFailure> {
     if input.schema_version != "ao.next.live-run-input.v1"
         || input.task_id.trim().is_empty()
         || input.trial_id.trim().is_empty()
@@ -2014,9 +2255,10 @@ fn validate_input(
         (_, None) => {}
     }
     validate_objective_file(input, task)?;
-    let initial_files = snapshot_tree(
+    let initial_files = snapshot_product_tree(
         &input.request.workspace.root,
         input.request.limits.max_input_bytes,
+        git_workspace,
     )?;
     if canonical_digest(&initial_files)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
@@ -2291,12 +2533,12 @@ struct RawCaptureIndexEntry {
     stderr_size_bytes: u64,
 }
 
-fn persist_raw_captures(
+fn retain_raw_capture_files(
     root: &Path,
     context: &CaptureContext,
     captures: &[RuntimeCapture],
     outputs: &[InvocationOutput],
-) -> Result<Digest, CommandFailure> {
+) -> Result<(RawCaptureIndex, Digest), CommandFailure> {
     if outputs.is_empty() {
         return Err(CommandFailure::evidence(
             "raw provider capture coverage is incomplete",
@@ -2353,31 +2595,30 @@ fn persist_raw_captures(
     };
     let digest =
         canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    let bytes =
-        serde_json::to_vec(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    publish_private_index(root, &bytes, true)?;
-    Ok(digest)
+    Ok((index, digest))
 }
 
-fn publish_private_index(root: &Path, bytes: &[u8], publish: bool) -> Result<(), CommandFailure> {
-    let incomplete = root.join("capture-index.json.incomplete");
-    let completed = root.join("capture-index.json");
-    write_private_new(&incomplete, bytes)?;
-    if !publish {
-        return Err(CommandFailure::evidence(
-            "capture index publication was interrupted",
-        ));
+fn publish_raw_capture_index(
+    root: &Path,
+    index: &RawCaptureIndex,
+) -> Result<CapturePublication, CommandFailure> {
+    let bytes =
+        canonical_json_bytes(index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let store = CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let publication = store
+        .publish(&bytes)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = root.join("capture-index.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| std::fs::File::open(path)?.sync_all())
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     }
-    std::fs::hard_link(&incomplete, &completed)
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    std::fs::File::open(root)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    std::fs::remove_file(&incomplete)
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    std::fs::File::open(root)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| CommandFailure::evidence(error.to_string()))
+    Ok(publication)
 }
 
 fn verify_raw_capture_index(
@@ -4247,7 +4488,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn digest_bound_fake_executable_runs_the_real_n7_provider_free_path() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the one-process integration keeps preparation and exact journal order visible"
+    )]
+    fn provider_journal_orders_the_real_n7_provider_free_path() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let n7 = fixture(LiveVariant::N7);
@@ -4317,10 +4562,15 @@ mod tests {
         );
         let journal_root = execution_journal_root(&n7.input);
         assert!(journal_root.join("execution-identity.json").is_file());
-        let mut event_kinds = std::fs::read_dir(journal_root.join("execution-events"))
+        let mut event_paths = std::fs::read_dir(journal_root.join("execution-events"))
             .expect("execution events")
-            .map(|entry| {
-                let bytes = std::fs::read(entry.expect("event entry").path()).expect("event");
+            .map(|entry| entry.expect("event entry").path())
+            .collect::<Vec<_>>();
+        event_paths.sort();
+        let event_kinds = event_paths
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(path).expect("event");
                 serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")["kind"]
                     ["kind"]
                     .as_str()
@@ -4328,15 +4578,20 @@ mod tests {
                     .to_string()
             })
             .collect::<Vec<_>>();
-        event_kinds.sort();
         assert_eq!(
             event_kinds,
             [
-                "effect_completed",
+                "provider_request_intent",
+                "provider_process_started",
+                "provider_output_retained",
+                "provider_capture_index_published",
+                "provider_capture_verified",
+                "adapter_turn_normalized",
                 "effect_intent",
-                "terminal_published",
+                "effect_completed",
                 "verification_started",
                 "verifier_recorded",
+                "terminal_published",
             ]
         );
         let terminal_records = std::fs::read_dir(&journal_root)
@@ -6022,7 +6277,7 @@ else:
     }
 
     #[test]
-    fn capture_retention_rejects_interruption_duplicates_bounds_paths_and_short_writes() {
+    fn capture_retention_rejects_duplicates_bounds_paths_and_short_writes() {
         struct ZeroWriter;
         impl std::io::Write for ZeroWriter {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -6042,33 +6297,22 @@ else:
             std::io::ErrorKind::WriteZero
         );
 
-        let interrupted = TempDir::new().expect("interrupted capture root");
-        write_private_new(&interrupted.path().join("capture-000.stdout"), b"stdout")
-            .expect("stdout");
-        write_private_new(&interrupted.path().join("capture-000.stderr"), b"stderr")
-            .expect("stderr");
-        assert!(publish_private_index(interrupted.path(), b"{}", false).is_err());
-        assert!(
-            interrupted
-                .path()
-                .join("capture-index.json.incomplete")
-                .is_file()
-        );
-        assert!(!interrupted.path().join("capture-index.json").exists());
-        assert!(interrupted.path().join("capture-000.stdout").is_file());
-
         let duplicate = fixture(LiveVariant::N4);
         let context = capture_context(&duplicate.input, LiveVariant::N4);
         let output = codex_output(None);
-        let first = persist_raw_captures(
+        let (index, _) = retain_raw_capture_files(
             &duplicate.input.raw_capture_root,
             &context,
             &[],
             std::slice::from_ref(&output),
         )
         .expect("first immutable capture");
+        let first = publish_raw_capture_index(&duplicate.input.raw_capture_root, &index)
+            .expect("first immutable index")
+            .digest()
+            .clone();
         assert!(
-            persist_raw_captures(
+            retain_raw_capture_files(
                 &duplicate.input.raw_capture_root,
                 &context,
                 &[],
@@ -6088,7 +6332,7 @@ else:
         let mut context = capture_context(&oversized.input, LiveVariant::N4);
         context.maximum_output_bytes = 1;
         assert!(
-            persist_raw_captures(
+            retain_raw_capture_files(
                 &oversized.input.raw_capture_root,
                 &context,
                 &[],
@@ -6107,7 +6351,7 @@ else:
             0
         );
 
-        assert!(checked_capture_path(interrupted.path(), "../escape").is_err());
+        assert!(checked_capture_path(&duplicate.input.raw_capture_root, "../escape").is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::{PermissionsExt as _, symlink};

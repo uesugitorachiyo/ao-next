@@ -46,6 +46,8 @@ pub struct LiveRunArgs {
     #[arg(long)]
     pub input: PathBuf,
     #[arg(long)]
+    pub prepared_run: Option<PathBuf>,
+    #[arg(long)]
     pub trusted_corpus_digest: Option<String>,
     #[arg(long)]
     pub trusted_verifier_profile_digest: Option<String>,

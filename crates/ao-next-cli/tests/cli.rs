@@ -586,7 +586,7 @@ fn live_commands_deny_before_input_or_process_resolution() {
 fn live_commands_require_operator_owned_corpus_and_verifier_anchors() {
     let temporary = TempDir::new().expect("temporary");
     let missing_input = temporary.path().join("missing-live-input.json");
-    for command in ["run-current-ao-baseline", "run-live", "run-direct-baseline"] {
+    for command in ["run-current-ao-baseline", "run-direct-baseline"] {
         let output = run_with_live_environment(
             &[command, "--input", missing_input.to_str().expect("path")],
             temporary.path(),
@@ -594,6 +594,18 @@ fn live_commands_require_operator_owned_corpus_and_verifier_anchors() {
         );
         assert_json_error(&output, 2, "usage");
     }
+    let output = run_with_live_environment(
+        &[
+            "run-live",
+            "--input",
+            missing_input.to_str().expect("path"),
+            "--prepared-run",
+            missing_input.to_str().expect("path"),
+        ],
+        temporary.path(),
+        Some("operator-authorized"),
+    );
+    assert_json_error(&output, 2, "usage");
     let output = run(&[
         "preflight-live-input",
         "--input",
@@ -920,6 +932,170 @@ fn run_prepare_live(
         "--out",
         receipt_path.to_str().expect("receipt path"),
     ])
+}
+
+#[cfg(unix)]
+fn fake_provider_bin(fixture: &PrepareLiveFixture) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let bin = fixture
+        .input_path
+        .parent()
+        .expect("protected root")
+        .join("bin");
+    std::fs::create_dir(&bin).expect("provider bin");
+    let provider = bin.join("codex");
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\nprintf x >> '{}'\nexit 1\n",
+            fixture.provider_marker.display()
+        ),
+    )
+    .expect("fake provider");
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700))
+        .expect("fake provider permissions");
+    bin
+}
+
+#[cfg(unix)]
+fn run_prepared_live(fixture: &PrepareLiveFixture, receipt_path: &Path, bin_path: &Path) -> Output {
+    run_with_live_environment(
+        &[
+            "run-live",
+            "--input",
+            fixture.input_path.to_str().expect("input"),
+            "--prepared-run",
+            receipt_path.to_str().expect("prepared run"),
+            "--trusted-corpus-digest",
+            fixture.corpus_digest.as_str(),
+            "--trusted-verifier-profile-digest",
+            fixture.verifier_digest.as_str(),
+        ],
+        bin_path,
+        Some("operator-authorized"),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_run_admits_one_valid_n7_provider_process() {
+    let fixture = prepare_live_fixture();
+    let receipt_path = fixture.input_path.with_file_name("prepared-run.json");
+    let prepared = run_prepare_live(
+        &fixture,
+        &receipt_path,
+        fixture.corpus_digest.as_str(),
+        fixture.verifier_digest.as_str(),
+    );
+    assert_eq!(prepared.status.code(), Some(0));
+    let bin_path = fake_provider_bin(&fixture);
+
+    let output = run_prepared_live(&fixture, &receipt_path, &bin_path);
+
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_json_error(&output, 4, "runtime_failure");
+    assert_eq!(
+        std::fs::read(&fixture.provider_marker).expect("provider marker"),
+        b"x"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_run_is_required_for_n7_and_forbidden_for_baselines() {
+    let fixture = prepare_live_fixture();
+    let bin_path = fake_provider_bin(&fixture);
+    let missing = run_with_live_environment(
+        &[
+            "run-live",
+            "--input",
+            fixture.input_path.to_str().expect("input"),
+        ],
+        &bin_path,
+        Some("operator-authorized"),
+    );
+    assert_json_error(&missing, 3, "invalid_input");
+    assert!(!fixture.provider_marker.exists());
+
+    for command in ["run-current-ao-baseline", "run-direct-baseline"] {
+        let forbidden = run_with_live_environment(
+            &[
+                command,
+                "--input",
+                fixture.input_path.to_str().expect("input"),
+                "--prepared-run",
+                fixture.input_path.to_str().expect("prepared run"),
+            ],
+            &bin_path,
+            Some("operator-authorized"),
+        );
+        assert_json_error(&forbidden, 3, "invalid_input");
+        assert!(!fixture.provider_marker.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_run_rejects_identity_drift_before_provider_spawn() {
+    for drift in [
+        "input_digest",
+        "request_digest",
+        "git_head",
+        "branch",
+        "index_digest",
+        "control_digest",
+        "workspace_digest",
+        "journal_identity",
+        "expiry",
+        "run_id",
+    ] {
+        let fixture = prepare_live_fixture();
+        let receipt_path = fixture.input_path.with_file_name("prepared-run.json");
+        let prepared = run_prepare_live(
+            &fixture,
+            &receipt_path,
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        );
+        assert_eq!(prepared.status.code(), Some(0), "prepare {drift}");
+        let mut receipt: PreparedRunReceipt =
+            serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt bytes"))
+                .expect("receipt");
+        match drift {
+            "input_digest" => receipt.input_digest = digest(ZERO_DIGEST),
+            "request_digest" => receipt.request_digest = digest(ZERO_DIGEST),
+            "git_head" => receipt.base_commit = "0".repeat(40),
+            "branch" => receipt.branch = "drifted-branch".into(),
+            "index_digest" => receipt.index_digest = digest(ZERO_DIGEST),
+            "control_digest" => receipt.control_digest = digest(ZERO_DIGEST),
+            "workspace_digest" => receipt.workspace_digest = digest(ZERO_DIGEST),
+            "journal_identity" => receipt.journal_identity_digest = digest(ZERO_DIGEST),
+            "expiry" => receipt.expires_at = Utc::now() - Duration::seconds(1),
+            "run_id" => receipt.run_id = "drifted-run".into(),
+            _ => unreachable!(),
+        }
+        std::fs::write(
+            &receipt_path,
+            canonical_json_bytes(&receipt).expect("canonical drifted receipt"),
+        )
+        .expect("drifted receipt");
+        let bin_path = fake_provider_bin(&fixture);
+
+        let output = run_prepared_live(&fixture, &receipt_path, &bin_path);
+
+        assert_json_error(&output, 3, "invalid_input");
+        assert!(
+            !fixture.provider_marker.exists(),
+            "provider spawned for {drift}"
+        );
+    }
 }
 
 fn git_head(workspace: &Path) -> String {

@@ -558,6 +558,82 @@ fn durable_completion_is_reused_without_executing_the_effect_again() {
 }
 
 #[test]
+fn durable_provider_turn_is_normalized_before_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(workspace.path());
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+    let prepared = digest_bytes(b"prepared run");
+    let invocation = digest_bytes(b"provider invocation");
+    let raw = digest_bytes(b"provider output");
+    let index = digest_bytes(b"capture index");
+    journal
+        .record_provider_request_intent(&request, &prepared)
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &invocation)
+        .expect("provider started");
+    journal
+        .record_provider_output_retained(&request, &raw)
+        .expect("provider output retained");
+    journal
+        .record_provider_capture_published(&request, &index)
+        .expect("capture published");
+    journal
+        .record_provider_capture_verified(&request, &index)
+        .expect("capture verified");
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Verify]))]);
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome =
+        DirectEngine::new(&broker).run_durable(&request, &mut adapter, &mut verifier, &journal);
+
+    assert_eq!(outcome.terminal_state, RunState::Passed);
+    let state = journal.provider_state(&request).expect("provider state");
+    assert!(state.adapter_turn_digest.is_some());
+}
+
+#[test]
+fn durable_provider_turn_journal_failure_stops_before_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(workspace.path());
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+    let index = digest_bytes(b"capture index");
+    journal
+        .record_provider_request_intent(&request, &digest_bytes(b"prepared run"))
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &digest_bytes(b"provider invocation"))
+        .expect("provider started");
+    journal
+        .record_provider_output_retained(&request, &digest_bytes(b"provider output"))
+        .expect("provider output retained");
+    journal
+        .record_provider_capture_published(&request, &index)
+        .expect("capture published");
+    journal
+        .record_provider_capture_verified(&request, &index)
+        .expect("capture verified");
+    std::fs::write(
+        recovery.path().join("execution-events/invalid.json"),
+        b"invalid",
+    )
+    .expect("invalid journal event");
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Verify]))]);
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome =
+        DirectEngine::new(&broker).run_durable(&request, &mut adapter, &mut verifier, &journal);
+
+    assert_eq!(outcome.terminal_state, RunState::Failed);
+    assert_eq!(outcome.failure_code.as_deref(), Some("journal_failure"));
+    assert_eq!(verifier.calls, 0);
+}
+
+#[test]
 fn admitted_native_read_is_observed_before_the_same_worker_continues() {
     let workspace = TempDir::new().expect("workspace");
     let source = workspace.path().join("source.txt");

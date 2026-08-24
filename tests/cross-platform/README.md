@@ -2,7 +2,7 @@
 
 Run this provider-free procedure on a physical Windows host after capture publication or recovery changes. Hosted Windows remains required and does not replace this check.
 
-Create a new empty disposable NTFS root whose path contains spaces, place the checkout beneath it, and create a second empty evidence root outside it. Confirm `AO_NEXT_LIVE_PROVIDER_CALLS`, `AO_NEXT_PROVIDER_FREE_PROGRAM`, and `AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST` are absent. From the checkout, run:
+Create a new empty disposable NTFS root whose path contains an ASCII space, place the checkout directly beneath it as its only entry, and create a second empty evidence root outside it. Pre-cache the locked Cargo dependencies; the harness runs Cargo offline. Confirm `AO_NEXT_LIVE_PROVIDER_CALLS`, `AO_NEXT_PROVIDER_FREE_PROGRAM`, and `AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST` are absent. From the checkout, run:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\cross-platform\qualify-recovery.ps1 `

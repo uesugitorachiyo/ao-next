@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 #[cfg(windows)]
@@ -413,6 +415,8 @@ struct ExistingJournalBinding {
     identity: OpenedJournalPath,
     events: OpenedJournalPath,
     event_files: BTreeMap<PathBuf, OpenedJournalPath>,
+    #[cfg(unix)]
+    terminal_files: BTreeMap<PathBuf, OpenedJournalPath>,
     initializing: bool,
 }
 
@@ -480,6 +484,8 @@ impl CheckpointJournal {
             identity: identity_opened,
             events: events_opened,
             event_files: BTreeMap::new(),
+            #[cfg(unix)]
+            terminal_files: BTreeMap::new(),
             initializing: true,
         }));
         let journal = Self {
@@ -487,7 +493,8 @@ impl CheckpointJournal {
             maximum_bytes,
             mode: JournalMode::ExistingOnly(binding.clone()),
         };
-        journal.load_execution_events()?;
+        let events = journal.load_execution_events()?;
+        journal.terminal_record(&events)?;
         binding
             .lock()
             .map_err(|error| RecoveryError::Io(error.to_string()))?
@@ -1011,7 +1018,7 @@ impl CheckpointJournal {
             .strip_prefix("sha256:")
             .ok_or(RecoveryError::EventDigestMismatch)?;
         let path = self.root.join(format!("terminal-{digest_hex}.json"));
-        durable_create_new(&path, bytes)?;
+        self.create_terminal_path(&path, bytes)?;
         self.append_execution_event(JournalEventKind::TerminalPublished {
             record_digest: digest.clone(),
         })?;
@@ -1034,21 +1041,12 @@ impl CheckpointJournal {
         if recorded.len() > 1 {
             return Err(RecoveryError::EventSequenceInvalid);
         }
-        let mut files = std::fs::read_dir(&self.root)?
-            .map(|entry| entry.map(|value| value.path()))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("terminal-"))
-            })
-            .collect::<Vec<_>>();
-        files.sort();
+        let mut files = self.terminal_files()?;
+        files.sort_by(|left, right| left.0.cmp(&right.0));
         if files.len() > 1 {
             return Err(RecoveryError::EventDigestMismatch);
         }
-        let Some(path) = files.pop() else {
+        let Some((path, opened)) = files.pop() else {
             return if recorded.is_empty() {
                 Ok(None)
             } else {
@@ -1071,13 +1069,126 @@ impl CheckpointJournal {
             .ok_or(RecoveryError::EventDigestMismatch)?;
         let digest = Digest::new(format!("sha256:{digest_hex}"))
             .map_err(|_| RecoveryError::EventDigestMismatch)?;
-        let bytes = read_journal_regular(&path, self.maximum_bytes)?;
+        let bytes = opened.map_or_else(
+            || read_journal_regular(&path, self.maximum_bytes),
+            |opened| read_opened_regular(&opened, self.maximum_bytes),
+        )?;
         if digest_bytes(&bytes) != digest
             || recorded.first().is_some_and(|recorded| recorded != &digest)
         {
             return Err(RecoveryError::EventDigestMismatch);
         }
         Ok(Some((digest, bytes, !recorded.is_empty())))
+    }
+
+    fn terminal_files(&self) -> Result<Vec<(PathBuf, Option<OpenedJournalPath>)>, RecoveryError> {
+        #[cfg(unix)]
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let root = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?
+                .root
+                .clone();
+            require_same_journal_path(&self.root, true, &root)?;
+            let mut directory =
+                rustix::fs::Dir::read_from(root.anchor.as_ref()).map_err(std::io::Error::from)?;
+            let mut names = Vec::<OsString>::new();
+            for entry in &mut directory {
+                let entry = entry.map_err(std::io::Error::from)?;
+                let name = entry.file_name().to_bytes();
+                if name.starts_with(b"terminal-") {
+                    names.push(OsStr::from_bytes(name).to_os_string());
+                }
+            }
+            names.sort();
+            let mut files = Vec::with_capacity(names.len());
+            let mut observed = BTreeSet::new();
+            for name in names {
+                let path = self.root.join(&name);
+                let opened = open_existing_terminal_file(&root, &self.root, &name)?;
+                self.validate_terminal_path(&path, &opened)?;
+                observed.insert(path.clone());
+                files.push((path, Some(opened)));
+            }
+            require_same_journal_path(&self.root, true, &root)?;
+            if binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?
+                .terminal_files
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != observed
+            {
+                return Err(RecoveryError::EventDigestMismatch);
+            }
+            return Ok(files);
+        }
+
+        Ok(std::fs::read_dir(&self.root)?
+            .map(|entry| entry.map(|value| value.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("terminal-"))
+            })
+            .map(|path| (path, None))
+            .collect())
+    }
+
+    #[cfg(unix)]
+    fn validate_terminal_path(
+        &self,
+        path: &Path,
+        opened: &OpenedJournalPath,
+    ) -> Result<(), RecoveryError> {
+        let JournalMode::ExistingOnly(binding) = &self.mode else {
+            return Ok(());
+        };
+        let mut binding = binding
+            .lock()
+            .map_err(|error| RecoveryError::Io(error.to_string()))?;
+        if let Some(expected) = binding.terminal_files.get(path) {
+            if opened.fingerprint != expected.fingerprint {
+                return Err(RecoveryError::IdentityMismatch);
+            }
+        } else if binding.initializing {
+            binding
+                .terminal_files
+                .insert(path.to_path_buf(), opened.clone());
+        } else {
+            return Err(RecoveryError::EventDigestMismatch);
+        }
+        Ok(())
+    }
+
+    fn create_terminal_path(&self, path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
+        #[cfg(unix)]
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let root = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?
+                .root
+                .clone();
+            let name = path
+                .file_name()
+                .ok_or_else(|| RecoveryError::UnsafePath(path.to_path_buf()))?;
+            let opened = create_existing_terminal_file(&root, &self.root, name, bytes)?;
+            let mut binding = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?;
+            if binding
+                .terminal_files
+                .insert(path.to_path_buf(), opened)
+                .is_some()
+            {
+                return Err(RecoveryError::EventDigestMismatch);
+            }
+            return Ok(());
+        }
+        durable_create_new(path, bytes)
     }
 
     fn append_execution_event(&self, kind: JournalEventKind) -> Result<(), RecoveryError> {
@@ -1489,6 +1600,8 @@ fn read_journal_regular(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, Reco
 std::thread_local! {
     static BEFORE_EXISTING_APPEND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static BEFORE_EXISTING_TERMINAL_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[cfg(all(test, unix))]
@@ -1507,8 +1620,71 @@ fn run_existing_append_test_hook() {
     });
 }
 
+#[cfg(all(test, unix))]
+fn set_existing_terminal_create_test_hook(hook: Box<dyn FnOnce()>) {
+    BEFORE_EXISTING_TERMINAL_CREATE.with(|slot| {
+        assert!(slot.borrow_mut().replace(hook).is_none());
+    });
+}
+
+#[cfg(all(test, unix))]
+fn run_existing_terminal_create_test_hook() {
+    BEFORE_EXISTING_TERMINAL_CREATE.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(all(not(test), unix))]
+const fn run_existing_terminal_create_test_hook() {}
+
 #[cfg(all(not(test), unix))]
 const fn run_existing_append_test_hook() {}
+
+#[cfg(unix)]
+fn open_existing_terminal_file(
+    retained: &OpenedJournalPath,
+    public_root: &Path,
+    name: &OsStr,
+) -> Result<OpenedJournalPath, RecoveryError> {
+    require_same_journal_path(public_root, true, retained)?;
+    let file = rustix::fs::openat(
+        retained.anchor.as_ref(),
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)?;
+    let opened = opened_unix_journal_path(file, &public_root.join(name), false)?;
+    require_same_journal_path(public_root, true, retained)?;
+    Ok(opened)
+}
+
+#[cfg(unix)]
+fn create_existing_terminal_file(
+    retained: &OpenedJournalPath,
+    public_root: &Path,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<OpenedJournalPath, RecoveryError> {
+    require_same_journal_path(public_root, true, retained)?;
+    run_existing_terminal_create_test_hook();
+    let mut file = rustix::fs::openat(
+        retained.anchor.as_ref(),
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    let opened = opened_unix_journal_path(file, &public_root.join(name), false)?;
+    require_same_journal_path(public_root, true, retained)?;
+    Ok(opened)
+}
 
 #[cfg(unix)]
 fn create_existing_event_file(
@@ -1654,6 +1830,77 @@ fn durable_create_new(path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
 
 #[cfg(test)]
 mod reparse_tests {
+    #[cfg(unix)]
+    fn test_request(root: &std::path::Path) -> crate::contracts::RunRequest {
+        use std::collections::BTreeSet;
+
+        use crate::contracts::{
+            AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile,
+            NetworkPolicy, RunLimits, SourceIdentity, StructuredCommand, VerifierProfile,
+            WorkspaceIdentity,
+        };
+
+        let zero = Digest::new(format!("sha256:{}", "0".repeat(64))).expect("zero digest");
+        let one = Digest::new(format!("sha256:{}", "1".repeat(64))).expect("one digest");
+        let verifier = StructuredCommand {
+            program: "/usr/bin/true".into(),
+            args: Vec::new(),
+            timeout_ms: 1_000,
+        };
+        crate::contracts::RunRequest {
+            schema_version: "ao.next.run-request.v1".into(),
+            run_id: "terminal-root-swap".into(),
+            objective: "reject a swapped terminal root".into(),
+            source: SourceIdentity {
+                repository: "fixture".into(),
+                head: zero.clone(),
+            },
+            workspace: WorkspaceIdentity {
+                workspace_id: "workspace-terminal-root-swap".into(),
+                root: root.to_path_buf(),
+                seed_digest: one.clone(),
+            },
+            model_profile: ModelProfile {
+                runtime: "scripted".into(),
+                model_identifier: "fixture-model".into(),
+                reasoning_effort: "high".into(),
+                system_prompt_digest: zero.clone(),
+                tool_contract_digest: one.clone(),
+                context_limit: 32_000,
+                output_limit: 4_000,
+                adapter_version: "scripted-v1".into(),
+            },
+            authority: AuthorityEnvelope {
+                schema_version: "ao.next.authority-envelope.v1".into(),
+                issued_by: "operator".into(),
+                issued_at: "2026-08-05T00:00:00Z".parse().expect("issued at"),
+                expires_at: "2026-08-06T00:00:00Z".parse().expect("expires at"),
+                capabilities: BTreeSet::from([Capability::RunLocalProgram]),
+                allowed_roots: vec![root.to_path_buf()],
+                allowed_programs: BTreeSet::from([verifier.program.clone()]),
+                network: NetworkPolicy::Denied,
+                allowed_network_hosts: BTreeSet::new(),
+                external_effects: ExternalEffectPolicy::Denied,
+            },
+            verifier_profile: VerifierProfile {
+                profile_id: "complete-local".into(),
+                profile_digest: one,
+                commands: vec![verifier],
+                required_artifacts: Vec::new(),
+            },
+            policy_digest: zero,
+            limits: RunLimits {
+                max_input_bytes: 64 * 1024,
+                max_turns: 4,
+                max_repair_attempts: 1,
+                max_run_ms: 10_000,
+                max_effect_timeout_ms: 1_000,
+                max_output_bytes: 4_096,
+                max_tokens: 1_000,
+            },
+        }
+    }
+
     #[test]
     fn windows_reparse_attribute_is_unsafe() {
         assert!(super::windows_reparse_point(0x400));
@@ -1726,6 +1973,61 @@ mod reparse_tests {
         assert!(
             !events.join(name).exists(),
             "event was written through substitute directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_only_terminal_creation_rejects_journal_root_swap() {
+        let recovery = tempfile::TempDir::new().expect("recovery");
+        let root = recovery.path().join("journal");
+        let original = recovery.path().join("retained-journal");
+        let substitute = tempfile::TempDir::new().expect("substitute");
+        let request = test_request(recovery.path());
+        let journal = super::CheckpointJournal::new(&root, 16 * 1024).expect("journal");
+        journal
+            .begin_verification(&request)
+            .expect("verification start");
+        journal
+            .record_verifier(&request, &crate::evidence::digest_bytes(b"report"))
+            .expect("verifier record");
+        let journal = super::CheckpointJournal::open_bound(&root, 16 * 1024, &request)
+            .expect("bound journal");
+        let events_before = std::fs::read_dir(root.join("execution-events"))
+            .expect("execution events")
+            .count();
+        let hook_root = root.clone();
+        let hook_original = original.clone();
+        let hook_substitute = substitute.path().to_path_buf();
+        super::set_existing_terminal_create_test_hook(Box::new(move || {
+            std::fs::rename(&hook_root, &hook_original).expect("move retained root");
+            std::fs::rename(&hook_substitute, &hook_root).expect("install substitute root");
+        }));
+
+        assert!(
+            journal
+                .publish_terminal_record(&request, br#"{"terminal":"passed"}"#)
+                .is_err(),
+            "swapped journal root authorized terminal publication"
+        );
+        std::fs::rename(&root, substitute.path()).expect("remove substitute root");
+        std::fs::rename(&original, &root).expect("restore retained root");
+        assert_eq!(
+            std::fs::read_dir(root.join("execution-events"))
+                .expect("execution events")
+                .count(),
+            events_before,
+            "terminal event was appended after root replacement"
+        );
+        assert!(
+            std::fs::read_dir(substitute.path())
+                .expect("substitute root")
+                .all(|entry| !entry
+                    .expect("substitute entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("terminal-")),
+            "terminal bytes were created in the substitute root"
         );
     }
 }

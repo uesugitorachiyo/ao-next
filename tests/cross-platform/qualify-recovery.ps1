@@ -17,8 +17,27 @@ function Get-NormalizedPath([string]$Path) {
 function Test-PathWithin([string]$Child, [string]$Parent) {
     $childPath = Get-NormalizedPath $Child
     $parentPath = Get-NormalizedPath $Parent
+    if ($childPath.Equals($parentPath, [StringComparison]::OrdinalIgnoreCase)) { return $false }
     $prefix = if ($parentPath.EndsWith('\')) { $parentPath } else { $parentPath + '\' }
     $childPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-LocalDriveRootSyntax([string]$Path) {
+    -not [string]::IsNullOrWhiteSpace($Path) -and $Path -match '^[A-Za-z]:\\'
+}
+
+function Test-LocalFixedDriveType([int]$DriveType) {
+    $DriveType -eq 3
+}
+
+function Get-LocalFixedDisk([string]$Path, [string]$Label) {
+    if (-not (Test-LocalDriveRootSyntax $Path)) { throw "$Label root must use an explicit local drive path" }
+    $deviceId = $Path.Substring(0, 2).ToUpperInvariant()
+    $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$deviceId'"
+    if ($null -eq $disk -or -not (Test-LocalFixedDriveType $disk.DriveType)) {
+        throw "$Label root must be backed by a local fixed disk"
+    }
+    $disk
 }
 
 function Test-RootsSeparate([string]$First, [string]$Second) {
@@ -115,6 +134,7 @@ if ($SelfTest) {
     if (-not (Test-PathWithin 'C:\AO Next\checkout' 'C:\AO Next')) { throw 'child containment failed' }
     if (-not (Test-PathWithin 'C:\AO Next' 'C:\')) { throw 'drive-root containment failed' }
     if (Test-PathWithin 'C:\AO Next' 'C:\AO Next') { throw 'equal paths counted as containment' }
+    if (Test-PathWithin 'C:\' 'C:\') { throw 'equal drive roots counted as containment' }
     if (Test-PathWithin 'C:\AO Next Evil\checkout' 'C:\AO Next') { throw 'sibling-prefix containment passed' }
     if (Test-PathWithin 'D:\AO Next\checkout' 'C:\AO Next') { throw 'cross-drive containment passed' }
     if (Test-RootsSeparate 'C:\AO Next' 'C:\AO Next') { throw 'equal roots counted as separate' }
@@ -123,6 +143,10 @@ if ($SelfTest) {
     if (Test-RootsSeparate 'C:\' 'C:\AO Next') { throw 'drive-root nesting counted as separate' }
     if (-not (Test-RootsSeparate 'C:\AO Next' 'C:\AO Next Evil')) { throw 'sibling-prefix roots conflicted' }
     if (-not (Test-RootsSeparate 'C:\AO Next' 'D:\AO Next')) { throw 'cross-drive roots conflicted' }
+    if (-not (Test-LocalDriveRootSyntax 'C:\AO Next')) { throw 'local drive syntax rejected' }
+    if (Test-LocalDriveRootSyntax '\\server\share\AO Next') { throw 'UNC root syntax passed' }
+    if (-not (Test-LocalFixedDriveType 3)) { throw 'local fixed drive type rejected' }
+    if (Test-LocalFixedDriveType 4) { throw 'mapped network drive type passed' }
     $observed = Get-Sha256Hex ([Text.Encoding]::UTF8.GetBytes('abc'))
     if ($observed -ne 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') {
         throw 'SHA-256 self-test failed'
@@ -142,6 +166,8 @@ if ($SelfTest) {
 if ([string]::IsNullOrWhiteSpace($TargetRoot) -or [string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     throw 'TargetRoot and EvidenceRoot are required'
 }
+$targetDisk = Get-LocalFixedDisk $TargetRoot 'target'
+$evidenceDisk = Get-LocalFixedDisk $EvidenceRoot 'evidence'
 if (-not (Test-Path -LiteralPath $TargetRoot -PathType Container)) {
     throw 'target root must be an existing directory'
 }
@@ -163,9 +189,7 @@ if (-not (Test-RootsSeparate $target $evidence)) { throw 'target and evidence ro
 Assert-TargetContainsOnlyCheckout $target $checkout
 if (@(Get-ChildItem -Force -LiteralPath $evidence).Count -ne 0) { throw 'evidence root is not empty' }
 
-if ($target -notmatch '^[A-Za-z]:\\') { throw 'target root must use a local drive' }
-$volume = Get-Volume -DriveLetter $target.Substring(0, 1)
-if ($volume.FileSystem -ne 'NTFS') { throw 'target root is not NTFS' }
+if ($targetDisk.FileSystem -ne 'NTFS') { throw 'target root is not NTFS' }
 foreach ($name in 'AO_NEXT_LIVE_PROVIDER_CALLS','AO_NEXT_PROVIDER_FREE_PROGRAM','AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST') {
     if (Test-Path "Env:$name") { throw "$name must be absent" }
 }
@@ -307,7 +331,7 @@ $treeHash = 'sha256:' + (Get-Sha256Hex $treeBytes)
 $hostResult = [ordered]@{
     schema_version = 'ao.next.physical-windows-host-result.v1'
     windows_build = (Get-CimInstance Win32_OperatingSystem).BuildNumber
-    filesystem = $volume.FileSystem
+    filesystem = $targetDisk.FileSystem
     source_head = $sourceHead
     gates = $gates
     target_tree_digest = $treeHash

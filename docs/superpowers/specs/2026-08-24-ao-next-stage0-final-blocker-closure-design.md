@@ -5,6 +5,7 @@
 - Repository: AO Next
 - Parent design: [Dual-Process Cross-Platform Successor Design](2026-08-23-ao-next-dual-process-cross-platform-successor-design.md)
 - Prior implementation plan: [Engine Recovery Repair](../plans/2026-08-23-ao-next-engine-recovery-repair.md)
+- Corrective implementation plan: [Stage-0 Final Blocker Closure](../plans/2026-08-24-ao-next-stage0-final-blocker-closure.md)
 
 ## Purpose
 

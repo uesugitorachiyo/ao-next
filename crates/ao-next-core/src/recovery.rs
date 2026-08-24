@@ -48,6 +48,24 @@ impl CheckpointIdentity {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum JournalEventKind {
+    ProviderRequestIntent {
+        prepared_run_digest: Digest,
+    },
+    ProviderProcessStarted {
+        invocation_digest: Digest,
+    },
+    ProviderOutputRetained {
+        raw_capture_digest: Digest,
+    },
+    ProviderCaptureIndexPublished {
+        index_digest: Digest,
+    },
+    ProviderCaptureVerified {
+        index_digest: Digest,
+    },
+    AdapterTurnNormalized {
+        turn_digest: Digest,
+    },
     EffectIntent {
         effect_id: String,
         effect_digest: Digest,
@@ -102,6 +120,23 @@ pub enum JournalEffectState {
     Completed(EffectObservation),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderJournalState {
+    pub prepared_run_digest: Option<Digest>,
+    pub provider_process_started: bool,
+    pub raw_capture_digest: Option<Digest>,
+    pub capture_index_digest: Option<Digest>,
+    pub capture_verified: bool,
+    pub adapter_turn_digest: Option<Digest>,
+}
+
+impl ProviderJournalState {
+    #[must_use]
+    pub const fn outcome_unknown(&self) -> bool {
+        self.prepared_run_digest.is_some() && self.raw_capture_digest.is_none()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RecoveryError {
     #[error("recovery I/O failed: {0}")]
@@ -140,6 +175,83 @@ impl From<EvidenceError> for RecoveryError {
     fn from(error: EvidenceError) -> Self {
         Self::Io(error.to_string())
     }
+}
+
+fn provider_state_from_events(
+    events: &[JournalEvent],
+) -> Result<ProviderJournalState, RecoveryError> {
+    let mut state = ProviderJournalState {
+        prepared_run_digest: None,
+        provider_process_started: false,
+        raw_capture_digest: None,
+        capture_index_digest: None,
+        capture_verified: false,
+        adapter_turn_digest: None,
+    };
+    let mut effect_seen = false;
+    let mut provider_step = 0_u8;
+    for event in events {
+        match &event.kind {
+            JournalEventKind::ProviderRequestIntent {
+                prepared_run_digest,
+            } if !effect_seen && provider_step == 0 => {
+                state.prepared_run_digest = Some(prepared_run_digest.clone());
+                provider_step = 1;
+            }
+            JournalEventKind::ProviderProcessStarted { .. }
+                if !effect_seen && provider_step == 1 =>
+            {
+                state.provider_process_started = true;
+                provider_step = 2;
+            }
+            JournalEventKind::ProviderOutputRetained { raw_capture_digest }
+                if !effect_seen && provider_step == 2 =>
+            {
+                state.raw_capture_digest = Some(raw_capture_digest.clone());
+                provider_step = 3;
+            }
+            JournalEventKind::ProviderCaptureIndexPublished { index_digest }
+                if !effect_seen && provider_step == 3 =>
+            {
+                state.capture_index_digest = Some(index_digest.clone());
+                provider_step = 4;
+            }
+            JournalEventKind::ProviderCaptureVerified { index_digest }
+                if !effect_seen
+                    && provider_step == 4
+                    && state.capture_index_digest.as_ref() == Some(index_digest) =>
+            {
+                state.capture_verified = true;
+                provider_step = 5;
+            }
+            JournalEventKind::AdapterTurnNormalized { turn_digest }
+                if !effect_seen && provider_step == 5 =>
+            {
+                state.adapter_turn_digest = Some(turn_digest.clone());
+                provider_step = 6;
+            }
+            JournalEventKind::EffectIntent { .. }
+            | JournalEventKind::EffectCommitted { .. }
+            | JournalEventKind::EffectCompleted { .. } => {
+                if provider_step != 0 && provider_step != 6 {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                effect_seen = true;
+            }
+            JournalEventKind::VerificationStarted { .. }
+            | JournalEventKind::VerifierRecorded { .. }
+            | JournalEventKind::TerminalPublished { .. } => {}
+            JournalEventKind::ProviderRequestIntent { .. }
+            | JournalEventKind::ProviderProcessStarted { .. }
+            | JournalEventKind::ProviderOutputRetained { .. }
+            | JournalEventKind::ProviderCaptureIndexPublished { .. }
+            | JournalEventKind::ProviderCaptureVerified { .. }
+            | JournalEventKind::AdapterTurnNormalized { .. } => {
+                return Err(RecoveryError::EventSequenceInvalid);
+            }
+        }
+    }
+    Ok(state)
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +312,162 @@ impl CheckpointJournal {
         durable_create_new(&path, &bytes)
     }
 
+    /// Returns the durable provider-capture lifecycle for one exact request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for identity drift, malformed or reordered
+    /// events, unsafe paths, size violations, or I/O failure.
+    pub fn provider_state(
+        &self,
+        request: &RunRequest,
+    ) -> Result<ProviderJournalState, RecoveryError> {
+        self.bind_request(request)?;
+        provider_state_from_events(&self.load_execution_events()?)
+    }
+
+    /// Confirms that no provider attempt or effect is already durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] when starting could repeat an unknown provider
+    /// outcome or place provider events after effects.
+    pub fn provider_may_start(&self, request: &RunRequest) -> Result<(), RecoveryError> {
+        self.bind_request(request)?;
+        let events = self.load_execution_events()?;
+        let state = provider_state_from_events(&events)?;
+        if state.prepared_run_digest.is_some()
+            || events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    JournalEventKind::EffectIntent { .. }
+                        | JournalEventKind::EffectCommitted { .. }
+                        | JournalEventKind::EffectCompleted { .. }
+                )
+            })
+        {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        Ok(())
+    }
+
+    /// Durably records provider request intent before process execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless no provider attempt or effect is
+    /// already durable.
+    pub fn record_provider_request_intent(
+        &self,
+        request: &RunRequest,
+        prepared: &Digest,
+    ) -> Result<(), RecoveryError> {
+        self.provider_may_start(request)?;
+        self.append_execution_event(JournalEventKind::ProviderRequestIntent {
+            prepared_run_digest: prepared.clone(),
+        })
+    }
+
+    /// Durably records that the provider process transition was reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless provider request intent is the exact
+    /// current lifecycle state.
+    pub fn record_provider_process_started(
+        &self,
+        request: &RunRequest,
+        invocation: &Digest,
+    ) -> Result<(), RecoveryError> {
+        let state = self.provider_state(request)?;
+        if state.prepared_run_digest.is_none() || state.provider_process_started {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.append_execution_event(JournalEventKind::ProviderProcessStarted {
+            invocation_digest: invocation.clone(),
+        })
+    }
+
+    /// Durably records the retained raw provider capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless provider process start is the exact
+    /// current lifecycle state.
+    pub fn record_provider_output_retained(
+        &self,
+        request: &RunRequest,
+        raw: &Digest,
+    ) -> Result<(), RecoveryError> {
+        let state = self.provider_state(request)?;
+        if !state.provider_process_started || state.raw_capture_digest.is_some() {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.append_execution_event(JournalEventKind::ProviderOutputRetained {
+            raw_capture_digest: raw.clone(),
+        })
+    }
+
+    /// Durably records the published provider capture index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless retained provider output is the exact
+    /// current lifecycle state.
+    pub fn record_provider_capture_published(
+        &self,
+        request: &RunRequest,
+        index: &Digest,
+    ) -> Result<(), RecoveryError> {
+        let state = self.provider_state(request)?;
+        if state.raw_capture_digest.is_none() || state.capture_index_digest.is_some() {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.append_execution_event(JournalEventKind::ProviderCaptureIndexPublished {
+            index_digest: index.clone(),
+        })
+    }
+
+    /// Durably records verification of the published provider capture index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless the same index digest was published
+    /// exactly once.
+    pub fn record_provider_capture_verified(
+        &self,
+        request: &RunRequest,
+        index: &Digest,
+    ) -> Result<(), RecoveryError> {
+        let state = self.provider_state(request)?;
+        if state.capture_index_digest.as_ref() != Some(index) || state.capture_verified {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.append_execution_event(JournalEventKind::ProviderCaptureVerified {
+            index_digest: index.clone(),
+        })
+    }
+
+    /// Durably records the trusted normalized adapter turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless provider capture verification is the
+    /// exact current lifecycle state.
+    pub fn record_adapter_turn_normalized(
+        &self,
+        request: &RunRequest,
+        turn: &Digest,
+    ) -> Result<(), RecoveryError> {
+        let state = self.provider_state(request)?;
+        if !state.capture_verified || state.adapter_turn_digest.is_some() {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.append_execution_event(JournalEventKind::AdapterTurnNormalized {
+            turn_digest: turn.clone(),
+        })
+    }
+
     /// Returns the durable state of one exact effect without executing it.
     ///
     /// # Errors
@@ -215,7 +483,14 @@ impl CheckpointJournal {
         let effect_digest = canonical_digest(effect)?;
         let mut effects = BTreeMap::<String, (Digest, Option<EffectObservation>)>::new();
         let mut terminal_published = false;
-        for event in self.load_execution_events()? {
+        let events = self.load_execution_events()?;
+        let provider_state = provider_state_from_events(&events)?;
+        if provider_state.prepared_run_digest.is_some()
+            && provider_state.adapter_turn_digest.is_none()
+        {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        for event in events {
             match event.kind {
                 JournalEventKind::EffectIntent {
                     effect_id,
@@ -242,7 +517,13 @@ impl CheckpointJournal {
                     return Err(RecoveryError::EventSequenceInvalid);
                 }
                 JournalEventKind::VerificationStarted { .. }
-                | JournalEventKind::VerifierRecorded { .. } => {}
+                | JournalEventKind::VerifierRecorded { .. }
+                | JournalEventKind::ProviderRequestIntent { .. }
+                | JournalEventKind::ProviderProcessStarted { .. }
+                | JournalEventKind::ProviderOutputRetained { .. }
+                | JournalEventKind::ProviderCaptureIndexPublished { .. }
+                | JournalEventKind::ProviderCaptureVerified { .. }
+                | JournalEventKind::AdapterTurnNormalized { .. } => {}
                 JournalEventKind::TerminalPublished { .. } => {
                     if terminal_published {
                         return Err(RecoveryError::EventSequenceInvalid);
@@ -313,6 +594,7 @@ impl CheckpointJournal {
     pub fn begin_verification(&self, request: &RunRequest) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
+        provider_state_from_events(&events)?;
         let starts = events
             .iter()
             .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
@@ -349,6 +631,7 @@ impl CheckpointJournal {
     ) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
+        provider_state_from_events(&events)?;
         let starts = events
             .iter()
             .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
@@ -386,6 +669,7 @@ impl CheckpointJournal {
         }
         let digest = digest_bytes(bytes);
         let events = self.load_execution_events()?;
+        provider_state_from_events(&events)?;
         let starts = events
             .iter()
             .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
@@ -539,6 +823,7 @@ impl CheckpointJournal {
             return Err(RecoveryError::EventDigestMismatch);
         }
         let events = decode_event_log(&event_bytes, self.maximum_bytes)?;
+        provider_state_from_events(&events)?;
         let mut committed = BTreeSet::new();
         let mut verifier_recorded = false;
         for (expected_sequence, event) in events.iter().enumerate() {
@@ -555,6 +840,12 @@ impl CheckpointJournal {
                     committed.insert(observation.effect_id.clone());
                 }
                 JournalEventKind::EffectIntent { .. }
+                | JournalEventKind::ProviderRequestIntent { .. }
+                | JournalEventKind::ProviderProcessStarted { .. }
+                | JournalEventKind::ProviderOutputRetained { .. }
+                | JournalEventKind::ProviderCaptureIndexPublished { .. }
+                | JournalEventKind::ProviderCaptureVerified { .. }
+                | JournalEventKind::AdapterTurnNormalized { .. }
                 | JournalEventKind::VerificationStarted { .. }
                 | JournalEventKind::TerminalPublished { .. } => {}
                 JournalEventKind::VerifierRecorded { .. } => verifier_recorded = true,

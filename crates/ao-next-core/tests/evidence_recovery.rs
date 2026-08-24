@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use ao_next_core::adapter::AdapterIdentity;
 use ao_next_core::contracts::{
-    AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile, NetworkPolicy,
-    RunLimits, RunRequest, SourceIdentity, StructuredCommand, VerifierProfile, WorkspaceIdentity,
+    AuthorityEnvelope, Capability, Digest, EffectKind, EffectRequest, ExternalEffectPolicy,
+    ModelProfile, NetworkPolicy, RunLimits, RunRequest, SourceIdentity, StructuredCommand,
+    VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::evidence::{
     ArtifactSpec, ArtifactStore, EvidenceError, StoreLimits, digest_bytes, seal_verified_run,
@@ -102,6 +103,38 @@ fn request(root: &Path) -> RunRequest {
             max_output_bytes: 4_096,
             max_tokens: 1_000,
         },
+    }
+}
+
+struct Fixture {
+    _recovery: TempDir,
+    request: RunRequest,
+    journal: CheckpointJournal,
+}
+
+fn fixture() -> Fixture {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("execution journal");
+    Fixture {
+        _recovery: recovery,
+        request,
+        journal,
+    }
+}
+
+fn effect(request: &RunRequest) -> EffectRequest {
+    EffectRequest {
+        effect_id: "effect-01".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
     }
 }
 
@@ -568,6 +601,107 @@ fn recovery_rejects_every_changed_identity_and_checkpoint_digest() {
         journal.resume(&identity, &["effect-01".into()]),
         Err(RecoveryError::CheckpointDigestMismatch { .. })
     ));
+}
+
+#[test]
+fn provider_capture_events_are_ordered_before_effect_intent() {
+    let fixture = fixture();
+    let prepared = digest_bytes(b"prepared");
+    let invocation = digest_bytes(b"invocation");
+    let raw = digest_bytes(b"raw-capture");
+    let index = digest_bytes(b"capture-index");
+    let turn = digest_bytes(b"adapter-turn");
+
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &prepared)
+        .expect("intent");
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &invocation)
+        .expect("started");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &raw)
+        .expect("retained");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &index)
+        .expect("published");
+    fixture
+        .journal
+        .record_provider_capture_verified(&fixture.request, &index)
+        .expect("verified");
+    fixture
+        .journal
+        .record_adapter_turn_normalized(&fixture.request, &turn)
+        .expect("normalized");
+
+    let state = fixture
+        .journal
+        .provider_state(&fixture.request)
+        .expect("state");
+    assert_eq!(state.prepared_run_digest, Some(prepared));
+    assert_eq!(state.capture_index_digest, Some(index));
+    assert_eq!(state.adapter_turn_digest, Some(turn));
+    assert!(state.provider_process_started);
+}
+
+#[test]
+fn provider_intent_without_capture_is_unknown_and_cannot_restart() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .expect("intent");
+    let state = fixture
+        .journal
+        .provider_state(&fixture.request)
+        .expect("state");
+    assert!(state.outcome_unknown());
+    assert!(
+        fixture
+            .journal
+            .provider_may_start(&fixture.request)
+            .is_err()
+    );
+}
+
+#[test]
+fn effect_intent_requires_normalized_adapter_turn() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .expect("provider intent");
+
+    assert!(
+        fixture
+            .journal
+            .record_effect_intent(&fixture.request, &effect(&fixture.request))
+            .is_err()
+    );
+}
+
+#[test]
+fn provider_event_reordering_digest_drift_and_duplicates_fail_closed() {
+    let fixture = fixture();
+    assert!(
+        fixture
+            .journal
+            .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+            .is_err()
+    );
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .expect("intent");
+    assert!(
+        fixture
+            .journal
+            .record_provider_request_intent(&fixture.request, &digest_bytes(b"other"))
+            .is_err()
+    );
 }
 
 #[test]

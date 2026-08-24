@@ -1017,8 +1017,7 @@ impl CheckpointJournal {
             .as_str()
             .strip_prefix("sha256:")
             .ok_or(RecoveryError::EventDigestMismatch)?;
-        let path = self.root.join(format!("terminal-{digest_hex}.json"));
-        self.create_terminal_path(&path, bytes)?;
+        self.create_terminal_path(digest_hex, bytes)?;
         self.append_execution_event(JournalEventKind::TerminalPublished {
             record_digest: digest.clone(),
         })?;
@@ -1164,7 +1163,8 @@ impl CheckpointJournal {
         Ok(())
     }
 
-    fn create_terminal_path(&self, path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
+    fn create_terminal_path(&self, digest_hex: &str, bytes: &[u8]) -> Result<(), RecoveryError> {
+        let path = self.root.join(format!("terminal-{digest_hex}.json"));
         #[cfg(unix)]
         if let JournalMode::ExistingOnly(binding) = &self.mode {
             let root = binding
@@ -1188,7 +1188,7 @@ impl CheckpointJournal {
             }
             return Ok(());
         }
-        durable_create_new(path, bytes)
+        durable_create_new(&path, bytes)
     }
 
     fn append_execution_event(&self, kind: JournalEventKind) -> Result<(), RecoveryError> {

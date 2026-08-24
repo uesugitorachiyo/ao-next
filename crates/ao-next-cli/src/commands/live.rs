@@ -795,6 +795,7 @@ pub(super) struct PreparedN7Context {
     pub(super) prepared_run_digest: Digest,
     pub(super) execution_authority: N7ExecutionAuthority,
     pub(super) execution_authority_digest: Digest,
+    pub(super) journal: CheckpointJournal,
 }
 
 struct RetainedN7Execution {
@@ -1107,11 +1108,17 @@ fn validate_prepared_run(
         now,
         true,
     )?;
+    let journal = CheckpointJournal::new(
+        execution_journal_root(input),
+        execution_journal_maximum_bytes(&input.request),
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     Ok(PreparedN7Context {
         git_workspace,
         prepared_run_digest,
         execution_authority: authority,
         execution_authority_digest,
+        journal,
     })
 }
 
@@ -1707,29 +1714,35 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     } else {
         validate_input(input, variant, started_at)?
     };
-    let (git_workspace, prepared_run_digest, execution_authority, execution_authority_digest) =
-        if let Some(prepared) = prepared {
-            if variant != LiveVariant::N7 {
-                return Err(CommandFailure::invalid_input(
-                    "prepared-run context is restricted to N7",
-                ));
-            }
-            (
-                prepared.git_workspace,
-                prepared.prepared_run_digest,
-                Some(prepared.execution_authority),
-                Some(prepared.execution_authority_digest),
-            )
-        } else {
-            let git_workspace = prepare_git_workspace(
-                &input.request.workspace.root,
-                &input.request.authority.allowed_roots,
-                &validated.task.workspace_seed_digest,
-            )?;
-            let digest = canonical_digest(&git_workspace)
-                .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-            (git_workspace, digest, None, None)
-        };
+    let (
+        git_workspace,
+        prepared_run_digest,
+        execution_authority,
+        execution_authority_digest,
+        prepared_journal,
+    ) = if let Some(prepared) = prepared {
+        if variant != LiveVariant::N7 {
+            return Err(CommandFailure::invalid_input(
+                "prepared-run context is restricted to N7",
+            ));
+        }
+        (
+            prepared.git_workspace,
+            prepared.prepared_run_digest,
+            Some(prepared.execution_authority),
+            Some(prepared.execution_authority_digest),
+            Some(prepared.journal),
+        )
+    } else {
+        let git_workspace = prepare_git_workspace(
+            &input.request.workspace.root,
+            &input.request.authority.allowed_roots,
+            &validated.task.workspace_seed_digest,
+        )?;
+        let digest = canonical_digest(&git_workspace)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        (git_workspace, digest, None, None, None)
+    };
     let provider_visibility = if variant == LiveVariant::N7 && recovery.is_none() {
         Some(n7_provider_visibility(input, validated.task)?)
     } else {
@@ -1765,15 +1778,19 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     if recovery.is_none() {
         revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
     }
-    let journal = (variant == LiveVariant::N7)
-        .then(|| {
+    let journal = if variant == LiveVariant::N7 {
+        Some(if let Some(journal) = prepared_journal {
+            journal
+        } else {
             CheckpointJournal::new(
                 execution_journal_root(input),
                 execution_journal_maximum_bytes(&input.request),
             )
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?
         })
-        .transpose()
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    } else {
+        None
+    };
 
     let execution = match variant {
         LiveVariant::N0 => execute_n0(
@@ -2112,12 +2129,11 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     if variant == LiveVariant::N7 && report.is_some() {
         let terminal_bytes = canonical_json_bytes(&record)
             .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-        CheckpointJournal::new(
-            execution_journal_root(input),
-            execution_journal_maximum_bytes(&input.request),
-        )
-        .and_then(|journal| journal.publish_terminal_record(&input.request, &terminal_bytes))
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        journal
+            .as_ref()
+            .expect("N7 journal constructed")
+            .publish_terminal_record(&input.request, &terminal_bytes)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     }
     let value = serde_json::to_value(record)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
@@ -7483,6 +7499,10 @@ else:
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one path proves the admitted journal owns provider intent and terminal publication"
+    )]
     fn prepared_n7_threads_one_admitted_authority_digest() {
         let n7 = fixture(LiveVariant::N7);
         let git_workspace = prepare_git_workspace(
@@ -7537,6 +7557,17 @@ else:
             model_claimed_success: true,
             control_mutations: Vec::new(),
         };
+        let admitted_journal_root = n7.root.path().join("admitted-journal");
+        let create_capable_journal =
+            CheckpointJournal::new(&admitted_journal_root, 128 * 1024).expect("journal");
+        create_capable_journal
+            .bind_request(&n7.input.request)
+            .expect("request binding");
+        std::fs::create_dir(admitted_journal_root.join("execution-events"))
+            .expect("event directory");
+        let admitted_journal =
+            CheckpointJournal::open_bound(&admitted_journal_root, 128 * 1024, &n7.input.request)
+                .expect("existing-only journal");
 
         let output = execute_with_prepared_runners(
             &n7.input,
@@ -7553,6 +7584,7 @@ else:
                 prepared_run_digest,
                 execution_authority,
                 execution_authority_digest: admitted_digest.clone(),
+                journal: admitted_journal,
             }),
         )
         .expect("prepared N7 execution");
@@ -7561,7 +7593,7 @@ else:
             output.value["n7_execution_authority_digest"],
             admitted_digest.as_str()
         );
-        let intent = std::fs::read_dir(execution_journal_root(&n7.input).join("execution-events"))
+        let intent = std::fs::read_dir(admitted_journal_root.join("execution-events"))
             .expect("execution events")
             .map(|entry| {
                 let bytes = std::fs::read(entry.expect("event entry").path()).expect("event");
@@ -7572,6 +7604,19 @@ else:
         assert_eq!(
             intent["kind"]["execution_authority_digest"],
             admitted_digest.as_str()
+        );
+        assert!(
+            !execution_journal_root(&n7.input).exists(),
+            "prepared execution reconstructed the default journal"
+        );
+        assert_eq!(
+            std::fs::read_dir(&admitted_journal_root)
+                .expect("journal root")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("terminal-"))
+                .count(),
+            1,
+            "same admitted journal did not publish the terminal"
         );
     }
 

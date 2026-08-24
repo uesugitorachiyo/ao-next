@@ -1,7 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -10,7 +18,7 @@ use thiserror::Error;
 
 use crate::adapter::EffectObservation;
 use crate::contracts::{Digest, EffectRequest, RunRequest};
-use crate::evidence::{EvidenceError, digest_bytes, read_regular_file};
+use crate::evidence::{EvidenceError, digest_bytes};
 use crate::strict_json::{
     StrictJsonError, canonical_digest, canonical_json_bytes, decode_strict_json,
 };
@@ -369,10 +377,59 @@ fn require_verification_complete(events: &[JournalEvent]) -> Result<(), Recovery
     Ok(())
 }
 
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+
+#[cfg(any(test, windows))]
+const fn windows_reparse_point(attributes: u32) -> bool {
+    attributes & 0x400 != 0
+}
+
 #[derive(Clone, Debug)]
 pub struct CheckpointJournal {
     root: PathBuf,
     maximum_bytes: u64,
+    mode: JournalMode,
+}
+
+#[derive(Clone, Debug)]
+enum JournalMode {
+    CreateCapable,
+    ExistingOnly(Arc<Mutex<ExistingJournalBinding>>),
+}
+
+#[derive(Debug)]
+struct ExistingJournalBinding {
+    request_identity: Vec<u8>,
+    root: OpenedJournalPath,
+    identity: OpenedJournalPath,
+    events: OpenedJournalPath,
+    event_files: BTreeMap<PathBuf, OpenedJournalPath>,
+    initializing: bool,
+}
+
+#[derive(Clone, Debug)]
+struct OpenedJournalPath {
+    fingerprint: JournalPathFingerprint,
+    anchor: Arc<File>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JournalPathFingerprint {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    handle: Arc<same_file::Handle>,
+    #[cfg(not(any(unix, windows)))]
+    length: u64,
 }
 
 impl CheckpointJournal {
@@ -385,13 +442,11 @@ impl CheckpointJournal {
     pub fn new(root: impl AsRef<Path>, maximum_bytes: u64) -> Result<Self, RecoveryError> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        let metadata = std::fs::symlink_metadata(&root)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(RecoveryError::UnsafePath(root));
-        }
+        open_journal_path(&root, true)?;
         Ok(Self {
             root,
             maximum_bytes,
+            mode: JournalMode::CreateCapable,
         })
     }
 
@@ -407,15 +462,34 @@ impl CheckpointJournal {
         request: &RunRequest,
     ) -> Result<Self, RecoveryError> {
         let root = root.as_ref().to_path_buf();
-        let metadata = std::fs::symlink_metadata(&root)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(RecoveryError::UnsafePath(root));
-        }
+        let root_opened = open_journal_path(&root, true)?;
+        let provisional = Self {
+            root: root.clone(),
+            maximum_bytes,
+            mode: JournalMode::CreateCapable,
+        };
+        let (identity, identity_bytes) = provisional.request_identity(request)?;
+        let identity_opened = open_journal_path(&root.join("execution-identity.json"), false)?;
+        validate_identity_bytes(&identity_opened, &identity, &identity_bytes, maximum_bytes)?;
+        let events_opened = open_journal_path(&root.join("execution-events"), true)?;
+        let binding = Arc::new(Mutex::new(ExistingJournalBinding {
+            request_identity: identity_bytes,
+            root: root_opened,
+            identity: identity_opened,
+            events: events_opened,
+            event_files: BTreeMap::new(),
+            initializing: true,
+        }));
         let journal = Self {
             root,
             maximum_bytes,
+            mode: JournalMode::ExistingOnly(binding.clone()),
         };
-        journal.require_bound_request(request)?;
+        journal.load_execution_events()?;
+        binding
+            .lock()
+            .map_err(|error| RecoveryError::Io(error.to_string()))?
+            .initializing = false;
         Ok(journal)
     }
 
@@ -427,6 +501,9 @@ impl CheckpointJournal {
     /// Returns [`RecoveryError`] when the identity path is unsafe, unreadable,
     /// oversized, malformed, or already bound to a different request.
     pub fn bind_request(&self, request: &RunRequest) -> Result<(), RecoveryError> {
+        if matches!(self.mode, JournalMode::ExistingOnly(_)) {
+            return self.require_bound_request(request);
+        }
         let path = self.root.join("execution-identity.json");
         if path.exists() || path.is_symlink() {
             return self.require_bound_request(request);
@@ -452,17 +529,28 @@ impl CheckpointJournal {
 
     fn require_bound_request(&self, request: &RunRequest) -> Result<(), RecoveryError> {
         let (identity, bytes) = self.request_identity(request)?;
-        let existing = read_regular_file(
-            &self.root.join("execution-identity.json"),
-            self.maximum_bytes,
-        )?;
-        if existing != bytes {
-            return Err(RecoveryError::IdentityMismatch);
-        }
-        let maximum_bytes = usize::try_from(self.maximum_bytes).unwrap_or(usize::MAX);
-        let recorded: CheckpointIdentity = decode_strict_json(&existing, maximum_bytes)?;
-        if recorded != identity {
-            return Err(RecoveryError::IdentityMismatch);
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let expected = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?;
+            if expected.request_identity != bytes {
+                return Err(RecoveryError::IdentityMismatch);
+            }
+            let root = expected.root.clone();
+            let identity_path = expected.identity.clone();
+            let events = expected.events.clone();
+            drop(expected);
+            require_same_journal_path(&self.root, true, &root)?;
+            let opened_identity = require_same_journal_path(
+                &self.root.join("execution-identity.json"),
+                false,
+                &identity_path,
+            )?;
+            require_same_journal_path(&self.root.join("execution-events"), true, &events)?;
+            validate_identity_bytes(&opened_identity, &identity, &bytes, self.maximum_bytes)?;
+        } else {
+            let opened = open_journal_path(&self.root.join("execution-identity.json"), false)?;
+            validate_identity_bytes(&opened, &identity, &bytes, self.maximum_bytes)?;
         }
         Ok(())
     }
@@ -476,13 +564,12 @@ impl CheckpointJournal {
     pub fn bind_pristine_request(&self, request: &RunRequest) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let directory = self.root.join("execution-events");
-        let metadata = match std::fs::symlink_metadata(&directory) {
-            Ok(metadata) => metadata,
+        match std::fs::symlink_metadata(&directory) {
+            Ok(_) => {
+                open_journal_path(&directory, true)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(RecoveryError::UnsafePath(directory));
         }
         if std::fs::read_dir(&directory)?.next().transpose()?.is_none() {
             return Ok(());
@@ -516,9 +603,11 @@ impl CheckpointJournal {
         &self,
         request: &RunRequest,
     ) -> Result<ProviderJournalState, RecoveryError> {
+        if !matches!(self.mode, JournalMode::ExistingOnly(_)) {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
         self.require_bound_request(request)?;
-        let directory = self.existing_execution_event_directory()?;
-        provider_state_from_events(&self.load_execution_events_from(&directory)?)
+        provider_state_from_events(&self.load_execution_events()?)
     }
 
     /// Confirms that no provider attempt or effect is already durable.
@@ -980,7 +1069,7 @@ impl CheckpointJournal {
             .ok_or(RecoveryError::EventDigestMismatch)?;
         let digest = Digest::new(format!("sha256:{digest_hex}"))
             .map_err(|_| RecoveryError::EventDigestMismatch)?;
-        let bytes = read_regular_file(&path, self.maximum_bytes)?;
+        let bytes = read_journal_regular(&path, self.maximum_bytes)?;
         if digest_bytes(&bytes) != digest
             || recorded.first().is_some_and(|recorded| recorded != &digest)
         {
@@ -1011,10 +1100,9 @@ impl CheckpointJournal {
             .as_str()
             .strip_prefix("sha256:")
             .ok_or(RecoveryError::EventDigestMismatch)?;
-        durable_create_new(
-            &directory.join(format!("{:020}-{digest_hex}.json", event.sequence)),
-            &bytes,
-        )
+        let path = directory.join(format!("{:020}-{digest_hex}.json", event.sequence));
+        durable_create_new(&path, &bytes)?;
+        self.register_event_path(&path)
     }
 
     fn load_execution_events(&self) -> Result<Vec<JournalEvent>, RecoveryError> {
@@ -1030,6 +1118,7 @@ impl CheckpointJournal {
             .map(|entry| entry.map(|value| value.path()))
             .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
+        let observed_paths = paths.iter().cloned().collect::<BTreeSet<_>>();
         let mut events = Vec::with_capacity(paths.len());
         let mut total_bytes = 0_u64;
         for (expected_sequence, path) in paths.into_iter().enumerate() {
@@ -1045,10 +1134,9 @@ impl CheckpointJournal {
             {
                 return Err(RecoveryError::EventSequenceInvalid);
             }
-            let metadata = std::fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(RecoveryError::UnsafePath(path));
-            }
+            let opened = open_journal_path(&path, false)?;
+            self.validate_event_path(&path, &opened)?;
+            let metadata = opened.anchor.metadata()?;
             total_bytes = total_bytes.saturating_add(metadata.len());
             if total_bytes > self.maximum_bytes {
                 return Err(RecoveryError::Oversized {
@@ -1056,7 +1144,7 @@ impl CheckpointJournal {
                     limit: self.maximum_bytes,
                 });
             }
-            let bytes = read_regular_file(&path, self.maximum_bytes)?;
+            let bytes = read_opened_regular(&opened, self.maximum_bytes)?;
             let observed_digest = digest_bytes(&bytes);
             let observed_hex = observed_digest
                 .as_str()
@@ -1077,23 +1165,83 @@ impl CheckpointJournal {
             }
             events.push(event);
         }
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let binding = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?;
+            if binding.event_files.keys().cloned().collect::<BTreeSet<_>>() != observed_paths {
+                return Err(RecoveryError::EventSequenceInvalid);
+            }
+        }
         validate_journal_lifecycle(&events)?;
         Ok(events)
     }
 
     fn execution_event_directory(&self) -> Result<PathBuf, RecoveryError> {
         let directory = self.root.join("execution-events");
-        std::fs::create_dir_all(&directory)?;
+        if matches!(self.mode, JournalMode::CreateCapable) {
+            std::fs::create_dir_all(&directory)?;
+        }
         self.existing_execution_event_directory()
     }
 
     fn existing_execution_event_directory(&self) -> Result<PathBuf, RecoveryError> {
         let directory = self.root.join("execution-events");
-        let metadata = std::fs::symlink_metadata(&directory)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(RecoveryError::UnsafePath(directory));
+        let opened = open_journal_path(&directory, true)?;
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let expected = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?
+                .events
+                .clone();
+            if opened.fingerprint != expected.fingerprint {
+                return Err(RecoveryError::IdentityMismatch);
+            }
         }
         Ok(directory)
+    }
+
+    fn validate_event_path(
+        &self,
+        path: &Path,
+        opened: &OpenedJournalPath,
+    ) -> Result<(), RecoveryError> {
+        let JournalMode::ExistingOnly(binding) = &self.mode else {
+            return Ok(());
+        };
+        let mut binding = binding
+            .lock()
+            .map_err(|error| RecoveryError::Io(error.to_string()))?;
+        if let Some(expected) = binding.event_files.get(path) {
+            if opened.fingerprint != expected.fingerprint {
+                return Err(RecoveryError::IdentityMismatch);
+            }
+        } else if binding.initializing {
+            binding
+                .event_files
+                .insert(path.to_path_buf(), opened.clone());
+        } else {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        Ok(())
+    }
+
+    fn register_event_path(&self, path: &Path) -> Result<(), RecoveryError> {
+        let JournalMode::ExistingOnly(binding) = &self.mode else {
+            return Ok(());
+        };
+        let opened = open_journal_path(path, false)?;
+        let mut binding = binding
+            .lock()
+            .map_err(|error| RecoveryError::Io(error.to_string()))?;
+        if binding
+            .event_files
+            .insert(path.to_path_buf(), opened)
+            .is_some()
+        {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        Ok(())
     }
 
     /// Commits a checkpoint only after its effect and verifier events are durable.
@@ -1106,7 +1254,7 @@ impl CheckpointJournal {
         if checkpoint.schema_version != "ao.next.checkpoint.v1" {
             return Err(RecoveryError::InvalidSchema);
         }
-        let event_bytes = read_regular_file(event_log, self.maximum_bytes)?;
+        let event_bytes = read_journal_regular(event_log, self.maximum_bytes)?;
         if digest_bytes(&event_bytes) != checkpoint.events_digest {
             return Err(RecoveryError::EventDigestMismatch);
         }
@@ -1188,14 +1336,14 @@ impl CheckpointJournal {
     }
 
     fn load(&self) -> Result<Checkpoint, RecoveryError> {
-        let digest_bytes_raw = read_regular_file(&self.root.join("checkpoint.sha256"), 128)?;
+        let digest_bytes_raw = read_journal_regular(&self.root.join("checkpoint.sha256"), 128)?;
         let expected = Digest::new(
             std::str::from_utf8(&digest_bytes_raw)
                 .map_err(|error| RecoveryError::Io(error.to_string()))?
                 .trim(),
         )
         .map_err(|error| RecoveryError::Io(error.to_string()))?;
-        let bytes = read_regular_file(&self.root.join("checkpoint.json"), self.maximum_bytes)?;
+        let bytes = read_journal_regular(&self.root.join("checkpoint.json"), self.maximum_bytes)?;
         let observed = digest_bytes(&bytes);
         if observed != expected {
             return Err(RecoveryError::CheckpointDigestMismatch { expected, observed });
@@ -1247,6 +1395,137 @@ fn decode_event_log(bytes: &[u8], maximum_bytes: u64) -> Result<Vec<JournalEvent
     Ok(events)
 }
 
+fn require_same_journal_path(
+    path: &Path,
+    directory: bool,
+    expected: &OpenedJournalPath,
+) -> Result<OpenedJournalPath, RecoveryError> {
+    let opened = open_journal_path(path, directory)?;
+    if opened.fingerprint != expected.fingerprint {
+        return Err(RecoveryError::IdentityMismatch);
+    }
+    Ok(opened)
+}
+
+fn validate_identity_bytes(
+    opened: &OpenedJournalPath,
+    identity: &CheckpointIdentity,
+    expected: &[u8],
+    maximum_bytes: u64,
+) -> Result<(), RecoveryError> {
+    let existing = read_opened_regular(opened, maximum_bytes)?;
+    if existing != expected {
+        return Err(RecoveryError::IdentityMismatch);
+    }
+    let maximum_bytes = usize::try_from(maximum_bytes).unwrap_or(usize::MAX);
+    let recorded: CheckpointIdentity = decode_strict_json(&existing, maximum_bytes)?;
+    if &recorded != identity {
+        return Err(RecoveryError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn read_opened_regular(
+    opened: &OpenedJournalPath,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, RecoveryError> {
+    let metadata = opened.anchor.metadata()?;
+    if metadata.len() > maximum_bytes {
+        return Err(RecoveryError::Oversized {
+            actual: metadata.len(),
+            limit: maximum_bytes,
+        });
+    }
+    let mut file = opened.anchor.try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(RecoveryError::Oversized {
+            actual: bytes.len() as u64,
+            limit: maximum_bytes,
+        });
+    }
+    Ok(bytes)
+}
+
+fn read_journal_regular(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, RecoveryError> {
+    read_opened_regular(&open_journal_path(path, false)?, maximum_bytes)
+}
+
+#[cfg(unix)]
+fn open_journal_path(path: &Path, directory: bool) -> Result<OpenedJournalPath, RecoveryError> {
+    let mut flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    if directory {
+        flags |= OFlags::DIRECTORY;
+    }
+    let file = rustix::fs::open(path, flags, Mode::empty())
+        .map(File::from)
+        .map_err(std::io::Error::from)?;
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(RecoveryError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(OpenedJournalPath {
+        fingerprint: JournalPathFingerprint {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+        anchor: Arc::new(file),
+    })
+}
+
+#[cfg(windows)]
+fn open_journal_path(path: &Path, directory: bool) -> Result<OpenedJournalPath, RecoveryError> {
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | if directory {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(flags)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_symlink()
+        || windows_reparse_point(metadata.file_attributes())
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(RecoveryError::UnsafePath(path.to_path_buf()));
+    }
+    let handle = same_file::Handle::from_file(file.try_clone()?)?;
+    Ok(OpenedJournalPath {
+        fingerprint: JournalPathFingerprint {
+            handle: Arc::new(handle),
+        },
+        anchor: Arc::new(file),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_journal_path(path: &Path, directory: bool) -> Result<OpenedJournalPath, RecoveryError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(RecoveryError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(OpenedJournalPath {
+        fingerprint: JournalPathFingerprint {
+            length: metadata.len(),
+        },
+        anchor: Arc::new(OpenOptions::new().read(true).open(path)?),
+    })
+}
+
 fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
     let file_name = path
         .file_name()
@@ -1267,4 +1546,13 @@ fn durable_create_new(path: &Path, bytes: &[u8]) -> Result<(), RecoveryError> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reparse_tests {
+    #[test]
+    fn windows_reparse_attribute_is_unsafe() {
+        assert!(super::windows_reparse_point(0x400));
+        assert!(!super::windows_reparse_point(0));
+    }
 }

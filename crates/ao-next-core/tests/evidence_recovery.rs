@@ -796,10 +796,7 @@ fn read_only_provider_state_rejects_missing_events_without_creation() {
     let journal_root = recovery.path().join("journal");
     let journal = CheckpointJournal::new(&journal_root, 16 * 1024).expect("journal");
     journal.bind_request(&request).expect("request binding");
-    let bound =
-        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &request).expect("bound journal");
-
-    assert!(bound.provider_state_read_only(&request).is_err());
+    assert!(CheckpointJournal::open_bound(&journal_root, 16 * 1024, &request).is_err());
     assert!(
         !journal_root.join("execution-events").exists(),
         "read-only provider state created event directory"
@@ -824,6 +821,246 @@ fn read_only_provider_state_rejects_tampered_identity_without_rewrite() {
         .is_err()
     );
     assert_eq!(std::fs::read(identity_path).expect("identity bytes"), b"{}");
+}
+
+fn record_complete_provider_lifecycle(fixture: &Fixture) {
+    let index = digest_bytes(b"capture-index");
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &digest_bytes(b"invocation"))
+        .expect("provider start");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+        .expect("provider output");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &index)
+        .expect("capture published");
+    fixture
+        .journal
+        .record_provider_capture_verified(&fixture.request, &index)
+        .expect("capture verified");
+    fixture
+        .journal
+        .record_adapter_turn_normalized(&fixture.request, &digest_bytes(b"turn"))
+        .expect("turn normalized");
+}
+
+#[cfg(windows)]
+fn mutation_completed(result: std::io::Result<()>, action: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || matches!(error.raw_os_error(), Some(5 | 32)) =>
+        {
+            false
+        }
+        Err(error) => panic!("{action}: {error}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn mutation_completed(result: std::io::Result<()>, action: &str) -> bool {
+    result.unwrap_or_else(|error| panic!("{action}: {error}"));
+    true
+}
+
+#[test]
+fn existing_only_journal_rejects_same_byte_identity_swap_before_terminal_append() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    journal
+        .begin_verification(&fixture.request)
+        .expect("verification start");
+    journal
+        .record_verifier(&fixture.request, &digest_bytes(b"report"))
+        .expect("verifier record");
+    let identity_path = journal_root.join("execution-identity.json");
+    let identity_bytes = std::fs::read(&identity_path).expect("identity bytes");
+    if !mutation_completed(std::fs::remove_file(&identity_path), "remove identity") {
+        return;
+    }
+    std::fs::write(&identity_path, identity_bytes).expect("replacement identity");
+    let events_before = std::fs::read_dir(journal_root.join("execution-events"))
+        .expect("execution events")
+        .count();
+
+    assert!(
+        journal
+            .publish_terminal_record(&fixture.request, br#"{"terminal":"passed"}"#)
+            .is_err(),
+        "replacement identity authorized terminal publication"
+    );
+    assert_eq!(
+        std::fs::read_dir(journal_root.join("execution-events"))
+            .expect("execution events")
+            .count(),
+        events_before
+    );
+    assert!(
+        std::fs::read_dir(&journal_root)
+            .expect("journal root")
+            .all(|entry| !entry
+                .expect("journal entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with("terminal-"))
+    );
+}
+
+#[test]
+fn existing_only_journal_does_not_recreate_deleted_event_directory() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    let events = journal_root.join("execution-events");
+    if !mutation_completed(std::fs::remove_dir_all(&events), "remove execution events") {
+        return;
+    }
+
+    assert!(journal.begin_verification(&fixture.request).is_err());
+    assert!(!events.exists(), "existing-only journal recreated events");
+}
+
+#[test]
+fn existing_only_journal_rejects_same_byte_event_directory_swap() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    let events = journal_root.join("execution-events");
+    let replacement = journal_root.join("replacement-events");
+    std::fs::create_dir(&replacement).expect("replacement directory");
+    for entry in std::fs::read_dir(&events).expect("execution events") {
+        let entry = entry.expect("event entry");
+        std::fs::copy(entry.path(), replacement.join(entry.file_name())).expect("copy event");
+    }
+    let original = journal_root.join("original-events");
+    if !mutation_completed(std::fs::rename(&events, &original), "move original events") {
+        return;
+    }
+    std::fs::rename(&replacement, &events).expect("install replacement events");
+
+    assert!(
+        journal.provider_state_read_only(&fixture.request).is_err(),
+        "replacement event directory retained journal authority"
+    );
+}
+
+#[test]
+fn existing_only_journal_rejects_deleted_bound_event_file() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    let event = std::fs::read_dir(journal_root.join("execution-events"))
+        .expect("execution events")
+        .map(|entry| entry.expect("event entry").path())
+        .max()
+        .expect("last event");
+    if !mutation_completed(std::fs::remove_file(&event), "remove event") {
+        return;
+    }
+
+    assert!(
+        journal.provider_state_read_only(&fixture.request).is_err(),
+        "shorter event prefix retained journal authority"
+    );
+    assert!(!event.exists(), "existing-only journal recreated event");
+}
+
+#[cfg(windows)]
+#[test]
+fn open_bound_rejects_windows_reparse_journal_paths() {
+    let root_fixture = fixture();
+    record_complete_provider_lifecycle(&root_fixture);
+    let link = root_fixture.recovery.path().join("journal-link");
+    match std::os::windows::fs::symlink_dir(root_fixture.recovery.path().join("journal"), &link) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314) =>
+        {
+            return;
+        }
+        Err(error) => panic!("journal reparse root: {error}"),
+    }
+
+    assert!(CheckpointJournal::open_bound(&link, 16 * 1024, &root_fixture.request).is_err());
+
+    let identity = fixture();
+    record_complete_provider_lifecycle(&identity);
+    let identity_path = identity
+        .recovery
+        .path()
+        .join("journal/execution-identity.json");
+    let identity_target = identity.recovery.path().join("identity-target.json");
+    std::fs::copy(&identity_path, &identity_target).expect("identity target");
+    std::fs::remove_file(&identity_path).expect("remove identity");
+    std::os::windows::fs::symlink_file(&identity_target, &identity_path).expect("identity reparse");
+    assert!(
+        CheckpointJournal::open_bound(
+            identity.recovery.path().join("journal"),
+            16 * 1024,
+            &identity.request,
+        )
+        .is_err()
+    );
+
+    let directory = fixture();
+    record_complete_provider_lifecycle(&directory);
+    let event_directory = directory.recovery.path().join("journal/execution-events");
+    let event_target = directory.recovery.path().join("event-target");
+    std::fs::rename(&event_directory, &event_target).expect("move event directory");
+    std::os::windows::fs::symlink_dir(&event_target, &event_directory)
+        .expect("event directory reparse");
+    assert!(
+        CheckpointJournal::open_bound(
+            directory.recovery.path().join("journal"),
+            16 * 1024,
+            &directory.request,
+        )
+        .is_err()
+    );
+
+    let event = fixture();
+    record_complete_provider_lifecycle(&event);
+    let event_directory = event.recovery.path().join("journal/execution-events");
+    let event_path = std::fs::read_dir(&event_directory)
+        .expect("execution events")
+        .next()
+        .expect("event")
+        .expect("event entry")
+        .path();
+    let event_target = event.recovery.path().join("event-target.json");
+    std::fs::copy(&event_path, &event_target).expect("event target");
+    std::fs::remove_file(&event_path).expect("remove event");
+    std::os::windows::fs::symlink_file(&event_target, &event_path).expect("event reparse");
+    assert!(
+        CheckpointJournal::open_bound(
+            event.recovery.path().join("journal"),
+            16 * 1024,
+            &event.request,
+        )
+        .is_err()
+    );
 }
 
 #[test]

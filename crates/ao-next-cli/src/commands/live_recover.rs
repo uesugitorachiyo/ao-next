@@ -178,6 +178,7 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
             prepared_run_digest,
             execution_authority: authority,
             execution_authority_digest,
+            journal,
         },
         &index_digest,
     )

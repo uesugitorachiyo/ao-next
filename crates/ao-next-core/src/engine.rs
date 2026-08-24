@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -357,6 +357,39 @@ where
                 );
             }
 
+            let mut journal_effect_states = BTreeMap::new();
+            if let Some(journal) = journal {
+                let effects = turn
+                    .actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        AdapterAction::Effect(effect) => Some(effect.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let states = match journal.effect_states(request, &effects) {
+                    Ok(states) => states,
+                    Err(error) => {
+                        return transition_and_finish(
+                            lifecycle,
+                            identity,
+                            metrics,
+                            events,
+                            verifier_report_digest,
+                            RunState::Failed,
+                            "journal_failure",
+                            &error.to_string(),
+                        );
+                    }
+                };
+                journal_effect_states.extend(
+                    effects
+                        .into_iter()
+                        .zip(states)
+                        .map(|(effect, state)| (effect.effect_id, state)),
+                );
+            }
+
             for action in turn.actions {
                 match action {
                     AdapterAction::Effect(effect) => {
@@ -396,10 +429,10 @@ where
                                 "adapter repeated an effect identity",
                             );
                         }
-                        if let Some(journal) = journal {
-                            match journal.effect_state(request, &effect) {
-                                Ok(JournalEffectState::Fresh) => {}
-                                Ok(JournalEffectState::Unknown) => {
+                        if journal.is_some() {
+                            match journal_effect_states.remove(&effect.effect_id) {
+                                Some(JournalEffectState::Fresh) => {}
+                                Some(JournalEffectState::Unknown) => {
                                     return transition_and_finish(
                                         lifecycle,
                                         identity,
@@ -411,7 +444,7 @@ where
                                         "durable effect intent exists without durable completion; automatic retry is forbidden",
                                     );
                                 }
-                                Ok(JournalEffectState::Completed(observation)) => {
+                                Some(JournalEffectState::Completed(observation)) => {
                                     effect_observations.push(observation.clone());
                                     push_event(
                                         &mut events,
@@ -421,7 +454,7 @@ where
                                     );
                                     continue;
                                 }
-                                Err(error) => {
+                                None => {
                                     return transition_and_finish(
                                         lifecycle,
                                         identity,
@@ -430,7 +463,7 @@ where
                                         verifier_report_digest,
                                         RunState::Failed,
                                         "journal_failure",
-                                        &error.to_string(),
+                                        "journal effect set changed during execution",
                                     );
                                 }
                             }

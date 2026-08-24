@@ -703,6 +703,7 @@ fn provider_capture_events_are_ordered_before_effect_intent() {
         .provider_state(&fixture.request)
         .expect("state");
     assert_eq!(state.prepared_run_digest, Some(prepared));
+    assert_eq!(state.invocation_digest, Some(invocation));
     assert_eq!(state.capture_index_digest, Some(index));
     assert_eq!(state.adapter_turn_digest, Some(turn));
     assert!(state.provider_process_started);
@@ -756,6 +757,49 @@ fn effect_intent_requires_normalized_adapter_turn() {
             .record_effect_intent(&fixture.request, &effect(&fixture.request))
             .is_err()
     );
+}
+
+#[test]
+fn exact_effect_set_rejects_journal_only_intent() {
+    let fixture = fixture();
+    let index = digest_bytes(b"capture-index");
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .expect("provider intent");
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &digest_bytes(b"invocation"))
+        .expect("provider start");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+        .expect("provider output");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &index)
+        .expect("capture published");
+    fixture
+        .journal
+        .record_provider_capture_verified(&fixture.request, &index)
+        .expect("capture verified");
+    fixture
+        .journal
+        .record_adapter_turn_normalized(&fixture.request, &digest_bytes(b"turn"))
+        .expect("turn normalized");
+    let expected = effect(&fixture.request);
+    let mut extra = expected.clone();
+    extra.effect_id = "journal-only-effect".into();
+    extra.paths = vec!["journal-only.txt".into()];
+    fixture
+        .journal
+        .record_effect_intent(&fixture.request, &extra)
+        .expect("journal-only intent");
+
+    assert!(matches!(
+        fixture.journal.effect_states(&fixture.request, &[expected]),
+        Err(RecoveryError::EffectIdentityMismatch)
+    ));
 }
 
 #[test]
@@ -1009,6 +1053,47 @@ fn verification_resume_and_terminal_publication_are_identity_bound_and_idempoten
         journal.publish_terminal_record(&request, b"{}"),
         Err(RecoveryError::EventDigestMismatch)
     ));
+}
+
+#[test]
+fn terminal_file_without_event_is_reused_and_event_is_appended_once() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let root = recovery.path().join("journal");
+    let journal = CheckpointJournal::new(&root, 16 * 1024).expect("execution journal");
+    journal
+        .begin_verification(&request)
+        .expect("verification start");
+    journal
+        .record_verifier(&request, &digest(ONE_DIGEST))
+        .expect("verifier record");
+    let terminal = br#"{"schema_version":"ao.next.test-terminal.v1","wall_clock_ms":41}"#;
+    let digest = digest_bytes(terminal);
+    let digest_hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("digest prefix");
+    let terminal_path = root.join(format!("terminal-{digest_hex}.json"));
+    std::fs::write(&terminal_path, terminal).expect("orphan terminal bytes");
+
+    assert_eq!(
+        journal
+            .recover_terminal_record(&request)
+            .expect("recover terminal")
+            .expect("terminal bytes"),
+        terminal
+    );
+    assert_eq!(
+        journal
+            .recover_terminal_record(&request)
+            .expect("idempotent recovery")
+            .expect("terminal bytes"),
+        terminal
+    );
+    assert_eq!(
+        std::fs::read(terminal_path).expect("terminal file"),
+        terminal
+    );
 }
 
 #[test]

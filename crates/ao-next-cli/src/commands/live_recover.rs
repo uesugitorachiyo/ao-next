@@ -1,7 +1,4 @@
-use ao_next_core::adapter::process::ProcessRunner;
-use ao_next_core::adapter::{
-    AdapterAction, CancellationToken, InvocationError, InvocationOutput, PreparedInvocation,
-};
+use ao_next_core::adapter::AdapterAction;
 use ao_next_core::contracts::{PreparedRunReceipt, validate_authority_current};
 use ao_next_core::recovery::{CheckpointJournal, JournalEffectState};
 use ao_next_core::strict_json::canonical_digest;
@@ -10,26 +7,10 @@ use chrono::Utc;
 use super::live::{
     LiveVariant, capture_context, execute_recovered_live, execution_journal_maximum_bytes,
     execution_journal_root, gate_retained_capture, load_trusted_live_input_for_recovery,
-    load_verified_capture, normalize_retained_turn, revalidate_recovery_before_mutation,
-    validate_prepared_run_for_recovery,
+    load_verified_capture, normalize_retained_turn, recovered_terminal_output,
+    revalidate_recovery_before_mutation, validate_prepared_run_for_recovery,
 };
 use super::{CommandFailure, CommandOutput, RecoverLiveArgs, decode_file};
-
-struct RetainedCaptureRunner {
-    output: Option<InvocationOutput>,
-}
-
-impl ProcessRunner for RetainedCaptureRunner {
-    fn run(
-        &mut self,
-        _: &PreparedInvocation,
-        _: &CancellationToken,
-    ) -> Result<InvocationOutput, InvocationError> {
-        self.output
-            .take()
-            .ok_or_else(|| InvocationError::Io("retained capture already consumed".into()))
-    }
-}
 
 #[allow(
     clippy::too_many_lines,
@@ -106,13 +87,7 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
     }
     gate_retained_capture(&input, &context, &index_digest, &output)?;
 
-    let turn = normalize_retained_turn(
-        &input,
-        &git_workspace,
-        RetainedCaptureRunner {
-            output: Some(output.clone()),
-        },
-    )?;
+    let (turn, capture) = normalize_retained_turn(&input, &output)?;
     journal
         .record_adapter_turn_normalized(
             &input.request,
@@ -123,14 +98,19 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
 
     let mut fresh_effect = false;
     let mut unknown_effect = false;
-    for action in &turn.actions {
-        let AdapterAction::Effect(effect) = action else {
-            continue;
-        };
-        match journal
-            .effect_state(&input.request, effect)
-            .map_err(|error| CommandFailure::evidence(error.to_string()))?
-        {
+    let effects = turn
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            AdapterAction::Effect(effect) => Some(effect.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for state in journal
+        .effect_states(&input.request, &effects)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+    {
+        match state {
             JournalEffectState::Fresh => fresh_effect = true,
             JournalEffectState::Unknown => unknown_effect = true,
             JournalEffectState::Completed(_) => {}
@@ -145,6 +125,18 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
             "effect completion is unknown; automatic retry is forbidden",
         ));
     }
+    if !fresh_effect
+        && let Some(bytes) = journal
+            .retained_terminal_record(&input.request)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?
+    {
+        let output =
+            recovered_terminal_output(&input, &git_workspace, &index_digest, &capture, &bytes)?;
+        journal
+            .publish_terminal_record(&input.request, &bytes)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        return Ok(output);
+    }
     if fresh_effect {
         revalidate_recovery_before_mutation(&input, &git_workspace)?;
         validate_authority_current(&input.request.authority, Utc::now())
@@ -153,9 +145,9 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
 
     execute_recovered_live(
         &input,
-        RetainedCaptureRunner {
-            output: Some(output),
-        },
+        turn,
+        capture,
+        output,
         (git_workspace, prepared_run_digest),
         &index_digest,
     )

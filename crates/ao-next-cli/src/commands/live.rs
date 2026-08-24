@@ -19,8 +19,9 @@ use ao_next_core::adapter::process::{
     ProviderVisibility, RuntimeCapture, RuntimeEnvelopeCapture, capture_runtime_output,
 };
 use ao_next_core::adapter::{
-    AdapterTurn, CancellationToken, EffectObservation, InvocationError, InvocationLimits,
-    InvocationOutput, PreparedInvocation, RuntimeAdapter, TokenUsage, TurnContext, codex,
+    AdapterError, AdapterIdentity, AdapterTurn, CancellationToken, EffectObservation,
+    InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation, RuntimeAdapter,
+    TokenUsage, TurnContext, claude, codex,
 };
 use ao_next_core::capture::{CaptureIndexStore, CapturePublication};
 use ao_next_core::contracts::{
@@ -60,7 +61,7 @@ const ADAPTER_TURN_SCHEMA_BYTES: &[u8] =
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub(super) enum LiveVariant {
     N0,
@@ -139,10 +140,10 @@ struct SourceSnapshot {
     files: Vec<SnapshotEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LiveRunRecord {
-    schema_version: &'static str,
+    schema_version: String,
     variant: LiveVariant,
     terminal_state: RunState,
     measurement: RunMeasurement,
@@ -155,13 +156,39 @@ struct LiveRunRecord {
     record_digest: Digest,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[allow(clippy::too_many_arguments)]
+fn live_record_digest(
+    variant: LiveVariant,
+    terminal_state: &RunState,
+    measurement: &RunMeasurement,
+    capture_digests: &[Digest],
+    raw_capture_index_digest: &Digest,
+    verifier_report_digest: Option<&Digest>,
+    git_workspace: &GitWorkspaceIdentity,
+    ao2_control_diagnostics: &[serde_json::Value],
+    native_effect_observations: &[EffectObservation],
+) -> Result<Digest, CommandFailure> {
+    canonical_digest(&(
+        variant,
+        terminal_state,
+        measurement,
+        capture_digests,
+        raw_capture_index_digest,
+        verifier_report_digest,
+        git_workspace,
+        ao2_control_diagnostics,
+        native_effect_observations,
+    ))
+    .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GitWorkspaceIdentity {
     pub(super) repository_root: PathBuf,
     pub(super) common_dir: PathBuf,
     pub(super) head_commit: String,
-    pub(super) branch: &'static str,
+    pub(super) branch: String,
     pub(super) control_digest: Digest,
     pub(super) index_digest: Digest,
 }
@@ -689,22 +716,22 @@ struct CaptureFirstRunner<'a, R> {
     prepared_run_digest: Digest,
 }
 
-enum N7ProcessRunner<'a, R> {
-    Capture(Box<CaptureFirstRunner<'a, R>>),
-    Retained(R),
+struct RetainedN7Execution {
+    turn: AdapterTurn,
+    capture: RuntimeCapture,
+    output: InvocationOutput,
+    index_digest: Digest,
 }
 
-impl<R: ProcessRunner> ProcessRunner for N7ProcessRunner<'_, R> {
-    fn run(
-        &mut self,
-        invocation: &PreparedInvocation,
-        cancellation: &CancellationToken,
-    ) -> Result<InvocationOutput, InvocationError> {
-        match self {
-            Self::Capture(runner) => runner.run(invocation, cancellation),
-            Self::Retained(runner) => runner.run(invocation, cancellation),
-        }
-    }
+struct RetainedN7Adapter {
+    identity: AdapterIdentity,
+    run_id: String,
+    source: ao_next_core::contracts::SourceIdentity,
+    workspace: ao_next_core::contracts::WorkspaceIdentity,
+    authority_digest: Digest,
+    policy_digest: Digest,
+    verifier_profile_digest: Digest,
+    turn: Option<AdapterTurn>,
 }
 
 impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
@@ -723,6 +750,8 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
                 "duplicate provider capture identity".into(),
             ));
         }
+        let provider_invocation_digest =
+            invocation_digest(invocation).map_err(|error| InvocationError::Io(error.message))?;
         if let Some(journal) = self.journal {
             journal
                 .provider_may_start(self.request)
@@ -730,22 +759,22 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
                     journal.record_provider_request_intent(self.request, &self.prepared_run_digest)
                 })
                 .and_then(|()| {
-                    journal.record_provider_process_started(
-                        self.request,
-                        &invocation_digest(invocation)
-                            .map_err(|error| std::io::Error::other(error.message))?,
-                    )
+                    journal
+                        .record_provider_process_started(self.request, &provider_invocation_digest)
                 })
                 .map_err(|error| InvocationError::Io(error.to_string()))?;
         }
         let output = self.runner.run(invocation, cancellation)?;
-        let (index, raw_digest) = retain_raw_capture_files(
+        let (index, _) = retain_raw_capture_files(
             &self.raw_capture_root,
             &self.capture_context,
             &[],
             std::slice::from_ref(&output),
+            Some(&provider_invocation_digest),
         )
         .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        let raw_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
+            .map_err(|error| InvocationError::Io(error.to_string()))?;
         if let Some(journal) = self.journal {
             journal
                 .record_provider_output_retained(self.request, &raw_digest)
@@ -798,6 +827,32 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
             ));
         }
         Ok(output)
+    }
+}
+
+impl RuntimeAdapter for RetainedN7Adapter {
+    fn identity(&self) -> AdapterIdentity {
+        self.identity.clone()
+    }
+
+    fn execute_turn(&mut self, context: &TurnContext) -> Result<AdapterTurn, AdapterError> {
+        if context.run_id != self.run_id
+            || context.turn_index != 0
+            || context.repair_attempt != 0
+            || context.source != self.source
+            || context.workspace != self.workspace
+            || context.authority_digest != self.authority_digest
+            || context.policy_digest != self.policy_digest
+            || context.verifier_profile_digest != self.verifier_profile_digest
+            || !context.effect_observations.is_empty()
+        {
+            return Err(AdapterError::Runtime(
+                "retained adapter context drifted from immutable request bindings".into(),
+            ));
+        }
+        self.turn
+            .take()
+            .ok_or_else(|| AdapterError::Runtime("retained turn already consumed".into()))
     }
 }
 
@@ -970,7 +1025,7 @@ fn validate_prepared_run_with_mode(
         repository_root: receipt.repository_root.clone(),
         common_dir: receipt.common_directory.clone(),
         head_commit: receipt.base_commit.clone(),
-        branch: GIT_BRANCH,
+        branch: GIT_BRANCH.into(),
         control_digest: receipt.control_digest.clone(),
         index_digest: receipt.index_digest.clone(),
     };
@@ -1343,9 +1398,11 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
     )
 }
 
-pub(super) fn execute_recovered_live<P: ProcessRunner>(
+pub(super) fn execute_recovered_live(
     input: &LiveRunInput,
-    provider_runner: P,
+    turn: AdapterTurn,
+    capture: RuntimeCapture,
+    output: InvocationOutput,
     prepared: (GitWorkspaceIdentity, Digest),
     retained_index: &Digest,
 ) -> Result<CommandOutput, CommandFailure> {
@@ -1353,11 +1410,82 @@ pub(super) fn execute_recovered_live<P: ProcessRunner>(
         input,
         LiveVariant::N7,
         MeasurementOrigin::LiveProvider,
-        provider_runner,
+        BoundedProcessRunner,
         BoundedProcessRunner,
         Some(prepared),
-        Some(retained_index),
+        Some(RetainedN7Execution {
+            turn,
+            capture,
+            output,
+            index_digest: retained_index.clone(),
+        }),
     )
+}
+
+pub(super) fn recovered_terminal_output(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+    index_digest: &Digest,
+    capture: &RuntimeCapture,
+    bytes: &[u8],
+) -> Result<CommandOutput, CommandFailure> {
+    let record: LiveRunRecord = decode_strict_json(
+        bytes,
+        usize::try_from(execution_journal_maximum_bytes(&input.request)).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let task = input
+        .corpus
+        .tasks
+        .iter()
+        .find(|task| task.task_id == input.task_id)
+        .ok_or_else(|| CommandFailure::evidence("task is not in the sealed corpus"))?;
+    if record.schema_version != "ao.next.live-run-record.v1"
+        || record.variant != LiveVariant::N7
+        || record.git_workspace != *git_workspace
+        || record.raw_capture_index_digest != *index_digest
+        || record.capture_digests != [capture.raw_capture_digest.clone()]
+        || record.verifier_report_digest.is_none()
+        || record.measurement.corpus_digest != input.corpus.corpus_digest
+        || record.measurement.run_id != input.request.run_id
+        || record.measurement.trial_id != input.trial_id
+        || record.measurement.workspace_instance_id != input.workspace_instance_id
+        || record.measurement.task_id != input.task_id
+        || record.measurement.source_digest != task.source_digest
+        || record.measurement.workspace_seed_digest != task.workspace_seed_digest
+        || live_record_digest(
+            record.variant,
+            &record.terminal_state,
+            &record.measurement,
+            &record.capture_digests,
+            &record.raw_capture_index_digest,
+            record.verifier_report_digest.as_ref(),
+            &record.git_workspace,
+            &record.ao2_control_diagnostics,
+            &record.native_effect_observations,
+        )? != record.record_digest
+        || canonical_json_bytes(&record)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?
+            != bytes
+    {
+        return Err(CommandFailure::evidence(
+            "retained terminal record identity is contradictory",
+        ));
+    }
+    let status = match record.terminal_state {
+        _ if record.measurement.hidden_test_exposure => 7,
+        RunState::Passed => 0,
+        RunState::Interrupted => 6,
+        RunState::Failed => 5,
+        _ => 4,
+    };
+    let summary = format!(
+        "N7 run {} ended {:?}",
+        input.request.run_id, record.terminal_state
+    );
+    let value = serde_json::to_value(record)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    Ok(CommandOutput::new(value, summary, status))
 }
 
 #[allow(
@@ -1371,7 +1499,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     provider_runner: P,
     verifier_runner: V,
     prepared: Option<(GitWorkspaceIdentity, Digest)>,
-    recovery_index: Option<&Digest>,
+    recovery: Option<RetainedN7Execution>,
 ) -> Result<CommandOutput, CommandFailure> {
     let started_at = Utc::now();
     let started = Instant::now();
@@ -1381,7 +1509,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
             variant,
             started_at,
             Some(git_workspace),
-            if recovery_index.is_some() {
+            if recovery.is_some() {
                 CaptureRootMode::RequireRetained
             } else {
                 CaptureRootMode::RequireEmpty
@@ -1407,13 +1535,8 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
             .map_err(|error| CommandFailure::evidence(error.to_string()))?;
         (git_workspace, digest)
     };
-    let provider_visibility = if variant == LiveVariant::N7 {
-        Some(n7_provider_visibility(
-            input,
-            validated.task,
-            &git_workspace,
-            recovery_index.is_some(),
-        )?)
+    let provider_visibility = if variant == LiveVariant::N7 && recovery.is_none() {
+        Some(n7_provider_visibility(input, validated.task)?)
     } else {
         None
     };
@@ -1424,18 +1547,18 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
         input.command_verifier.clone(),
         verifier_runner,
         cancellation.clone(),
-        if variant == LiveVariant::N7 {
-            input.request.authority.issued_at
-        } else {
-            started_at
-        },
+        started_at,
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    let retained_index = Arc::new(Mutex::new(recovery_index.cloned()));
+    let retained_index = Arc::new(Mutex::new(
+        recovery
+            .as_ref()
+            .map(|retained| retained.index_digest.clone()),
+    ));
     let retained_failure = Arc::new(Mutex::new(None));
     let capture_context = capture_context(input, variant);
-    verify_git_workspace(&git_workspace, recovery_index.is_none())?;
-    if recovery_index.is_none() {
+    verify_git_workspace(&git_workspace, recovery.is_none())?;
+    if recovery.is_none() {
         revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
     }
     let journal = (variant == LiveVariant::N7)
@@ -1458,31 +1581,35 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
             invocation_limits,
         ),
         LiveVariant::N7 => {
-            let runner = if recovery_index.is_some() {
-                N7ProcessRunner::Retained(provider_runner)
+            if let Some(retained) = recovery {
+                execute_n7_retained(
+                    input,
+                    retained,
+                    &mut verifier,
+                    journal.as_ref().expect("N7 journal constructed"),
+                )
             } else {
-                N7ProcessRunner::Capture(Box::new(CaptureFirstRunner {
-                    runner: provider_runner,
-                    raw_capture_root: input.raw_capture_root.clone(),
-                    capture_context: capture_context.clone(),
-                    retained_index: retained_index.clone(),
-                    retained_failure: retained_failure.clone(),
-                    runtime: input.request.model_profile.runtime.clone(),
-                    max_tokens: input.request.limits.max_tokens,
-                    journal: journal.as_ref(),
-                    request: &input.request,
-                    prepared_run_digest: prepared_run_digest.clone(),
-                }))
-            };
-            execute_n7(
-                input,
-                provider_visibility.expect("N7 visibility constructed"),
-                runner,
-                &mut verifier,
-                cancellation.clone(),
-                invocation_limits,
-                journal.as_ref().expect("N7 journal constructed"),
-            )
+                execute_n7(
+                    input,
+                    provider_visibility.expect("N7 visibility constructed"),
+                    CaptureFirstRunner {
+                        runner: provider_runner,
+                        raw_capture_root: input.raw_capture_root.clone(),
+                        capture_context: capture_context.clone(),
+                        retained_index: retained_index.clone(),
+                        retained_failure: retained_failure.clone(),
+                        runtime: input.request.model_profile.runtime.clone(),
+                        max_tokens: input.request.limits.max_tokens,
+                        journal: journal.as_ref(),
+                        request: &input.request,
+                        prepared_run_digest: prepared_run_digest.clone(),
+                    },
+                    &mut verifier,
+                    cancellation.clone(),
+                    invocation_limits,
+                    journal.as_ref().expect("N7 journal constructed"),
+                )
+            }
         }
         LiveVariant::N4 => execute_n4(
             input,
@@ -1736,25 +1863,19 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     let native_effect_observations = outcome
         .as_ref()
         .map_or_else(Vec::new, |outcome| outcome.effect_observations.clone());
-    let mut digest_measurement = measurement.clone();
-    if variant == LiveVariant::N7 {
-        digest_measurement.wall_clock_ms = 0;
-        digest_measurement.model_wait_ms = 0;
-    }
-    let record_digest = canonical_digest(&(
+    let record_digest = live_record_digest(
         variant,
         &terminal_state,
-        &digest_measurement,
+        &measurement,
         &capture_digests,
         &raw_capture_index_digest,
-        &verifier_report_digest,
+        verifier_report_digest.as_ref(),
         &git_workspace,
         &ao2_control_diagnostics,
         &native_effect_observations,
-    ))
-    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    )?;
     let record = LiveRunRecord {
-        schema_version: "ao.next.live-run-record.v1",
+        schema_version: "ao.next.live-run-record.v1".into(),
         variant,
         terminal_state: terminal_state.clone(),
         measurement,
@@ -1874,6 +1995,7 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         capture_context,
         &[],
         std::slice::from_ref(&provider_output),
+        Some(&invocation_digest(&invocation)?),
     )?;
     let retained_capture_index = publish_raw_capture_index(&input.raw_capture_root, &index)?
         .digest()
@@ -2181,22 +2303,10 @@ fn ao2_control_diagnostic(
 fn n7_provider_visibility(
     input: &LiveRunInput,
     task: &EvaluationTask,
-    git_workspace: &GitWorkspaceIdentity,
-    retained: bool,
 ) -> Result<ProviderVisibility, CommandFailure> {
-    let workspace_digest = if retained {
-        canonical_digest(&snapshot_product_tree(
-            &input.request.workspace.root,
-            input.request.limits.max_input_bytes,
-            Some(git_workspace),
-        )?)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-    } else {
-        task.workspace_seed_digest.clone()
-    };
     ProviderVisibility::from_live_roots(
         &input.request.workspace.root,
-        &workspace_digest,
+        &task.workspace_seed_digest,
         &input.visible_fixtures,
         &task.visible_fixtures_digest,
         usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
@@ -2204,44 +2314,50 @@ fn n7_provider_visibility(
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))
 }
 
-pub(super) fn normalize_retained_turn<R: ProcessRunner>(
+pub(super) fn normalize_retained_turn(
     input: &LiveRunInput,
-    git_workspace: &GitWorkspaceIdentity,
-    runner: R,
-) -> Result<AdapterTurn, CommandFailure> {
-    let task = input
-        .corpus
-        .tasks
-        .iter()
-        .find(|task| task.task_id == input.task_id)
-        .ok_or_else(|| CommandFailure::invalid_input("task is not in the sealed corpus"))?;
-    let cancellation = CancellationToken::new();
-    let limits = invocation_limits(&input.request)?;
-    let config = ProcessAdapterConfig::from_request_with_visibility(
-        &input.request,
-        WORKER_ID,
-        &input.output_schema,
-        n7_provider_visibility(input, task, git_workspace, true)?,
-        limits,
-        cancellation.clone(),
-    )
-    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    let mut adapter = ProcessRuntimeAdapter::new(config, SingleProviderProcess::new(runner));
-    let context = TurnContext {
-        run_id: input.request.run_id.clone(),
-        turn_index: 0,
-        repair_attempt: 0,
-        source: input.request.source.clone(),
-        workspace: input.request.workspace.clone(),
-        authority_digest: canonical_digest(&input.request.authority)
-            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
-        policy_digest: input.request.policy_digest.clone(),
-        verifier_profile_digest: input.request.verifier_profile.profile_digest.clone(),
-        effect_observations: Vec::new(),
+    output: &InvocationOutput,
+) -> Result<(AdapterTurn, RuntimeCapture), CommandFailure> {
+    let identity = AdapterIdentity {
+        runtime: input.request.model_profile.runtime.clone(),
+        model_identifier: input.request.model_profile.model_identifier.clone(),
+        adapter_version: input.request.model_profile.adapter_version.clone(),
+        worker_id: WORKER_ID.into(),
     };
-    adapter
-        .execute_turn(&context)
-        .map_err(|error| CommandFailure::runtime(error.to_string()))
+    let capture = capture_runtime_output(
+        &identity.runtime,
+        output,
+        usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    let normalized = match identity.runtime.as_str() {
+        "codex" => codex::normalize_output(
+            identity.clone(),
+            &output.stdout,
+            usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+        ),
+        "claude" => claude::normalize_output(
+            identity.clone(),
+            &output.stdout,
+            usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+        ),
+        _ => unreachable!("validated N7 runtime"),
+    }
+    .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    if normalized.identity != identity {
+        return Err(CommandFailure::runtime("runtime identity drifted"));
+    }
+    let mut turn = normalized.turn;
+    turn.usage = capture.usage.clone();
+    Ok((
+        turn,
+        RuntimeCapture {
+            turn_index: 0,
+            raw_capture_digest: capture.raw_capture_digest,
+            usage: capture.usage,
+            model_wait_ms: 0,
+        },
+    ))
 }
 
 fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
@@ -2278,6 +2394,45 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         adapter.captures().to_vec(),
         adapter.raw_outputs().to_vec(),
         None,
+        Vec::new(),
+    ))
+}
+
+fn execute_n7_retained<V: ProcessRunner>(
+    input: &LiveRunInput,
+    retained: RetainedN7Execution,
+    verifier: &mut CommandEngineVerifier<V>,
+    journal: &CheckpointJournal,
+) -> Result<LiveExecution, CommandFailure> {
+    let mut adapter = RetainedN7Adapter {
+        identity: AdapterIdentity {
+            runtime: input.request.model_profile.runtime.clone(),
+            model_identifier: input.request.model_profile.model_identifier.clone(),
+            adapter_version: input.request.model_profile.adapter_version.clone(),
+            worker_id: WORKER_ID.into(),
+        },
+        run_id: input.request.run_id.clone(),
+        source: input.request.source.clone(),
+        workspace: input.request.workspace.clone(),
+        authority_digest: canonical_digest(&input.request.authority)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        policy_digest: input.request.policy_digest.clone(),
+        verifier_profile_digest: input.request.verifier_profile.profile_digest.clone(),
+        turn: Some(retained.turn),
+    };
+    let broker = LocalEffectBroker::new(
+        input.request.limits.max_effect_timeout_ms,
+        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
+        usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+    );
+    let outcome =
+        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, journal);
+    Ok((
+        outcome.terminal_state.clone(),
+        Some(outcome),
+        vec![retained.capture],
+        vec![retained.output],
+        Some(retained.index_digest),
         Vec::new(),
     ))
 }
@@ -2818,6 +2973,7 @@ struct RawCaptureIndex {
     run_id: String,
     trial_id: String,
     workspace_instance_id: String,
+    provider_invocation_digest: Option<Digest>,
     runtime_identity: CaptureRuntimeIdentity,
     entries: Vec<RawCaptureIndexEntry>,
 }
@@ -2842,6 +2998,7 @@ fn retain_raw_capture_files(
     context: &CaptureContext,
     captures: &[RuntimeCapture],
     outputs: &[InvocationOutput],
+    provider_invocation_digest: Option<&Digest>,
 ) -> Result<(RawCaptureIndex, Digest), CommandFailure> {
     if outputs.is_empty() {
         return Err(CommandFailure::evidence(
@@ -2894,6 +3051,7 @@ fn retain_raw_capture_files(
         run_id: context.run_id.clone(),
         trial_id: context.trial_id.clone(),
         workspace_instance_id: context.workspace_instance_id.clone(),
+        provider_invocation_digest: provider_invocation_digest.cloned(),
         runtime_identity: context.runtime_identity.clone(),
         entries,
     };
@@ -3019,6 +3177,13 @@ pub(super) fn load_verified_capture(
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let index_digest =
         canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if index.provider_invocation_digest.as_ref() != provider_state.invocation_digest.as_ref()
+        || provider_state.invocation_digest.is_none()
+    {
+        return Err(CommandFailure::evidence(
+            "provider invocation digest contradicts the journal",
+        ));
+    }
     if provider_state
         .capture_index_digest
         .as_ref()
@@ -3026,6 +3191,20 @@ pub(super) fn load_verified_capture(
     {
         return Err(CommandFailure::evidence(
             "raw capture index identity or digest is contradictory",
+        ));
+    }
+    let [entry] = index.entries.as_slice() else {
+        return Err(CommandFailure::evidence(
+            "recovery requires exactly one retained N7 capture",
+        ));
+    };
+    if entry.capture_order != 0
+        || entry.turn_index != 0
+        || entry.stdout_path != "capture-000.stdout"
+        || entry.stderr_path != "capture-000.stderr"
+    {
+        return Err(CommandFailure::evidence(
+            "retained N7 capture turn or path identity is contradictory",
         ));
     }
     let outputs =
@@ -3465,7 +3644,7 @@ pub(super) fn prepare_git_workspace(
         index_digest: git_index_digest(&repository_top)?,
         common_dir,
         head_commit,
-        branch: GIT_BRANCH,
+        branch: GIT_BRANCH.into(),
     };
     verify_git_workspace(&identity, false)?;
     Ok(identity)
@@ -6007,7 +6186,7 @@ else:
         wrong_head.head_commit = "0".repeat(40);
         assert!(verify_git_workspace(&wrong_head, true).is_err());
         let mut wrong_branch = identities[0].1.clone();
-        wrong_branch.branch = "wrong-branch";
+        wrong_branch.branch = "wrong-branch".into();
         assert!(verify_git_workspace(&wrong_branch, true).is_err());
         let mut wrong_common_dir = identities[0].1.clone();
         wrong_common_dir.common_dir = wrong_common_dir.repository_root.join("missing-common-dir");
@@ -6703,6 +6882,7 @@ else:
             &context,
             &[],
             std::slice::from_ref(&output),
+            None,
         )
         .expect("first immutable capture");
         let first = publish_raw_capture_index(&duplicate.input.raw_capture_root, &index)
@@ -6715,6 +6895,7 @@ else:
                 &context,
                 &[],
                 std::slice::from_ref(&output),
+                None,
             )
             .is_err()
         );
@@ -6739,6 +6920,7 @@ else:
                     stdout: b"too large".to_vec(),
                     stderr: Vec::new(),
                 }],
+                None,
             )
             .is_err()
         );

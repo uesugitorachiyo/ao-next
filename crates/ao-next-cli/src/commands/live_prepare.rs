@@ -69,7 +69,7 @@ pub fn execute(args: &PrepareLiveArgs) -> Result<CommandOutput, CommandFailure> 
             .map_err(|error| CommandFailure::evidence(error.to_string()))?,
         repository_root: git.repository_root,
         common_directory: git.common_dir,
-        branch: git.branch.into(),
+        branch: git.branch,
         base_commit: git.head_commit,
         control_digest: git.control_digest,
         index_digest: git.index_digest,

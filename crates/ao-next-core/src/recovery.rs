@@ -124,6 +124,7 @@ pub enum JournalEffectState {
 pub struct ProviderJournalState {
     pub prepared_run_digest: Option<Digest>,
     pub provider_process_started: bool,
+    pub invocation_digest: Option<Digest>,
     pub raw_capture_digest: Option<Digest>,
     pub capture_index_digest: Option<Digest>,
     pub capture_verified: bool,
@@ -183,6 +184,7 @@ fn provider_state_from_events(
     let mut state = ProviderJournalState {
         prepared_run_digest: None,
         provider_process_started: false,
+        invocation_digest: None,
         raw_capture_digest: None,
         capture_index_digest: None,
         capture_verified: false,
@@ -198,10 +200,11 @@ fn provider_state_from_events(
                 state.prepared_run_digest = Some(prepared_run_digest.clone());
                 provider_step = 1;
             }
-            JournalEventKind::ProviderProcessStarted { .. }
+            JournalEventKind::ProviderProcessStarted { invocation_digest }
                 if !effect_seen && provider_step == 1 =>
             {
                 state.provider_process_started = true;
+                state.invocation_digest = Some(invocation_digest.clone());
                 provider_step = 2;
             }
             JournalEventKind::ProviderOutputRetained { raw_capture_digest }
@@ -261,6 +264,73 @@ fn provider_state_from_events(
 fn require_provider_ready(state: &ProviderJournalState) -> Result<(), RecoveryError> {
     if state.prepared_run_digest.is_some() && state.adapter_turn_digest.is_none() {
         return Err(RecoveryError::EventSequenceInvalid);
+    }
+    Ok(())
+}
+
+fn effect_records(
+    events: &[JournalEvent],
+) -> Result<BTreeMap<String, (Digest, Option<EffectObservation>)>, RecoveryError> {
+    let mut effects = BTreeMap::new();
+    let mut terminal_published = false;
+    for event in events {
+        match &event.kind {
+            JournalEventKind::EffectIntent {
+                effect_id,
+                effect_digest,
+            } => {
+                if terminal_published
+                    || effects
+                        .insert(effect_id.clone(), (effect_digest.clone(), None))
+                        .is_some()
+                {
+                    return Err(RecoveryError::EffectIdentityMismatch);
+                }
+            }
+            JournalEventKind::EffectCompleted { observation } => {
+                if terminal_published {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                let Some((_, completion)) = effects.get_mut(&observation.effect_id) else {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                };
+                if completion.replace(observation.clone()).is_some() {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+            }
+            JournalEventKind::EffectCommitted { .. } => {
+                return Err(RecoveryError::EventSequenceInvalid);
+            }
+            JournalEventKind::TerminalPublished { .. } => {
+                if terminal_published {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                terminal_published = true;
+            }
+            JournalEventKind::ProviderRequestIntent { .. }
+            | JournalEventKind::ProviderProcessStarted { .. }
+            | JournalEventKind::ProviderOutputRetained { .. }
+            | JournalEventKind::ProviderCaptureIndexPublished { .. }
+            | JournalEventKind::ProviderCaptureVerified { .. }
+            | JournalEventKind::AdapterTurnNormalized { .. }
+            | JournalEventKind::VerificationStarted { .. }
+            | JournalEventKind::VerifierRecorded { .. } => {}
+        }
+    }
+    Ok(effects)
+}
+
+fn require_verification_complete(events: &[JournalEvent]) -> Result<(), RecoveryError> {
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
+        .count();
+    let records = events
+        .iter()
+        .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
+        .count();
+    if starts == 0 || starts != records {
+        return Err(RecoveryError::VerifierEventMissing);
     }
     Ok(())
 }
@@ -415,7 +485,7 @@ impl CheckpointJournal {
         invocation: &Digest,
     ) -> Result<(), RecoveryError> {
         let state = self.provider_state(request)?;
-        if state.prepared_run_digest.is_none() || state.provider_process_started {
+        if state.prepared_run_digest.is_none() || state.invocation_digest.is_some() {
             return Err(RecoveryError::EventSequenceInvalid);
         }
         self.append_execution_event(JournalEventKind::ProviderProcessStarted {
@@ -435,7 +505,7 @@ impl CheckpointJournal {
         raw: &Digest,
     ) -> Result<(), RecoveryError> {
         let state = self.provider_state(request)?;
-        if !state.provider_process_started || state.raw_capture_digest.is_some() {
+        if state.invocation_digest.is_none() || state.raw_capture_digest.is_some() {
             return Err(RecoveryError::EventSequenceInvalid);
         }
         self.append_execution_event(JournalEventKind::ProviderOutputRetained {
@@ -523,53 +593,10 @@ impl CheckpointJournal {
     ) -> Result<JournalEffectState, RecoveryError> {
         self.bind_request(request)?;
         let effect_digest = canonical_digest(effect)?;
-        let mut effects = BTreeMap::<String, (Digest, Option<EffectObservation>)>::new();
-        let mut terminal_published = false;
         let events = self.load_execution_events()?;
         let provider_state = provider_state_from_events(&events)?;
         require_provider_ready(&provider_state)?;
-        for event in events {
-            match event.kind {
-                JournalEventKind::EffectIntent {
-                    effect_id,
-                    effect_digest,
-                } => {
-                    if terminal_published
-                        || effects.insert(effect_id, (effect_digest, None)).is_some()
-                    {
-                        return Err(RecoveryError::EffectIdentityMismatch);
-                    }
-                }
-                JournalEventKind::EffectCompleted { observation } => {
-                    if terminal_published {
-                        return Err(RecoveryError::EventSequenceInvalid);
-                    }
-                    let Some((_, completion)) = effects.get_mut(&observation.effect_id) else {
-                        return Err(RecoveryError::EventSequenceInvalid);
-                    };
-                    if completion.replace(observation).is_some() {
-                        return Err(RecoveryError::EventSequenceInvalid);
-                    }
-                }
-                JournalEventKind::EffectCommitted { .. } => {
-                    return Err(RecoveryError::EventSequenceInvalid);
-                }
-                JournalEventKind::VerificationStarted { .. }
-                | JournalEventKind::VerifierRecorded { .. }
-                | JournalEventKind::ProviderRequestIntent { .. }
-                | JournalEventKind::ProviderProcessStarted { .. }
-                | JournalEventKind::ProviderOutputRetained { .. }
-                | JournalEventKind::ProviderCaptureIndexPublished { .. }
-                | JournalEventKind::ProviderCaptureVerified { .. }
-                | JournalEventKind::AdapterTurnNormalized { .. } => {}
-                JournalEventKind::TerminalPublished { .. } => {
-                    if terminal_published {
-                        return Err(RecoveryError::EventSequenceInvalid);
-                    }
-                    terminal_published = true;
-                }
-            }
-        }
+        let effects = effect_records(&events)?;
         let Some((recorded_digest, completion)) = effects.get(&effect.effect_id) else {
             return Ok(JournalEffectState::Fresh);
         };
@@ -579,6 +606,53 @@ impl CheckpointJournal {
         Ok(completion
             .clone()
             .map_or(JournalEffectState::Unknown, JournalEffectState::Completed))
+    }
+
+    /// Returns durable states only when the journal contains no effect outside
+    /// the exact normalized turn effect set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for duplicate expected identities, any
+    /// journal-only effect, effect digest drift, malformed sequencing, or
+    /// ordinary request and path validation failures.
+    pub fn effect_states(
+        &self,
+        request: &RunRequest,
+        effects: &[EffectRequest],
+    ) -> Result<Vec<JournalEffectState>, RecoveryError> {
+        self.bind_request(request)?;
+        let events = self.load_execution_events()?;
+        require_provider_ready(&provider_state_from_events(&events)?)?;
+        let recorded = effect_records(&events)?;
+        let mut expected = BTreeMap::new();
+        for effect in effects {
+            if effect.run_id != request.run_id
+                || expected
+                    .insert(effect.effect_id.clone(), canonical_digest(effect)?)
+                    .is_some()
+            {
+                return Err(RecoveryError::EffectIdentityMismatch);
+            }
+        }
+        if recorded
+            .keys()
+            .any(|effect_id| !expected.contains_key(effect_id))
+        {
+            return Err(RecoveryError::EffectIdentityMismatch);
+        }
+        effects
+            .iter()
+            .map(|effect| match recorded.get(&effect.effect_id) {
+                None => Ok(JournalEffectState::Fresh),
+                Some((digest, _)) if Some(digest) != expected.get(&effect.effect_id) => {
+                    Err(RecoveryError::EffectIdentityMismatch)
+                }
+                Some((_, completion)) => Ok(completion
+                    .clone()
+                    .map_or(JournalEffectState::Unknown, JournalEffectState::Completed)),
+            })
+            .collect()
     }
 
     /// Durably records exact effect intent before native execution.
@@ -686,6 +760,46 @@ impl CheckpointJournal {
         })
     }
 
+    /// Reads one exact content-addressed terminal file after completed
+    /// verification without changing journal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] when verification is incomplete, terminal
+    /// files or events are missing, duplicated, unsafe, oversized, or
+    /// contradictory, or the terminal event cannot be appended durably.
+    pub fn retained_terminal_record(
+        &self,
+        request: &RunRequest,
+    ) -> Result<Option<Vec<u8>>, RecoveryError> {
+        self.bind_request(request)?;
+        let events = self.load_execution_events()?;
+        require_provider_ready(&provider_state_from_events(&events)?)?;
+        let terminal = self.terminal_record(&events)?;
+        if terminal.is_some() {
+            require_verification_complete(&events)?;
+        }
+        Ok(terminal.map(|(_, bytes, _)| bytes))
+    }
+
+    /// Completes a terminal event from one exact pre-existing
+    /// content-addressed terminal file, or returns the already published bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::retained_terminal_record`] or
+    /// [`Self::publish_terminal_record`].
+    pub fn recover_terminal_record(
+        &self,
+        request: &RunRequest,
+    ) -> Result<Option<Vec<u8>>, RecoveryError> {
+        let Some(bytes) = self.retained_terminal_record(request)? else {
+            return Ok(None);
+        };
+        self.publish_terminal_record(request, &bytes)?;
+        Ok(Some(bytes))
+    }
+
     /// Publishes canonical terminal bytes at a content-addressed create-only
     /// path and then appends their durable journal event.
     ///
@@ -708,50 +822,90 @@ impl CheckpointJournal {
         let digest = digest_bytes(bytes);
         let events = self.load_execution_events()?;
         require_provider_ready(&provider_state_from_events(&events)?)?;
-        let starts = events
-            .iter()
-            .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
-            .count();
-        let records = events
-            .iter()
-            .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
-            .count();
-        let terminals = events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                JournalEventKind::TerminalPublished { record_digest } => Some(record_digest),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if terminals.len() > 1 {
-            return Err(RecoveryError::EventSequenceInvalid);
-        }
-        let terminal = terminals.first().copied();
-        if starts == 0 || starts != records {
-            return Err(RecoveryError::VerifierEventMissing);
+        require_verification_complete(&events)?;
+        if let Some((recorded_digest, recorded_bytes, recorded)) = self.terminal_record(&events)? {
+            if recorded_digest != digest || recorded_bytes != bytes {
+                return Err(RecoveryError::EventDigestMismatch);
+            }
+            if !recorded {
+                self.append_execution_event(JournalEventKind::TerminalPublished {
+                    record_digest: digest.clone(),
+                })?;
+            }
+            return Ok(digest);
         }
         let digest_hex = digest
             .as_str()
             .strip_prefix("sha256:")
             .ok_or(RecoveryError::EventDigestMismatch)?;
         let path = self.root.join(format!("terminal-{digest_hex}.json"));
-        if let Some(recorded) = terminal {
-            if recorded != &digest || read_regular_file(&path, self.maximum_bytes)? != bytes {
-                return Err(RecoveryError::EventDigestMismatch);
-            }
-            return Ok(digest);
-        }
-        if path.exists() || path.is_symlink() {
-            if read_regular_file(&path, self.maximum_bytes)? != bytes {
-                return Err(RecoveryError::EventDigestMismatch);
-            }
-        } else {
-            durable_create_new(&path, bytes)?;
-        }
+        durable_create_new(&path, bytes)?;
         self.append_execution_event(JournalEventKind::TerminalPublished {
             record_digest: digest.clone(),
         })?;
         Ok(digest)
+    }
+
+    fn terminal_record(
+        &self,
+        events: &[JournalEvent],
+    ) -> Result<Option<(Digest, Vec<u8>, bool)>, RecoveryError> {
+        let recorded = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                JournalEventKind::TerminalPublished { record_digest } => {
+                    Some(record_digest.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if recorded.len() > 1 {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        let mut files = std::fs::read_dir(&self.root)?
+            .map(|entry| entry.map(|value| value.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("terminal-"))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        if files.len() > 1 {
+            return Err(RecoveryError::EventDigestMismatch);
+        }
+        let Some(path) = files.pop() else {
+            return if recorded.is_empty() {
+                Ok(None)
+            } else {
+                Err(RecoveryError::EventDigestMismatch)
+            };
+        };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| RecoveryError::UnsafePath(path.clone()))?;
+        let digest_hex = name
+            .strip_prefix("terminal-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or(RecoveryError::EventDigestMismatch)?;
+        let digest = Digest::new(format!("sha256:{digest_hex}"))
+            .map_err(|_| RecoveryError::EventDigestMismatch)?;
+        let bytes = read_regular_file(&path, self.maximum_bytes)?;
+        if digest_bytes(&bytes) != digest
+            || recorded.first().is_some_and(|recorded| recorded != &digest)
+        {
+            return Err(RecoveryError::EventDigestMismatch);
+        }
+        Ok(Some((digest, bytes, !recorded.is_empty())))
     }
 
     fn append_execution_event(&self, kind: JournalEventKind) -> Result<(), RecoveryError> {

@@ -25,6 +25,8 @@ AO Next is not established as superior, production-ready, released, published, d
 - Keep provider transcripts, credentials, account identifiers, private paths, and unredacted workspace content out of tracked files.
 - Live provider calls, GitHub publication, releases, deployments, credential changes, AO migration, and production-readiness claims require separate explicit authority.
 - `run-current-ao-baseline`, `run-live`, `run-direct-baseline`, and `evaluate-live` must check `AO_NEXT_LIVE_PROVIDER_CALLS=operator-authorized` before resolving input or starting a process. Tests use injected fake runners and must not set this gate.
+- Require an unexpired prepared receipt before N7 provider spawn. Record provider intent in the append-only journal before process creation.
+- `recover-live` uses retained capture only. It must not resolve a provider and must reject the provider gate and provider-program overrides; provider intent without retained output is terminally unknown.
 - Keep N0 bound to AO2's existing sandbox and digest-approved patch path. Never relabel an N4 or N7 row as current AO.
 - Retain raw provider captures only under the input's empty operator-owned private capture directory outside every worker authority root.
 - Keep sealed hidden tests outside worker workspaces and authority roots. Never copy hidden bytes or paths into prompts, effect observations, logs, or public evidence.
@@ -42,6 +44,7 @@ AO Next is not established as superior, production-ready, released, published, d
 - Before live workspace preparation or provider spawn, derive `2 * context_limit + 2 * output_limit` with checked arithmetic and reject a lower `max_tokens`. After the provider returns, retain exact bounded stdout and stderr in the operator-owned private capture root, atomically publish and verify one immutable capture index, normalize one trusted terminal usage envelope, reject contradictory or overflowed counters, and enforce `max_tokens` before AO2 preview/apply, admitted N7 effects, verification, or public evidence assembly. N4 may mutate its workspace inside the native provider process; the gate still precedes its verifier and evidence assembly. Preserve private failure-stage metadata without treating retained output as a successful measurement.
 - Reject duplicate keys, unknown contract fields, oversized input, stale authority, unsafe paths, symlinks, non-regular files, identity drift, digest mismatch, and terminal contradictions.
 - Keep native effects and deterministic Git workspace preparation functional on Linux, macOS, and Windows. Preserve descriptor-relative Unix traversal and handle-anchored Windows identity checks; never replace either with unchecked canonical-path access.
+- Publication changes require physical Windows qualification on a new empty NTFS root whose path contains spaces, with result JSON outside the checkout.
 - Store retained evidence beneath digest-addressed paths and preserve the original locator separately.
 - Keep `target/`, `.ao-next/`, artifacts, logs, evaluation output, and local transcripts out of source changes.
 - If durable commands, architecture, authority, or lifecycle ownership changes, update this file in the same commit.

@@ -2,7 +2,7 @@
 
 AO Next is a separate Rust modular monolith supervised by AO Mission. Mission retains objective identity, checkpoints, and terminal reconciliation while AO Next owns strict intake, one-worker direct execution, effect admission, product verification, evidence, and recovery.
 
-The N7 execution path binds a request-identity journal before dispatch. Each authorized native effect records create-only intent before execution and content-addressed completion afterward; intent without completion is unknown and cannot be retried automatically. Verification starts and reports are journaled, and the final mechanically verified N7 record is retained at a content-addressed terminal path before the CLI returns it.
+The N7 execution path prepares a deterministic Git seed and receipt before dispatch, then binds a request-identity journal before provider process creation. Each authorized native effect records create-only intent before execution and content-addressed completion afterward; intent without completion is unknown and cannot be retried automatically. Verification starts and reports are journaled, and the final mechanically verified N7 record is retained at a content-addressed terminal path before the CLI returns it.
 
 ```text
 operator objective and authority
@@ -24,3 +24,5 @@ Hidden tests remain outside worker workspaces and authority roots. Verifier comm
 The launch candidate has no dynamic worker creation, runtime graph growth, permanent planner or reviewer roles, workflow compiler, or generic workflow language. Those remain future questions only if paired evaluation shows the direct candidate repeatedly needs them.
 
 Prompt and tool instructions begin small for each model profile. Instructions are added only after repeated measured failure. Verification, safety, permissions, and evidence remain deterministic harness responsibilities rather than prompt conventions.
+
+`recover-live` reads retained capture bytes and the prepared receipt, journal, and Git identity. It cannot start or resolve a provider, and it rejects provider authority and program overrides. Recovery is not a retry: provider intent without retained output is terminally unknown.

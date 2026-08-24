@@ -20,7 +20,16 @@ The commands accept `--input <path>`, `--trusted-corpus-digest <sha256>`, and `-
 
 The run request must bind the corpus source, workspace seed, objective, model, prompt, policy, verifier, adapter, and runtime identities. Live intake derives the minimum trusted-usage envelope as `2 * context_limit + 2 * output_limit`. Multiplication and addition are checked; zero model limits, arithmetic overflow, or a lower `max_tokens` rejects the input before workspace preparation or provider spawn. For `context_limit=262144` and `output_limit=20000`, the minimum is `564288`.
 
-`preflight-live-input` performs this intake with the same external digest anchors, without provider authority and without mutating the live workspace. The exact live command alone creates and verifies the deterministic Git repository immediately before provider spawn.
+The operator command roles are:
+
+```text
+preflight-live-input  -> read-only validation
+prepare-live          -> deterministic Git seed, zero provider calls
+run-live              -> exact receipt plus separately authorized provider
+recover-live          -> retained capture only, provider gate forbidden
+```
+
+`preflight-live-input` performs this intake with the same external digest anchors, without provider authority and without mutating the live workspace. `prepare-live` creates and verifies the deterministic Git repository and emits its exact receipt with zero provider calls. N7 `run-live --prepared-run <receipt>` requires that receipt and separately authorized provider authority. It records provider intent before process creation. `recover-live` validates retained bytes without provider resolution and rejects the provider gate and provider-program overrides. It is not a retry command: provider intent without retained output is terminally unknown.
 
 The workspace must match the sealed product snapshot before Git metadata exists. The harness rejects root or nested `.git` metadata, linked-worktree pointers, submodule markers, symlinks, path escapes, and non-regular entries. It then creates one ordinary repository at the workspace root, a fixed branch, and a deterministic seed commit whose message binds the sealed seed digest. Empty greenfield seeds use an empty commit. Git runs with fixed process-local identity, timestamps, configuration, and environment rather than host-global configuration. Immediately before provider spawn, the harness rechecks the canonical repository root, common directory, branch, `HEAD`, and clean porcelain status. The objective, visible fixtures, hidden tests, verifier profile, and output schema are re-read under byte and path bounds. Hidden tests must be outside every worker authority root. The output schema must equal the checked `docs/contracts/adapter-turn-v1.schema.json` value; live intake never invokes a schema generator.
 

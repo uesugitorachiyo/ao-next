@@ -962,8 +962,17 @@ fn fake_provider_bin(fixture: &PrepareLiveFixture) -> PathBuf {
     bin
 }
 
-#[cfg(unix)]
 fn run_prepared_live(fixture: &PrepareLiveFixture, receipt_path: &Path, bin_path: &Path) -> Output {
+    #[cfg(unix)]
+    let search_path = bin_path.to_path_buf();
+    #[cfg(windows)]
+    let search_path =
+        PathBuf::from(
+            std::env::join_paths(std::iter::once(bin_path.to_path_buf()).chain(
+                std::env::split_paths(&std::env::var_os("PATH").expect("Windows PATH")),
+            ))
+            .expect("provider PATH"),
+        );
     run_with_live_environment(
         &[
             "run-live",
@@ -976,7 +985,7 @@ fn run_prepared_live(fixture: &PrepareLiveFixture, receipt_path: &Path, bin_path
             "--trusted-verifier-profile-digest",
             fixture.verifier_digest.as_str(),
         ],
-        bin_path,
+        &search_path,
         Some("operator-authorized"),
     )
 }
@@ -1102,7 +1111,6 @@ fn prepared_run_rejects_identity_drift_before_provider_spawn() {
     }
 }
 
-#[cfg(unix)]
 struct RecoverLiveFixture {
     live: PrepareLiveFixture,
     receipt_path: PathBuf,
@@ -1112,12 +1120,10 @@ struct RecoverLiveFixture {
     index_digest: Digest,
 }
 
-#[cfg(unix)]
 fn recovery_turn(run_id: &str) -> AdapterTurn {
     recovery_turn_for_path(run_id, "product.txt")
 }
 
-#[cfg(unix)]
 fn recovery_turn_for_path(run_id: &str, path: &str) -> AdapterTurn {
     AdapterTurn {
         actions: vec![
@@ -1140,12 +1146,10 @@ fn recovery_turn_for_path(run_id: &str, path: &str) -> AdapterTurn {
     }
 }
 
-#[cfg(unix)]
 fn recovery_output(run_id: &str) -> (InvocationOutput, AdapterTurn) {
     recovery_output_for_path(run_id, "product.txt")
 }
 
-#[cfg(unix)]
 fn recovery_output_for_path(run_id: &str, path: &str) -> (InvocationOutput, AdapterTurn) {
     let turn = recovery_turn_for_path(run_id, path);
     let message = serde_json::to_string(&serde_json::json!({
@@ -1185,19 +1189,16 @@ fn recovery_output_for_path(run_id: &str, path: &str) -> (InvocationOutput, Adap
     )
 }
 
-#[cfg(unix)]
 fn capture_root(fixture: &PrepareLiveFixture) -> PathBuf {
     serde_json::from_value(fixture.input["raw_capture_root"].clone()).expect("capture root")
 }
 
-#[cfg(unix)]
 fn journal_root(capture_root: &Path) -> PathBuf {
     let mut value = capture_root.as_os_str().to_os_string();
     value.push(".journal");
     PathBuf::from(value)
 }
 
-#[cfg(unix)]
 fn recovery_index(
     fixture: &PrepareLiveFixture,
     output: &InvocationOutput,
@@ -1235,7 +1236,6 @@ fn recovery_index(
     (bytes, index_digest, raw_capture_digest)
 }
 
-#[cfg(unix)]
 fn write_retained_capture(root: &Path, output: &InvocationOutput, index_bytes: &[u8], pair: bool) {
     std::fs::write(root.join("capture-000.stdout"), &output.stdout).expect("retained stdout");
     std::fs::write(root.join("capture-000.stderr"), &output.stderr).expect("retained stderr");
@@ -1246,7 +1246,6 @@ fn write_retained_capture(root: &Path, output: &InvocationOutput, index_bytes: &
     }
 }
 
-#[cfg(unix)]
 fn expire_recovery_authority(fixture: &mut PrepareLiveFixture, receipt_path: &Path) {
     let mut request: RunRequest =
         serde_json::from_value(fixture.input["request"].clone()).expect("request");
@@ -1278,12 +1277,10 @@ fn expire_recovery_authority(fixture: &mut PrepareLiveFixture, receipt_path: &Pa
     .expect("expired receipt write");
 }
 
-#[cfg(unix)]
 fn retained_recovery_fixture(expired: bool) -> RecoverLiveFixture {
     retained_recovery_fixture_for_path(expired, "product.txt")
 }
 
-#[cfg(unix)]
 fn retained_recovery_fixture_for_path(expired: bool, effect_path: &str) -> RecoverLiveFixture {
     let mut live = prepare_live_fixture();
     let receipt_path = live.input_path.with_file_name("prepared-recovery.json");
@@ -1336,7 +1333,6 @@ fn retained_recovery_fixture_for_path(expired: bool, effect_path: &str) -> Recov
     }
 }
 
-#[cfg(unix)]
 fn run_recover_live(
     fixture: &RecoverLiveFixture,
     receipt_path: &Path,
@@ -1367,7 +1363,6 @@ fn run_recover_live(
     command.output().expect("recover live")
 }
 
-#[cfg(unix)]
 fn journal_provider_start_count(root: &Path) -> usize {
     let events = root.join("execution-events");
     if !events.is_dir() {
@@ -1383,7 +1378,6 @@ fn journal_provider_start_count(root: &Path) -> usize {
         .count()
 }
 
-#[cfg(unix)]
 fn journal_event_kind_count(root: &Path, kind: &str) -> usize {
     std::fs::read_dir(root.join("execution-events"))
         .expect("execution events")
@@ -1395,7 +1389,6 @@ fn journal_event_kind_count(root: &Path, kind: &str) -> usize {
         .count()
 }
 
-#[cfg(unix)]
 fn journal_terminal_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = std::fs::read_dir(root)
         .expect("journal root")
@@ -1414,7 +1407,6 @@ fn journal_terminal_paths(root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-#[cfg(unix)]
 fn remove_journal_event(root: &Path, kind: &str) {
     let matches = std::fs::read_dir(root.join("execution-events"))
         .expect("execution events")
@@ -1429,7 +1421,6 @@ fn remove_journal_event(root: &Path, kind: &str) {
     std::fs::remove_file(&matches[0]).expect("remove event");
 }
 
-#[cfg(unix)]
 fn journal_provider_invocation_digest(root: &Path) -> Digest {
     std::fs::read_dir(root.join("execution-events"))
         .expect("execution events")
@@ -1473,7 +1464,38 @@ fn successful_provider_bin(fixture: &PrepareLiveFixture, stdout: &[u8]) -> PathB
     bin
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn successful_provider_bin(fixture: &PrepareLiveFixture, stdout: &[u8]) -> PathBuf {
+    let root = fixture.input_path.parent().expect("protected root");
+    let output = root.join("successful-provider-output.jsonl");
+    std::fs::write(&output, stdout).expect("provider output");
+    let bin = root.join("successful-bin");
+    std::fs::create_dir(&bin).expect("provider bin");
+    let source = root.join("successful-provider.rs");
+    std::fs::write(
+        &source,
+        format!(
+            "fn main() {{ std::fs::write({:?}, b\"one\").unwrap(); print!(\"{{}}\", std::fs::read_to_string({:?}).unwrap()); }}",
+            fixture.provider_marker.to_string_lossy(),
+            output.to_string_lossy()
+        ),
+    )
+    .expect("fake provider source");
+    let compiled = Command::new("rustc")
+        .args(["--edition=2024", "-o"])
+        .arg(bin.join("codex.exe"))
+        .arg(&source)
+        .output()
+        .expect("compile fake provider");
+    assert!(
+        compiled.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    bin
+}
+
 fn reset_reference_run(fixture: &PrepareLiveFixture, capture_root: &Path, journal_root: &Path) {
     let git = fixture.workspace.join(".git");
     std::fs::remove_dir_all(git).expect("remove reference Git directory");
@@ -1488,7 +1510,6 @@ fn reset_reference_run(fixture: &PrepareLiveFixture, capture_root: &Path, journa
     std::fs::remove_dir_all(journal_root).expect("remove reference journal");
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_reuses_retained_capture_without_a_second_provider() {
     let live = prepare_live_fixture();
@@ -1593,7 +1614,6 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     assert_eq!(terminal["record_digest"], uninterrupted["record_digest"]);
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_reuses_orphan_terminal_bytes_and_appends_event() {
     let live = prepare_live_fixture();
@@ -1680,7 +1700,6 @@ fn recover_live_reuses_orphan_terminal_bytes_and_appends_event() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_missing_receipt_without_mutation() {
     let fixture = retained_recovery_fixture(false);
@@ -1696,7 +1715,6 @@ fn recover_live_rejects_missing_receipt_without_mutation() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_unknown_provider_outcome() {
     let live = prepare_live_fixture();
@@ -1750,7 +1768,6 @@ fn recover_live_rejects_unknown_provider_outcome() {
     assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_contradictory_pair_and_tampered_capture() {
     let contradictory = retained_recovery_fixture(false);
@@ -1782,7 +1799,6 @@ fn recover_live_rejects_contradictory_pair_and_tampered_capture() {
     assert_eq!(journal_provider_start_count(&tampered.journal_root), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_nonzero_n7_capture_turn_index() {
     let fixture = retained_recovery_fixture(false);
@@ -1809,7 +1825,6 @@ fn recover_live_rejects_nonzero_n7_capture_turn_index() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_alternate_n7_capture_paths() {
     let fixture = retained_recovery_fixture(false);
@@ -1847,11 +1862,10 @@ fn recover_live_rejects_alternate_n7_capture_paths() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_changed_git_identity() {
     let fixture = retained_recovery_fixture(false);
-    let changed = Command::new("/usr/bin/git")
+    let changed = Command::new("git")
         .args([
             "-c",
             "user.name=AO Next Test",
@@ -1878,7 +1892,6 @@ fn recover_live_rejects_changed_git_identity() {
     assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_accepts_matching_provider_invocation_digest() {
     let fixture = retained_recovery_fixture(false);
@@ -1895,7 +1908,6 @@ fn recover_live_accepts_matching_provider_invocation_digest() {
     assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_provider_invocation_digest_drift() {
     let fixture = retained_recovery_fixture(false);
@@ -1922,7 +1934,6 @@ fn recover_live_rejects_provider_invocation_digest_drift() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_expired_authority_with_pending_effect() {
     let fixture = retained_recovery_fixture(true);
@@ -1935,7 +1946,6 @@ fn recover_live_rejects_expired_authority_with_pending_effect() {
     assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_unexpired_matching_unknown_effect() {
     let fixture = retained_recovery_fixture(false);
@@ -1977,7 +1987,6 @@ fn recover_live_rejects_unexpired_matching_unknown_effect() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_extra_journal_only_unknown_effect() {
     let fixture = retained_recovery_fixture(false);
@@ -2020,7 +2029,6 @@ fn recover_live_rejects_extra_journal_only_unknown_effect() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_allows_expired_completed_effect_without_rebuilding_visibility() {
     let fixture = retained_recovery_fixture_for_path(true, "hidden-result.txt");
@@ -2074,7 +2082,6 @@ fn recover_live_allows_expired_completed_effect_without_rebuilding_visibility() 
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn recover_live_rejects_provider_gates_and_program_overrides() {
     for (name, value) in [

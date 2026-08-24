@@ -57,11 +57,14 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
-      - name: Test retained-capture recovery
-        run: |
-          cargo test -p ao-next-core --test capture_store -- --nocapture
-          cargo test -p ao-next-core --test evidence_recovery provider_ -- --nocapture
-          cargo test -p ao-next-cli --test cli recover_live -- --nocapture
+      - name: Test capture store
+        run: cargo test -p ao-next-core --test capture_store -- --nocapture
+
+      - name: Test provider recovery evidence
+        run: cargo test -p ao-next-core --test evidence_recovery provider_ -- --nocapture
+
+      - name: Test recover-live
+        run: cargo test -p ao-next-cli --test cli recover_live -- --nocapture
 
       - name: Build release
         run: cargo build --locked --workspace --release

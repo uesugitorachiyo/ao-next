@@ -774,6 +774,59 @@ fn provider_intent_execution_authority_digest_mutation_fails_closed() {
 }
 
 #[test]
+fn read_only_provider_state_rejects_missing_journal_without_creation() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal_root = recovery.path().join("missing-journal");
+
+    assert!(
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &request).is_err(),
+        "missing journal opened as request-bound"
+    );
+    assert!(
+        !journal_root.exists(),
+        "read-only open created journal root"
+    );
+}
+
+#[test]
+fn read_only_provider_state_rejects_missing_events_without_creation() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal_root = recovery.path().join("journal");
+    let journal = CheckpointJournal::new(&journal_root, 16 * 1024).expect("journal");
+    journal.bind_request(&request).expect("request binding");
+    let bound =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &request).expect("bound journal");
+
+    assert!(bound.provider_state_read_only(&request).is_err());
+    assert!(
+        !journal_root.join("execution-events").exists(),
+        "read-only provider state created event directory"
+    );
+}
+
+#[test]
+fn read_only_provider_state_rejects_tampered_identity_without_rewrite() {
+    let fixture = fixture();
+    let identity_path = fixture
+        .recovery
+        .path()
+        .join("journal/execution-identity.json");
+    std::fs::write(&identity_path, b"{}").expect("tampered identity");
+
+    assert!(
+        CheckpointJournal::open_bound(
+            fixture.recovery.path().join("journal"),
+            16 * 1024,
+            &fixture.request,
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(identity_path).expect("identity bytes"), b"{}");
+}
+
+#[test]
 fn provider_intent_without_capture_is_unknown_and_cannot_restart() {
     let fixture = fixture();
     fixture

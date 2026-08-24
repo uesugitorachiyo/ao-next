@@ -395,6 +395,30 @@ impl CheckpointJournal {
         })
     }
 
+    /// Opens an existing journal only when it is already bound to one exact request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] without creating files or directories when the
+    /// root or exact request identity is missing, unsafe, malformed, or drifted.
+    pub fn open_bound(
+        root: impl AsRef<Path>,
+        maximum_bytes: u64,
+        request: &RunRequest,
+    ) -> Result<Self, RecoveryError> {
+        let root = root.as_ref().to_path_buf();
+        let metadata = std::fs::symlink_metadata(&root)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(RecoveryError::UnsafePath(root));
+        }
+        let journal = Self {
+            root,
+            maximum_bytes,
+        };
+        journal.require_bound_request(request)?;
+        Ok(journal)
+    }
+
     /// Binds the append-only execution journal to one exact run request before
     /// worker dispatch.
     ///
@@ -403,6 +427,18 @@ impl CheckpointJournal {
     /// Returns [`RecoveryError`] when the identity path is unsafe, unreadable,
     /// oversized, malformed, or already bound to a different request.
     pub fn bind_request(&self, request: &RunRequest) -> Result<(), RecoveryError> {
+        let path = self.root.join("execution-identity.json");
+        if path.exists() || path.is_symlink() {
+            return self.require_bound_request(request);
+        }
+        let (_, bytes) = self.request_identity(request)?;
+        durable_create_new(&path, &bytes)
+    }
+
+    fn request_identity(
+        &self,
+        request: &RunRequest,
+    ) -> Result<(CheckpointIdentity, Vec<u8>), RecoveryError> {
         let identity = CheckpointIdentity::from_request(request)?;
         let bytes = canonical_json_bytes(&identity)?;
         if bytes.len() as u64 > self.maximum_bytes {
@@ -411,20 +447,24 @@ impl CheckpointJournal {
                 limit: self.maximum_bytes,
             });
         }
-        let path = self.root.join("execution-identity.json");
-        if path.exists() || path.is_symlink() {
-            let existing = read_regular_file(&path, self.maximum_bytes)?;
-            if existing != bytes {
-                return Err(RecoveryError::IdentityMismatch);
-            }
-            let maximum_bytes = usize::try_from(self.maximum_bytes).unwrap_or(usize::MAX);
-            let recorded: CheckpointIdentity = decode_strict_json(&existing, maximum_bytes)?;
-            if recorded != identity {
-                return Err(RecoveryError::IdentityMismatch);
-            }
-            return Ok(());
+        Ok((identity, bytes))
+    }
+
+    fn require_bound_request(&self, request: &RunRequest) -> Result<(), RecoveryError> {
+        let (identity, bytes) = self.request_identity(request)?;
+        let existing = read_regular_file(
+            &self.root.join("execution-identity.json"),
+            self.maximum_bytes,
+        )?;
+        if existing != bytes {
+            return Err(RecoveryError::IdentityMismatch);
         }
-        durable_create_new(&path, &bytes)
+        let maximum_bytes = usize::try_from(self.maximum_bytes).unwrap_or(usize::MAX);
+        let recorded: CheckpointIdentity = decode_strict_json(&existing, maximum_bytes)?;
+        if recorded != identity {
+            return Err(RecoveryError::IdentityMismatch);
+        }
+        Ok(())
     }
 
     /// Binds one exact request only when its execution-event prefix is empty.
@@ -463,6 +503,22 @@ impl CheckpointJournal {
     ) -> Result<ProviderJournalState, RecoveryError> {
         self.bind_request(request)?;
         provider_state_from_events(&self.load_execution_events()?)
+    }
+
+    /// Returns provider state from an existing request-bound journal without
+    /// creating the journal root, identity, or event directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for any ordinary request, identity, event-log,
+    /// path, size, or I/O failure.
+    pub fn provider_state_read_only(
+        &self,
+        request: &RunRequest,
+    ) -> Result<ProviderJournalState, RecoveryError> {
+        self.require_bound_request(request)?;
+        let directory = self.existing_execution_event_directory()?;
+        provider_state_from_events(&self.load_execution_events_from(&directory)?)
     }
 
     /// Confirms that no provider attempt or effect is already durable.
@@ -963,7 +1019,14 @@ impl CheckpointJournal {
 
     fn load_execution_events(&self) -> Result<Vec<JournalEvent>, RecoveryError> {
         let directory = self.execution_event_directory()?;
-        let mut paths = std::fs::read_dir(&directory)?
+        self.load_execution_events_from(&directory)
+    }
+
+    fn load_execution_events_from(
+        &self,
+        directory: &Path,
+    ) -> Result<Vec<JournalEvent>, RecoveryError> {
+        let mut paths = std::fs::read_dir(directory)?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<Result<Vec<_>, _>>()?;
         paths.sort();
@@ -1021,6 +1084,11 @@ impl CheckpointJournal {
     fn execution_event_directory(&self) -> Result<PathBuf, RecoveryError> {
         let directory = self.root.join("execution-events");
         std::fs::create_dir_all(&directory)?;
+        self.existing_execution_event_directory()
+    }
+
+    fn existing_execution_event_directory(&self) -> Result<PathBuf, RecoveryError> {
+        let directory = self.root.join("execution-events");
         let metadata = std::fs::symlink_metadata(&directory)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(RecoveryError::UnsafePath(directory));

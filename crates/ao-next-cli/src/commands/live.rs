@@ -794,6 +794,7 @@ pub(super) struct PreparedN7Context {
     pub(super) git_workspace: GitWorkspaceIdentity,
     pub(super) prepared_run_digest: Digest,
     pub(super) execution_authority: N7ExecutionAuthority,
+    pub(super) execution_authority_digest: Digest,
 }
 
 struct RetainedN7Execution {
@@ -1110,6 +1111,7 @@ fn validate_prepared_run(
         git_workspace,
         prepared_run_digest,
         execution_authority: authority,
+        execution_authority_digest,
     })
 }
 
@@ -1179,17 +1181,16 @@ fn validate_prepared_run_with_mode(
             RequestAuthorityMode::RequestedScope,
         )?;
     }
-    let journal = CheckpointJournal::new(
-        execution_journal_root(input),
-        execution_journal_maximum_bytes(&input.request),
-    )
-    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if require_current {
-        journal.bind_pristine_request(&input.request)
-    } else {
-        journal.bind_request(&input.request)
+        let journal = CheckpointJournal::new(
+            execution_journal_root(input),
+            execution_journal_maximum_bytes(&input.request),
+        )
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        journal
+            .bind_pristine_request(&input.request)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     }
-    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if read_bounded_regular(input_path)? != input_bytes {
         return Err(CommandFailure::invalid_input(
             "live input drifted after prepared-run validation",
@@ -1706,38 +1707,34 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     } else {
         validate_input(input, variant, started_at)?
     };
-    let (git_workspace, prepared_run_digest, execution_authority) = if let Some(prepared) = prepared
-    {
-        if variant != LiveVariant::N7 {
-            return Err(CommandFailure::invalid_input(
-                "prepared-run context is restricted to N7",
-            ));
-        }
-        (
-            prepared.git_workspace,
-            prepared.prepared_run_digest,
-            Some(prepared.execution_authority),
-        )
-    } else {
-        let git_workspace = prepare_git_workspace(
-            &input.request.workspace.root,
-            &input.request.authority.allowed_roots,
-            &validated.task.workspace_seed_digest,
-        )?;
-        let digest = canonical_digest(&git_workspace)
-            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-        (git_workspace, digest, None)
-    };
+    let (git_workspace, prepared_run_digest, execution_authority, execution_authority_digest) =
+        if let Some(prepared) = prepared {
+            if variant != LiveVariant::N7 {
+                return Err(CommandFailure::invalid_input(
+                    "prepared-run context is restricted to N7",
+                ));
+            }
+            (
+                prepared.git_workspace,
+                prepared.prepared_run_digest,
+                Some(prepared.execution_authority),
+                Some(prepared.execution_authority_digest),
+            )
+        } else {
+            let git_workspace = prepare_git_workspace(
+                &input.request.workspace.root,
+                &input.request.authority.allowed_roots,
+                &validated.task.workspace_seed_digest,
+            )?;
+            let digest = canonical_digest(&git_workspace)
+                .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+            (git_workspace, digest, None, None)
+        };
     let provider_visibility = if variant == LiveVariant::N7 && recovery.is_none() {
         Some(n7_provider_visibility(input, validated.task)?)
     } else {
         None
     };
-    let execution_authority_digest = execution_authority
-        .as_ref()
-        .map(canonical_digest)
-        .transpose()
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let provider_intent_authority_digest = (variant == LiveVariant::N7).then(|| {
         execution_authority_digest
             .clone()
@@ -7483,6 +7480,99 @@ else:
         assert_eq!(output.value["measurement"]["changed_files"], 1);
         assert_eq!(output.value["measurement"]["worker_count"], 1);
         assert_eq!(output.value["measurement"]["dynamic_fanout"], false);
+    }
+
+    #[test]
+    fn prepared_n7_threads_one_admitted_authority_digest() {
+        let n7 = fixture(LiveVariant::N7);
+        let git_workspace = prepare_git_workspace(
+            &n7.input.request.workspace.root,
+            &n7.input.request.authority.allowed_roots,
+            &n7.input.request.workspace.seed_digest,
+        )
+        .expect("prepared Git workspace");
+        let prepared_run_digest = canonical_digest(&git_workspace).expect("prepared digest");
+        let now = Utc::now();
+        let execution_authority = N7ExecutionAuthority {
+            schema_version: "ao.next.n7-execution-authority.v1".into(),
+            authority_id: "threaded-authority".into(),
+            issued_by: "operator".into(),
+            prepared_run_digest: prepared_run_digest.clone(),
+            preparation_input_digest: digest_bytes(b"input"),
+            preparation_request_digest: canonical_digest(&n7.input.request).expect("request"),
+            base_commit: git_workspace.head_commit.clone(),
+            workspace_identity_digest: canonical_digest(&n7.input.request.workspace)
+                .expect("workspace identity"),
+            workspace_digest: n7.input.request.workspace.seed_digest.clone(),
+            workspace_root: git_workspace.repository_root.clone(),
+            requested_authority_digest: canonical_digest(&n7.input.request.authority)
+                .expect("requested authority"),
+            write_scope_digest: n7_requested_write_scope_digest(&n7.input.request)
+                .expect("write scope"),
+            issued_at: now - Duration::minutes(1),
+            expires_at: now + Duration::hours(1),
+            provider_process_allowance: 1,
+        };
+        let admitted_digest = digest_bytes(b"admitted execution authority");
+        assert_ne!(
+            admitted_digest,
+            canonical_digest(&execution_authority).expect("document digest")
+        );
+        let turn = AdapterTurn {
+            actions: vec![
+                AdapterAction::Effect(EffectRequest {
+                    effect_id: "write-product".into(),
+                    run_id: n7.input.request.run_id.clone(),
+                    kind: EffectKind::WriteFile,
+                    program: None,
+                    content: Some("ready\n".into()),
+                    args: Vec::new(),
+                    paths: vec![PathBuf::from("product.txt")],
+                    timeout_ms: 0,
+                    input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+                }),
+                AdapterAction::Verify,
+            ],
+            usage: TokenUsage::default(),
+            model_claimed_success: true,
+            control_mutations: Vec::new(),
+        };
+
+        let output = execute_with_prepared_runners(
+            &n7.input,
+            LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(Some(&turn))]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+            Some(PreparedN7Context {
+                git_workspace,
+                prepared_run_digest,
+                execution_authority,
+                execution_authority_digest: admitted_digest.clone(),
+            }),
+        )
+        .expect("prepared N7 execution");
+
+        assert_eq!(
+            output.value["n7_execution_authority_digest"],
+            admitted_digest.as_str()
+        );
+        let intent = std::fs::read_dir(execution_journal_root(&n7.input).join("execution-events"))
+            .expect("execution events")
+            .map(|entry| {
+                let bytes = std::fs::read(entry.expect("event entry").path()).expect("event");
+                serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")
+            })
+            .find(|event| event["kind"]["kind"] == "provider_request_intent")
+            .expect("provider intent");
+        assert_eq!(
+            intent["kind"]["execution_authority_digest"],
+            admitted_digest.as_str()
+        );
     }
 
     #[test]

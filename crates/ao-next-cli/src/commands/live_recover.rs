@@ -44,13 +44,14 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
     let receipt: PreparedRunReceipt = decode_file(&args.prepared_run)?;
     let (git_workspace, prepared_run_digest) =
         validate_prepared_run_for_recovery(&args.input, &input, &receipt, now)?;
-    let journal = CheckpointJournal::new(
+    let journal = CheckpointJournal::open_bound(
         execution_journal_root(&input),
         execution_journal_maximum_bytes(&input.request),
+        &input.request,
     )
     .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let mut provider_state = journal
-        .provider_state(&input.request)
+        .provider_state_read_only(&input.request)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let Some(recorded_prepared_run) = provider_state.prepared_run_digest.as_ref() else {
         return Err(CommandFailure::invalid_input(
@@ -176,6 +177,7 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
             git_workspace,
             prepared_run_digest,
             execution_authority: authority,
+            execution_authority_digest,
         },
         &index_digest,
     )

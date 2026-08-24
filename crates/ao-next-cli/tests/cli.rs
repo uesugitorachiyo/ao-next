@@ -2217,6 +2217,94 @@ fn recover_live_rejects_substituted_execution_authority_document() {
 }
 
 #[test]
+fn recover_live_rejects_missing_execution_identity_without_mutation() {
+    let fixture = retained_recovery_fixture(false);
+    let identity_path = fixture.journal_root.join("execution-identity.json");
+    std::fs::remove_file(&identity_path).expect("remove execution identity");
+    let journal_entries_before = std::fs::read_dir(&fixture.journal_root)
+        .expect("journal root")
+        .count();
+    let events_before = journal_event_count(&fixture.journal_root);
+    let final_before =
+        std::fs::read(fixture.capture_root.join("capture-index.json")).expect("final index");
+    let incomplete_before =
+        std::fs::read(fixture.capture_root.join("capture-index.json.incomplete"))
+            .expect("incomplete index");
+
+    let output = run_recover_live(&fixture, &fixture.receipt_path, None);
+
+    assert_json_error(&output, 7, "evidence_failure");
+    assert!(
+        !identity_path.exists(),
+        "recovery recreated missing identity"
+    );
+    assert_eq!(
+        std::fs::read_dir(&fixture.journal_root)
+            .expect("journal root")
+            .count(),
+        journal_entries_before
+    );
+    assert_eq!(journal_event_count(&fixture.journal_root), events_before);
+    assert_eq!(
+        std::fs::read(fixture.capture_root.join("capture-index.json")).expect("final index"),
+        final_before
+    );
+    assert_eq!(
+        std::fs::read(fixture.capture_root.join("capture-index.json.incomplete"))
+            .expect("incomplete index"),
+        incomplete_before
+    );
+    assert_eq!(
+        std::fs::read(&fixture.live.provider_marker).expect("provider marker"),
+        b"one"
+    );
+}
+
+#[test]
+fn recover_live_rejects_tampered_execution_identity_without_mutation() {
+    let fixture = retained_recovery_fixture(false);
+    let identity_path = fixture.journal_root.join("execution-identity.json");
+    std::fs::write(&identity_path, b"{}").expect("tamper execution identity");
+    let journal_entries_before = std::fs::read_dir(&fixture.journal_root)
+        .expect("journal root")
+        .count();
+    let events_before = journal_event_count(&fixture.journal_root);
+    let final_before =
+        std::fs::read(fixture.capture_root.join("capture-index.json")).expect("final index");
+    let incomplete_before =
+        std::fs::read(fixture.capture_root.join("capture-index.json.incomplete"))
+            .expect("incomplete index");
+
+    let output = run_recover_live(&fixture, &fixture.receipt_path, None);
+
+    assert_json_error(&output, 7, "evidence_failure");
+    assert_eq!(
+        std::fs::read(&identity_path).expect("identity bytes"),
+        b"{}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&fixture.journal_root)
+            .expect("journal root")
+            .count(),
+        journal_entries_before
+    );
+    assert_eq!(journal_event_count(&fixture.journal_root), events_before);
+    assert_eq!(
+        std::fs::read(fixture.capture_root.join("capture-index.json")).expect("final index"),
+        final_before
+    );
+    assert_eq!(
+        std::fs::read(fixture.capture_root.join("capture-index.json.incomplete"))
+            .expect("incomplete index"),
+        incomplete_before
+    );
+    assert_eq!(
+        std::fs::read(&fixture.live.provider_marker).expect("provider marker"),
+        b"one"
+    );
+}
+
+#[test]
 fn recover_live_rejects_missing_receipt_without_mutation() {
     let fixture = retained_recovery_fixture(false);
     let missing = fixture.receipt_path.with_file_name("missing-receipt.json");

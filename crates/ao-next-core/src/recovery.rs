@@ -495,8 +495,15 @@ impl CheckpointJournal {
         turn: &Digest,
     ) -> Result<(), RecoveryError> {
         let state = self.provider_state(request)?;
-        if !state.capture_verified || state.adapter_turn_digest.is_some() {
+        if !state.capture_verified {
             return Err(RecoveryError::EventSequenceInvalid);
+        }
+        if let Some(recorded) = state.adapter_turn_digest {
+            return if recorded == *turn {
+                Ok(())
+            } else {
+                Err(RecoveryError::EventDigestMismatch)
+            };
         }
         self.append_execution_event(JournalEventKind::AdapterTurnNormalized {
             turn_digest: turn.clone(),

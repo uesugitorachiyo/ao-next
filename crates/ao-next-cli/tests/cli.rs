@@ -2,13 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use ao_next_core::adapter::{
+    AdapterAction, AdapterTurn, EffectObservation, InvocationOutput, TokenUsage,
+};
 use ao_next_core::contracts::{
-    AdapterIdentity, AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile,
-    NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest, RunState, SourceIdentity,
-    StructuredCommand, TerminalReadback, VerifierProfile, WorkspaceIdentity,
+    AdapterIdentity, AuthorityEnvelope, Capability, Digest, EffectKind, EffectRequest,
+    ExternalEffectPolicy, ModelProfile, NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest,
+    RunState, SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile,
+    WorkspaceIdentity,
 };
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::recovery::CheckpointJournal;
+use ao_next_core::recovery::{CheckpointIdentity, CheckpointJournal};
 use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes};
 use ao_next_core::verifier::{CommandVerifierEntry, CommandVerifierProfile};
 use ao_next_eval::comparison::ComparisonRequest;
@@ -1094,6 +1098,656 @@ fn prepared_run_rejects_identity_drift_before_provider_spawn() {
         assert!(
             !fixture.provider_marker.exists(),
             "provider spawned for {drift}"
+        );
+    }
+}
+
+#[cfg(unix)]
+struct RecoverLiveFixture {
+    live: PrepareLiveFixture,
+    receipt_path: PathBuf,
+    capture_root: PathBuf,
+    journal_root: PathBuf,
+    normalized_turn: AdapterTurn,
+    index_digest: Digest,
+}
+
+#[cfg(unix)]
+fn recovery_turn(run_id: &str) -> AdapterTurn {
+    AdapterTurn {
+        actions: vec![
+            AdapterAction::Effect(EffectRequest {
+                effect_id: "write-product".into(),
+                run_id: run_id.into(),
+                kind: EffectKind::WriteFile,
+                program: None,
+                content: Some("ready\n".into()),
+                args: Vec::new(),
+                paths: vec![PathBuf::from("product.txt")],
+                timeout_ms: 0,
+                input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+            }),
+            AdapterAction::Verify,
+        ],
+        usage: TokenUsage::default(),
+        model_claimed_success: false,
+        control_mutations: Vec::new(),
+    }
+}
+
+#[cfg(unix)]
+fn recovery_output(run_id: &str) -> (InvocationOutput, AdapterTurn) {
+    let turn = recovery_turn(run_id);
+    let message = serde_json::to_string(&serde_json::json!({
+        "type": "item.completed",
+        "item": {
+            "type": "agent_message",
+            "text": serde_json::to_string(&turn).expect("turn JSON")
+        }
+    }))
+    .expect("message event");
+    let usage = serde_json::to_string(&serde_json::json!({
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 11,
+            "cached_input_tokens": 3,
+            "reasoning_tokens": 2,
+            "output_tokens": 2
+        }
+    }))
+    .expect("usage event");
+    let stdout = format!("{message}\n{usage}\n").into_bytes();
+    let mut normalized = turn;
+    normalized.usage = TokenUsage {
+        input_tokens: 11,
+        cached_input_tokens: 3,
+        reasoning_tokens: 2,
+        output_tokens: 2,
+        output_bytes: u64::try_from(stdout.len()).expect("bounded stdout"),
+    };
+    (
+        InvocationOutput {
+            status: 0,
+            stdout,
+            stderr: Vec::new(),
+        },
+        normalized,
+    )
+}
+
+#[cfg(unix)]
+fn capture_root(fixture: &PrepareLiveFixture) -> PathBuf {
+    serde_json::from_value(fixture.input["raw_capture_root"].clone()).expect("capture root")
+}
+
+#[cfg(unix)]
+fn journal_root(capture_root: &Path) -> PathBuf {
+    let mut value = capture_root.as_os_str().to_os_string();
+    value.push(".journal");
+    PathBuf::from(value)
+}
+
+#[cfg(unix)]
+fn recovery_index(
+    fixture: &PrepareLiveFixture,
+    output: &InvocationOutput,
+) -> (Vec<u8>, Digest, Digest) {
+    let raw_capture_digest =
+        canonical_digest(&(output.status, &output.stdout, &output.stderr)).expect("raw digest");
+    let index = serde_json::json!({
+        "schema_version": "ao.next.raw-provider-capture-index.v2",
+        "run_id": fixture.input["request"]["run_id"],
+        "trial_id": fixture.input["trial_id"],
+        "workspace_instance_id": fixture.input["workspace_instance_id"],
+        "runtime_identity": {
+            "runtime": fixture.input["request"]["model_profile"]["runtime"],
+            "model_identifier": fixture.input["request"]["model_profile"]["model_identifier"],
+            "adapter_version": fixture.input["request"]["model_profile"]["adapter_version"],
+            "worker_id": "ao-next-live-worker-01"
+        },
+        "entries": [{
+            "capture_order": 0,
+            "turn_index": 0,
+            "status": output.status,
+            "raw_capture_digest": raw_capture_digest,
+            "stdout_path": "capture-000.stdout",
+            "stdout_digest": digest_bytes(&output.stdout),
+            "stdout_size_bytes": output.stdout.len(),
+            "stderr_path": "capture-000.stderr",
+            "stderr_digest": digest_bytes(&output.stderr),
+            "stderr_size_bytes": output.stderr.len()
+        }]
+    });
+    let bytes = canonical_json_bytes(&index).expect("capture index");
+    let index_digest = canonical_digest(&index).expect("capture index digest");
+    (bytes, index_digest, raw_capture_digest)
+}
+
+#[cfg(unix)]
+fn write_retained_capture(root: &Path, output: &InvocationOutput, index_bytes: &[u8], pair: bool) {
+    std::fs::write(root.join("capture-000.stdout"), &output.stdout).expect("retained stdout");
+    std::fs::write(root.join("capture-000.stderr"), &output.stderr).expect("retained stderr");
+    std::fs::write(root.join("capture-index.json"), index_bytes).expect("final index");
+    if pair {
+        std::fs::write(root.join("capture-index.json.incomplete"), index_bytes)
+            .expect("incomplete index");
+    }
+}
+
+#[cfg(unix)]
+fn expire_recovery_authority(fixture: &mut PrepareLiveFixture, receipt_path: &Path) {
+    let mut request: RunRequest =
+        serde_json::from_value(fixture.input["request"].clone()).expect("request");
+    request.authority.expires_at = Utc::now() - Duration::minutes(1);
+    request.authority.issued_at = request.authority.expires_at - Duration::hours(1);
+    fixture.input["request"] = serde_json::to_value(&request).expect("expired request");
+    let input_bytes = serde_json::to_vec(&fixture.input).expect("expired input");
+    std::fs::write(&fixture.input_path, &input_bytes).expect("expired input write");
+
+    let capture = capture_root(fixture);
+    let journal = journal_root(&capture);
+    if journal.exists() {
+        std::fs::remove_dir_all(&journal).expect("remove current journal identity");
+    }
+    let mut receipt: PreparedRunReceipt =
+        serde_json::from_slice(&std::fs::read(receipt_path).expect("receipt bytes"))
+            .expect("receipt");
+    receipt.input_digest = digest_bytes(&input_bytes);
+    receipt.request_digest = canonical_digest(&request).expect("request digest");
+    receipt.journal_identity_digest =
+        canonical_digest(&CheckpointIdentity::from_request(&request).expect("journal identity"))
+            .expect("journal identity digest");
+    receipt.prepared_at = request.authority.issued_at;
+    receipt.expires_at = request.authority.expires_at;
+    std::fs::write(
+        receipt_path,
+        canonical_json_bytes(&receipt).expect("expired receipt"),
+    )
+    .expect("expired receipt write");
+}
+
+#[cfg(unix)]
+fn retained_recovery_fixture(expired: bool) -> RecoverLiveFixture {
+    let mut live = prepare_live_fixture();
+    let receipt_path = live.input_path.with_file_name("prepared-recovery.json");
+    let prepared = run_prepare_live(
+        &live,
+        &receipt_path,
+        live.corpus_digest.as_str(),
+        live.verifier_digest.as_str(),
+    );
+    assert_eq!(prepared.status.code(), Some(0));
+    if expired {
+        expire_recovery_authority(&mut live, &receipt_path);
+    }
+    let capture_root = capture_root(&live);
+    let journal_root = journal_root(&capture_root);
+    let run_id = live.input["request"]["run_id"].as_str().expect("run id");
+    let (output, normalized_turn) = recovery_output(run_id);
+    let (index_bytes, index_digest, raw_capture_digest) = recovery_index(&live, &output);
+    write_retained_capture(&capture_root, &output, &index_bytes, true);
+    std::fs::write(&live.provider_marker, b"one").expect("provider marker");
+
+    let request: RunRequest =
+        serde_json::from_value(live.input["request"].clone()).expect("request");
+    let receipt: PreparedRunReceipt =
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt bytes"))
+            .expect("receipt");
+    let journal = CheckpointJournal::new(&journal_root, 128 * 1024).expect("journal");
+    journal
+        .record_provider_request_intent(
+            &request,
+            &canonical_digest(&receipt).expect("receipt digest"),
+        )
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &digest(ONE_DIGEST))
+        .expect("provider start");
+    journal
+        .record_provider_output_retained(&request, &raw_capture_digest)
+        .expect("retained output");
+
+    RecoverLiveFixture {
+        live,
+        receipt_path,
+        capture_root,
+        journal_root,
+        normalized_turn,
+        index_digest,
+    }
+}
+
+#[cfg(unix)]
+fn run_recover_live(
+    fixture: &RecoverLiveFixture,
+    receipt_path: &Path,
+    environment: Option<(&str, &str)>,
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ao-next"));
+    command.args([
+        "recover-live",
+        "--input",
+        fixture.live.input_path.to_str().expect("input"),
+        "--prepared-run",
+        receipt_path.to_str().expect("receipt"),
+        "--trusted-corpus-digest",
+        fixture.live.corpus_digest.as_str(),
+        "--trusted-verifier-profile-digest",
+        fixture.live.verifier_digest.as_str(),
+    ]);
+    for name in [
+        "AO_NEXT_LIVE_PROVIDER_CALLS",
+        "AO_NEXT_PROVIDER_FREE_PROGRAM",
+        "AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST",
+    ] {
+        command.env_remove(name);
+    }
+    if let Some((name, value)) = environment {
+        command.env(name, value);
+    }
+    command.output().expect("recover live")
+}
+
+#[cfg(unix)]
+fn journal_provider_start_count(root: &Path) -> usize {
+    let events = root.join("execution-events");
+    if !events.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(events)
+        .expect("execution events")
+        .map(|entry| {
+            let bytes = std::fs::read(entry.expect("event entry").path()).expect("event bytes");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")
+        })
+        .filter(|event| event["kind"]["kind"] == "provider_process_started")
+        .count()
+}
+
+#[cfg(unix)]
+fn journal_provider_invocation_digest(root: &Path) -> Digest {
+    std::fs::read_dir(root.join("execution-events"))
+        .expect("execution events")
+        .map(|entry| {
+            let bytes = std::fs::read(entry.expect("event entry").path()).expect("event bytes");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")
+        })
+        .find_map(|event| {
+            (event["kind"]["kind"] == "provider_process_started")
+                .then(|| serde_json::from_value(event["kind"]["invocation_digest"].clone()))
+        })
+        .expect("provider start event")
+        .expect("invocation digest")
+}
+
+#[cfg(unix)]
+fn successful_provider_bin(fixture: &PrepareLiveFixture, stdout: &[u8]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = fixture.input_path.parent().expect("protected root");
+    let output = root.join("successful-provider-output.jsonl");
+    std::fs::write(&output, stdout).expect("provider output");
+    let bin = root.join("successful-bin");
+    std::fs::create_dir(&bin).expect("provider bin");
+    let provider = bin.join("codex");
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\nprintf one > '{}'\nexec /bin/cat '{}'\n",
+            fixture.provider_marker.display(),
+            output.display()
+        ),
+    )
+    .expect("fake provider");
+    let git = bin.join("git");
+    std::fs::write(&git, b"#!/bin/sh\nexec /usr/bin/git \"$@\"\n").expect("git wrapper");
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700))
+        .expect("provider permissions");
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))
+        .expect("git permissions");
+    bin
+}
+
+#[cfg(unix)]
+fn reset_reference_run(fixture: &PrepareLiveFixture, capture_root: &Path, journal_root: &Path) {
+    let git = fixture.workspace.join(".git");
+    std::fs::remove_dir_all(git).expect("remove reference Git directory");
+    let product = fixture.workspace.join("product.txt");
+    if product.exists() {
+        std::fs::remove_file(product).expect("remove reference product");
+    }
+    for entry in std::fs::read_dir(capture_root).expect("capture entries") {
+        let path = entry.expect("capture entry").path();
+        std::fs::remove_file(path).expect("remove reference capture");
+    }
+    std::fs::remove_dir_all(journal_root).expect("remove reference journal");
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_reuses_retained_capture_without_a_second_provider() {
+    let live = prepare_live_fixture();
+    let receipt_path = live.input_path.with_file_name("prepared-reference.json");
+    let prepared = run_prepare_live(
+        &live,
+        &receipt_path,
+        live.corpus_digest.as_str(),
+        live.verifier_digest.as_str(),
+    );
+    assert_eq!(prepared.status.code(), Some(0));
+    let run_id = live.input["request"]["run_id"].as_str().expect("run id");
+    let (output, normalized_turn) = recovery_output(run_id);
+    let bin = successful_provider_bin(&live, &output.stdout);
+    let uninterrupted_output = run_prepared_live(&live, &receipt_path, &bin);
+    assert_eq!(
+        uninterrupted_output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&uninterrupted_output.stdout),
+        String::from_utf8_lossy(&uninterrupted_output.stderr)
+    );
+    let uninterrupted: serde_json::Value =
+        serde_json::from_slice(&uninterrupted_output.stdout).expect("uninterrupted terminal");
+    let capture_root = capture_root(&live);
+    let journal_root = journal_root(&capture_root);
+    let invocation_digest = journal_provider_invocation_digest(&journal_root);
+    let index_bytes = std::fs::read(capture_root.join("capture-index.json")).expect("index");
+    let retained_stdout = std::fs::read(capture_root.join("capture-000.stdout")).expect("stdout");
+    let retained_stderr = std::fs::read(capture_root.join("capture-000.stderr")).expect("stderr");
+    let raw_capture_digest =
+        canonical_digest(&(0, &retained_stdout, &retained_stderr)).expect("raw capture digest");
+
+    reset_reference_run(&live, &capture_root, &journal_root);
+    let recovery_receipt = live.input_path.with_file_name("prepared-recovery.json");
+    let prepared = run_prepare_live(
+        &live,
+        &recovery_receipt,
+        live.corpus_digest.as_str(),
+        live.verifier_digest.as_str(),
+    );
+    assert_eq!(prepared.status.code(), Some(0));
+    let request: RunRequest =
+        serde_json::from_value(live.input["request"].clone()).expect("request");
+    let receipt: PreparedRunReceipt =
+        serde_json::from_slice(&std::fs::read(&recovery_receipt).expect("receipt"))
+            .expect("receipt JSON");
+    let journal = CheckpointJournal::new(&journal_root, 128 * 1024).expect("journal");
+    journal
+        .record_provider_request_intent(
+            &request,
+            &canonical_digest(&receipt).expect("receipt digest"),
+        )
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &invocation_digest)
+        .expect("provider start");
+    journal
+        .record_provider_output_retained(&request, &raw_capture_digest)
+        .expect("retained output");
+    let retained_output = InvocationOutput {
+        status: 0,
+        stdout: retained_stdout,
+        stderr: retained_stderr,
+    };
+    write_retained_capture(&capture_root, &retained_output, &index_bytes, true);
+    assert_eq!(normalized_turn, recovery_output(run_id).1);
+
+    let fixture = RecoverLiveFixture {
+        receipt_path: recovery_receipt.clone(),
+        index_digest: canonical_digest(
+            &serde_json::from_slice::<serde_json::Value>(&index_bytes).expect("index JSON"),
+        )
+        .expect("index digest"),
+        normalized_turn,
+        capture_root,
+        journal_root,
+        live,
+    };
+    let recovered = run_recover_live(&fixture, &recovery_receipt, None);
+    assert_eq!(
+        recovered.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&fixture.live.provider_marker).expect("marker"),
+        b"one"
+    );
+    assert!(
+        !fixture
+            .capture_root
+            .join("capture-index.json.incomplete")
+            .exists()
+    );
+    let terminal: serde_json::Value =
+        serde_json::from_slice(&recovered.stdout).expect("recovered terminal");
+    assert_eq!(terminal["terminal_state"], "passed");
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+    assert_eq!(terminal["record_digest"], uninterrupted["record_digest"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_rejects_missing_receipt_without_mutation() {
+    let fixture = retained_recovery_fixture(false);
+    let missing = fixture.receipt_path.with_file_name("missing-receipt.json");
+    let recovered = run_recover_live(&fixture, &missing, None);
+    assert_json_error(&recovered, 3, "invalid_input");
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+    assert!(
+        fixture
+            .capture_root
+            .join("capture-index.json.incomplete")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_rejects_unknown_provider_outcome() {
+    let live = prepare_live_fixture();
+    let receipt_path = live.input_path.with_file_name("prepared-unknown.json");
+    assert_eq!(
+        run_prepare_live(
+            &live,
+            &receipt_path,
+            live.corpus_digest.as_str(),
+            live.verifier_digest.as_str(),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let capture_root = capture_root(&live);
+    let journal_root = journal_root(&capture_root);
+    let request: RunRequest =
+        serde_json::from_value(live.input["request"].clone()).expect("request");
+    let receipt: PreparedRunReceipt =
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt"))
+            .expect("receipt JSON");
+    let journal = CheckpointJournal::new(&journal_root, 128 * 1024).expect("journal");
+    journal
+        .record_provider_request_intent(
+            &request,
+            &canonical_digest(&receipt).expect("receipt digest"),
+        )
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &digest(ONE_DIGEST))
+        .expect("provider start");
+    std::fs::write(&live.provider_marker, b"one").expect("provider marker");
+    let fixture = RecoverLiveFixture {
+        live,
+        receipt_path: receipt_path.clone(),
+        capture_root,
+        journal_root,
+        normalized_turn: recovery_turn("prepare-live-run-01"),
+        index_digest: digest(ZERO_DIGEST),
+    };
+    let recovered = run_recover_live(&fixture, &receipt_path, None);
+    assert_json_error(&recovered, 3, "invalid_input");
+    let error: serde_json::Value = serde_json::from_slice(&recovered.stdout).expect("error JSON");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("message")
+            .contains("unknown")
+    );
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_rejects_contradictory_pair_and_tampered_capture() {
+    let contradictory = retained_recovery_fixture(false);
+    std::fs::write(
+        contradictory
+            .capture_root
+            .join("capture-index.json.incomplete"),
+        b"{}",
+    )
+    .expect("contradictory index");
+    assert_json_error(
+        &run_recover_live(&contradictory, &contradictory.receipt_path, None),
+        7,
+        "evidence_failure",
+    );
+    assert_eq!(journal_provider_start_count(&contradictory.journal_root), 1);
+
+    let tampered = retained_recovery_fixture(false);
+    std::fs::write(
+        tampered.capture_root.join("capture-000.stdout"),
+        b"tampered",
+    )
+    .expect("tampered capture");
+    assert_json_error(
+        &run_recover_live(&tampered, &tampered.receipt_path, None),
+        7,
+        "evidence_failure",
+    );
+    assert_eq!(journal_provider_start_count(&tampered.journal_root), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_rejects_changed_git_identity() {
+    let fixture = retained_recovery_fixture(false);
+    let changed = Command::new("/usr/bin/git")
+        .args([
+            "-c",
+            "user.name=AO Next Test",
+            "-c",
+            "user.email=ao-next-test@invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--no-verify",
+            "-m",
+            "identity drift",
+        ])
+        .current_dir(&fixture.live.workspace)
+        .output()
+        .expect("change Git identity");
+    assert!(changed.status.success());
+    assert_json_error(
+        &run_recover_live(&fixture, &fixture.receipt_path, None),
+        3,
+        "invalid_input",
+    );
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_rejects_expired_authority_with_pending_effect() {
+    let fixture = retained_recovery_fixture(true);
+    assert_json_error(
+        &run_recover_live(&fixture, &fixture.receipt_path, None),
+        3,
+        "invalid_input",
+    );
+    assert!(!fixture.live.workspace.join("product.txt").exists());
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_allows_expired_authority_after_completed_effect() {
+    let fixture = retained_recovery_fixture(true);
+    let request: RunRequest =
+        serde_json::from_value(fixture.live.input["request"].clone()).expect("request");
+    let journal = CheckpointJournal::new(&fixture.journal_root, 128 * 1024).expect("journal");
+    journal
+        .record_provider_capture_published(&request, &fixture.index_digest)
+        .expect("capture published");
+    journal
+        .record_provider_capture_verified(&request, &fixture.index_digest)
+        .expect("capture verified");
+    journal
+        .record_adapter_turn_normalized(
+            &request,
+            &canonical_digest(&fixture.normalized_turn).expect("turn digest"),
+        )
+        .expect("normalized turn");
+    let AdapterAction::Effect(effect) = &fixture.normalized_turn.actions[0] else {
+        panic!("expected effect");
+    };
+    journal
+        .record_effect_intent(&request, effect)
+        .expect("effect intent");
+    let observation = EffectObservation {
+        effect_id: effect.effect_id.clone(),
+        status: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        output_digest: canonical_digest(&(0, Vec::<u8>::new(), Vec::<u8>::new()))
+            .expect("effect output digest"),
+    };
+    journal
+        .record_effect_completion(&request, effect, &observation)
+        .expect("effect completion");
+    std::fs::write(fixture.live.workspace.join("product.txt"), b"ready\n")
+        .expect("completed effect bytes");
+
+    let recovered = run_recover_live(&fixture, &fixture.receipt_path, None);
+    assert_eq!(
+        recovered.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+    assert_eq!(
+        std::fs::read(&fixture.live.provider_marker).expect("provider marker"),
+        b"one"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_live_rejects_provider_gates_and_program_overrides() {
+    for (name, value) in [
+        ("AO_NEXT_LIVE_PROVIDER_CALLS", "operator-authorized"),
+        ("AO_NEXT_PROVIDER_FREE_PROGRAM", "/bin/false"),
+        ("AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST", ZERO_DIGEST),
+    ] {
+        let fixture = retained_recovery_fixture(false);
+        assert_json_error(
+            &run_recover_live(&fixture, &fixture.receipt_path, Some((name, value))),
+            8,
+            "authorization_denied",
+        );
+        assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+        assert!(
+            fixture
+                .capture_root
+                .join("capture-index.json.incomplete")
+                .exists()
         );
     }
 }

@@ -444,6 +444,20 @@ pub fn validate_intake(
     request: &RunRequest,
     expectation: &IntakeExpectation,
 ) -> Result<(), IntakeError> {
+    validate_intake_identity(request, expectation)?;
+    validate_authority_current(&request.authority, expectation.now)
+}
+
+/// Validates exact request identity and authority shape without granting freshness.
+///
+/// # Errors
+///
+/// Returns [`IntakeError`] when a schema, identity, authority interval, or
+/// workspace-root binding differs from the operator-authored expectation.
+pub fn validate_intake_identity(
+    request: &RunRequest,
+    expectation: &IntakeExpectation,
+) -> Result<(), IntakeError> {
     if request.schema_version != "ao.next.run-request.v1" {
         return Err(IntakeError::RequestSchemaMismatch);
     }
@@ -459,10 +473,7 @@ pub fn validate_intake(
     if request.workspace != expectation.workspace {
         return Err(IntakeError::WorkspaceIdentityMismatch);
     }
-    if request.authority.issued_at > expectation.now
-        || request.authority.expires_at <= expectation.now
-        || request.authority.issued_at >= request.authority.expires_at
-    {
+    if request.authority.issued_at >= request.authority.expires_at {
         return Err(IntakeError::AuthorityNotCurrent);
     }
     if !request
@@ -471,6 +482,22 @@ pub fn validate_intake(
         .contains(&request.workspace.root)
     {
         return Err(IntakeError::WorkspaceRootNotAllowed);
+    }
+    Ok(())
+}
+
+/// Validates that an authority envelope is current at one exact instant.
+///
+/// # Errors
+///
+/// Returns [`IntakeError::AuthorityNotCurrent`] unless
+/// `issued_at <= now < expires_at`.
+pub fn validate_authority_current(
+    authority: &AuthorityEnvelope,
+    now: DateTime<Utc>,
+) -> Result<(), IntakeError> {
+    if authority.issued_at > now || authority.expires_at <= now {
+        return Err(IntakeError::AuthorityNotCurrent);
     }
     Ok(())
 }

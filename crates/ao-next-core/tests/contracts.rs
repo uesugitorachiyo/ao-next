@@ -6,7 +6,8 @@ use ao_next_core::contracts::{
     EffectDecision, EffectEvent, EffectKind, EffectRequest, ExternalEffectPolicy,
     IntakeExpectation, ModelProfile, NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest,
     RunState, SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport,
-    VerifierResult, WorkspaceIdentity, generated_contract_schemas, validate_intake,
+    VerifierResult, WorkspaceIdentity, generated_contract_schemas, validate_authority_current,
+    validate_intake, validate_intake_identity,
 };
 use ao_next_core::strict_json::{
     StrictJsonError, canonical_digest, canonical_json_bytes, decode_strict_json,
@@ -315,6 +316,47 @@ fn stale_authority_is_rejected() {
     };
     let error = validate_intake(&request, &expectation).expect_err("expired authority rejected");
     assert_eq!(error.to_string(), "authority is not current");
+}
+
+#[test]
+fn intake_identity_accepts_expired_authority_for_read_only_inspection() {
+    let request = request();
+    let expectation = IntakeExpectation {
+        run_id: request.run_id.clone(),
+        source: request.source.clone(),
+        workspace: request.workspace.clone(),
+        now: request.authority.expires_at,
+    };
+
+    validate_intake_identity(&request, &expectation).expect("expired identity remains inspectable");
+    assert_eq!(
+        validate_authority_current(&request.authority, expectation.now),
+        Err(ao_next_core::contracts::IntakeError::AuthorityNotCurrent)
+    );
+}
+
+#[test]
+fn intake_identity_keeps_schema_root_and_interval_checks_after_expiry() {
+    let expectation = IntakeExpectation {
+        run_id: "run-01".into(),
+        source: source(),
+        workspace: workspace(),
+        now: timestamp("2026-08-07T00:00:00Z"),
+    };
+    for mutation in ["request-schema", "authority-schema", "root", "interval"] {
+        let mut request = request();
+        match mutation {
+            "request-schema" => request.schema_version = "drifted".into(),
+            "authority-schema" => request.authority.schema_version = "drifted".into(),
+            "root" => request.authority.allowed_roots.clear(),
+            "interval" => request.authority.issued_at = request.authority.expires_at,
+            _ => unreachable!(),
+        }
+        assert!(
+            validate_intake_identity(&request, &expectation).is_err(),
+            "identity accepted {mutation} drift"
+        );
+    }
 }
 
 #[test]

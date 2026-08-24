@@ -7,6 +7,8 @@ use std::os::fd::AsRawFd as _;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt as _;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,10 +19,9 @@ use ao_next_core::adapter::process::{
     ProviderVisibility, RuntimeCapture, RuntimeEnvelopeCapture, capture_runtime_output,
 };
 use ao_next_core::adapter::{
-    CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
-    TokenUsage,
+    AdapterTurn, CancellationToken, EffectObservation, InvocationError, InvocationLimits,
+    InvocationOutput, PreparedInvocation, RuntimeAdapter, TokenUsage, TurnContext, codex,
 };
-use ao_next_core::adapter::{EffectObservation, codex};
 use ao_next_core::capture::{CaptureIndexStore, CapturePublication};
 use ao_next_core::contracts::{
     Capability, Digest, ExternalEffectPolicy, NetworkPolicy, PreparedRunReceipt, RunRequest,
@@ -29,7 +30,7 @@ use ao_next_core::contracts::{
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOutcome};
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::recovery::{CheckpointIdentity, CheckpointJournal};
+use ao_next_core::recovery::{CheckpointIdentity, CheckpointJournal, ProviderJournalState};
 use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{CommandEngineVerifier, CommandVerifierProfile};
 use ao_next_eval::corpus::{
@@ -56,6 +57,8 @@ const GIT_TIMEOUT_MS: u64 = 10_000;
 const LIVE_TOKEN_ENVELOPE: u64 = 564_288;
 const ADAPTER_TURN_SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../../docs/contracts/adapter-turn-v1.schema.json");
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -63,6 +66,12 @@ pub(super) enum LiveVariant {
     N0,
     N4,
     N7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CaptureRootMode {
+    RequireEmpty,
+    RequireRetained,
 }
 
 impl LiveVariant {
@@ -680,6 +689,24 @@ struct CaptureFirstRunner<'a, R> {
     prepared_run_digest: Digest,
 }
 
+enum N7ProcessRunner<'a, R> {
+    Capture(Box<CaptureFirstRunner<'a, R>>),
+    Retained(R),
+}
+
+impl<R: ProcessRunner> ProcessRunner for N7ProcessRunner<'_, R> {
+    fn run(
+        &mut self,
+        invocation: &PreparedInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutput, InvocationError> {
+        match self {
+            Self::Capture(runner) => runner.run(invocation, cancellation),
+            Self::Retained(runner) => runner.run(invocation, cancellation),
+        }
+    }
+}
+
 impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
     fn run(
         &mut self,
@@ -892,6 +919,27 @@ fn validate_prepared_run(
     receipt: &PreparedRunReceipt,
     now: DateTime<Utc>,
 ) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
+    validate_prepared_run_with_mode(input_path, input_bytes, input, receipt, now, true)
+}
+
+pub(super) fn validate_prepared_run_for_recovery(
+    input_path: &Path,
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    now: DateTime<Utc>,
+) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
+    let input_bytes = read_bounded_regular(input_path)?;
+    validate_prepared_run_with_mode(input_path, &input_bytes, input, receipt, now, false)
+}
+
+fn validate_prepared_run_with_mode(
+    input_path: &Path,
+    input_bytes: &[u8],
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    now: DateTime<Utc>,
+    require_current: bool,
+) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
     let request_digest = canonical_digest(&input.request)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let journal_identity = CheckpointIdentity::from_request(&input.request)
@@ -910,7 +958,7 @@ fn validate_prepared_run(
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
         || receipt.expires_at != input.request.authority.expires_at
         || receipt.prepared_at >= receipt.expires_at
-        || receipt.expires_at <= now
+        || (require_current && receipt.expires_at <= now)
         || receipt.provider_calls != 0
         || receipt.safe_to_execute
     {
@@ -926,18 +974,31 @@ fn validate_prepared_run(
         control_digest: receipt.control_digest.clone(),
         index_digest: receipt.index_digest.clone(),
     };
-    verify_git_workspace(&git_workspace, true)
+    verify_git_workspace(&git_workspace, require_current)
         .map_err(|error| CommandFailure::invalid_input(error.message))?;
-    validate_prepared_input(input, LiveVariant::N7, now, &git_workspace)?;
-    revalidate_prepared_live_input(input, &git_workspace)?;
+    if require_current {
+        validate_prepared_input(input, LiveVariant::N7, now, &git_workspace)?;
+        revalidate_prepared_live_input(input, &git_workspace)?;
+    } else {
+        validate_input_with_capture_mode(
+            input,
+            LiveVariant::N7,
+            now,
+            Some(&git_workspace),
+            CaptureRootMode::RequireRetained,
+        )?;
+    }
     let journal = CheckpointJournal::new(
         execution_journal_root(input),
         execution_journal_maximum_bytes(&input.request),
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    journal
-        .bind_pristine_request(&input.request)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if require_current {
+        journal.bind_pristine_request(&input.request)
+    } else {
+        journal.bind_request(&input.request)
+    }
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if read_bounded_regular(input_path)? != input_bytes {
         return Err(CommandFailure::invalid_input(
             "live input drifted after prepared-run validation",
@@ -946,6 +1007,15 @@ fn validate_prepared_run(
     let prepared_run_digest = canonical_digest(receipt)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     Ok((git_workspace, prepared_run_digest))
+}
+
+pub(super) fn revalidate_recovery_before_mutation(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+) -> Result<(), CommandFailure> {
+    verify_git_workspace(git_workspace, true)
+        .map_err(|error| CommandFailure::invalid_input(error.message))?;
+    revalidate_prepared_live_input(input, git_workspace)
 }
 
 pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, CommandFailure> {
@@ -1044,6 +1114,25 @@ pub(super) fn load_trusted_live_input(
     validate_trusted_bindings(&input, &trusted)?;
     validate_input(&input, variant, now)?;
     Ok(TrustedLiveInput { input, bytes })
+}
+
+pub(super) fn load_trusted_live_input_for_recovery(
+    path: &Path,
+    variant: LiveVariant,
+    trusted_corpus_digest: &str,
+    trusted_verifier_profile_digest: &str,
+    now: DateTime<Utc>,
+) -> Result<LiveRunInput, CommandFailure> {
+    let bytes = read_bounded_regular(path)?;
+    let input: LiveRunInput = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let trusted = trusted_bindings(
+        Some(trusted_corpus_digest),
+        Some(trusted_verifier_profile_digest),
+    )?;
+    validate_trusted_bindings(&input, &trusted)?;
+    validate_input_with_capture_mode(&input, variant, now, None, CaptureRootMode::RequireRetained)?;
+    Ok(input)
 }
 
 fn required_live_token_envelope(
@@ -1243,26 +1332,63 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
     verifier_runner: V,
     prepared: Option<(GitWorkspaceIdentity, Digest)>,
 ) -> Result<CommandOutput, CommandFailure> {
+    execute_with_prepared_runner_mode(
+        input,
+        variant,
+        measurement_origin,
+        provider_runner,
+        verifier_runner,
+        prepared,
+        None,
+    )
+}
+
+pub(super) fn execute_recovered_live<P: ProcessRunner>(
+    input: &LiveRunInput,
+    provider_runner: P,
+    prepared: (GitWorkspaceIdentity, Digest),
+    retained_index: &Digest,
+) -> Result<CommandOutput, CommandFailure> {
+    execute_with_prepared_runner_mode(
+        input,
+        LiveVariant::N7,
+        MeasurementOrigin::LiveProvider,
+        provider_runner,
+        BoundedProcessRunner,
+        Some(prepared),
+        Some(retained_index),
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the run record is assembled once so every measured field remains visibly source-bound"
+)]
+fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
+    input: &LiveRunInput,
+    variant: LiveVariant,
+    measurement_origin: MeasurementOrigin,
+    provider_runner: P,
+    verifier_runner: V,
+    prepared: Option<(GitWorkspaceIdentity, Digest)>,
+    recovery_index: Option<&Digest>,
+) -> Result<CommandOutput, CommandFailure> {
     let started_at = Utc::now();
     let started = Instant::now();
     let validated = if let Some((git_workspace, _)) = &prepared {
-        validate_prepared_input(input, variant, started_at, git_workspace)?
+        validate_input_with_capture_mode(
+            input,
+            variant,
+            started_at,
+            Some(git_workspace),
+            if recovery_index.is_some() {
+                CaptureRootMode::RequireRetained
+            } else {
+                CaptureRootMode::RequireEmpty
+            },
+        )?
     } else {
         validate_input(input, variant, started_at)?
-    };
-    let provider_visibility = if variant == LiveVariant::N7 {
-        Some(
-            ProviderVisibility::from_live_roots(
-                &input.request.workspace.root,
-                &validated.task.workspace_seed_digest,
-                &input.visible_fixtures,
-                &validated.task.visible_fixtures_digest,
-                usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
-            )
-            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
-        )
-    } else {
-        None
     };
     let (git_workspace, prepared_run_digest) = if let Some(prepared) = prepared {
         if variant != LiveVariant::N7 {
@@ -1281,6 +1407,16 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
             .map_err(|error| CommandFailure::evidence(error.to_string()))?;
         (git_workspace, digest)
     };
+    let provider_visibility = if variant == LiveVariant::N7 {
+        Some(n7_provider_visibility(
+            input,
+            validated.task,
+            &git_workspace,
+            recovery_index.is_some(),
+        )?)
+    } else {
+        None
+    };
     let cancellation = CancellationToken::new();
     let invocation_limits = invocation_limits(&input.request)?;
     let mut verifier = CommandEngineVerifier::new(
@@ -1288,14 +1424,20 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
         input.command_verifier.clone(),
         verifier_runner,
         cancellation.clone(),
-        started_at,
+        if variant == LiveVariant::N7 {
+            input.request.authority.issued_at
+        } else {
+            started_at
+        },
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    let retained_index = Arc::new(Mutex::new(None));
+    let retained_index = Arc::new(Mutex::new(recovery_index.cloned()));
     let retained_failure = Arc::new(Mutex::new(None));
     let capture_context = capture_context(input, variant);
-    verify_git_workspace(&git_workspace, true)?;
-    revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
+    verify_git_workspace(&git_workspace, recovery_index.is_none())?;
+    if recovery_index.is_none() {
+        revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
+    }
     let journal = (variant == LiveVariant::N7)
         .then(|| {
             CheckpointJournal::new(
@@ -1315,26 +1457,33 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
             &cancellation,
             invocation_limits,
         ),
-        LiveVariant::N7 => execute_n7(
-            input,
-            provider_visibility.expect("N7 visibility constructed"),
-            CaptureFirstRunner {
-                runner: provider_runner,
-                raw_capture_root: input.raw_capture_root.clone(),
-                capture_context: capture_context.clone(),
-                retained_index: retained_index.clone(),
-                retained_failure: retained_failure.clone(),
-                runtime: input.request.model_profile.runtime.clone(),
-                max_tokens: input.request.limits.max_tokens,
-                journal: journal.as_ref(),
-                request: &input.request,
-                prepared_run_digest: prepared_run_digest.clone(),
-            },
-            &mut verifier,
-            cancellation.clone(),
-            invocation_limits,
-            journal.as_ref().expect("N7 journal constructed"),
-        ),
+        LiveVariant::N7 => {
+            let runner = if recovery_index.is_some() {
+                N7ProcessRunner::Retained(provider_runner)
+            } else {
+                N7ProcessRunner::Capture(Box::new(CaptureFirstRunner {
+                    runner: provider_runner,
+                    raw_capture_root: input.raw_capture_root.clone(),
+                    capture_context: capture_context.clone(),
+                    retained_index: retained_index.clone(),
+                    retained_failure: retained_failure.clone(),
+                    runtime: input.request.model_profile.runtime.clone(),
+                    max_tokens: input.request.limits.max_tokens,
+                    journal: journal.as_ref(),
+                    request: &input.request,
+                    prepared_run_digest: prepared_run_digest.clone(),
+                }))
+            };
+            execute_n7(
+                input,
+                provider_visibility.expect("N7 visibility constructed"),
+                runner,
+                &mut verifier,
+                cancellation.clone(),
+                invocation_limits,
+                journal.as_ref().expect("N7 journal constructed"),
+            )
+        }
         LiveVariant::N4 => execute_n4(
             input,
             CaptureFirstRunner {
@@ -1587,10 +1736,15 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
     let native_effect_observations = outcome
         .as_ref()
         .map_or_else(Vec::new, |outcome| outcome.effect_observations.clone());
+    let mut digest_measurement = measurement.clone();
+    if variant == LiveVariant::N7 {
+        digest_measurement.wall_clock_ms = 0;
+        digest_measurement.model_wait_ms = 0;
+    }
     let record_digest = canonical_digest(&(
         variant,
         &terminal_state,
-        &measurement,
+        &digest_measurement,
         &capture_digests,
         &raw_capture_index_digest,
         &verifier_report_digest,
@@ -2024,6 +2178,72 @@ fn ao2_control_diagnostic(
     })
 }
 
+fn n7_provider_visibility(
+    input: &LiveRunInput,
+    task: &EvaluationTask,
+    git_workspace: &GitWorkspaceIdentity,
+    retained: bool,
+) -> Result<ProviderVisibility, CommandFailure> {
+    let workspace_digest = if retained {
+        canonical_digest(&snapshot_product_tree(
+            &input.request.workspace.root,
+            input.request.limits.max_input_bytes,
+            Some(git_workspace),
+        )?)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+    } else {
+        task.workspace_seed_digest.clone()
+    };
+    ProviderVisibility::from_live_roots(
+        &input.request.workspace.root,
+        &workspace_digest,
+        &input.visible_fixtures,
+        &task.visible_fixtures_digest,
+        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))
+}
+
+pub(super) fn normalize_retained_turn<R: ProcessRunner>(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+    runner: R,
+) -> Result<AdapterTurn, CommandFailure> {
+    let task = input
+        .corpus
+        .tasks
+        .iter()
+        .find(|task| task.task_id == input.task_id)
+        .ok_or_else(|| CommandFailure::invalid_input("task is not in the sealed corpus"))?;
+    let cancellation = CancellationToken::new();
+    let limits = invocation_limits(&input.request)?;
+    let config = ProcessAdapterConfig::from_request_with_visibility(
+        &input.request,
+        WORKER_ID,
+        &input.output_schema,
+        n7_provider_visibility(input, task, git_workspace, true)?,
+        limits,
+        cancellation.clone(),
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let mut adapter = ProcessRuntimeAdapter::new(config, SingleProviderProcess::new(runner));
+    let context = TurnContext {
+        run_id: input.request.run_id.clone(),
+        turn_index: 0,
+        repair_attempt: 0,
+        source: input.request.source.clone(),
+        workspace: input.request.workspace.clone(),
+        authority_digest: canonical_digest(&input.request.authority)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        policy_digest: input.request.policy_digest.clone(),
+        verifier_profile_digest: input.request.verifier_profile.profile_digest.clone(),
+        effect_observations: Vec::new(),
+    };
+    adapter
+        .execute_turn(&context)
+        .map_err(|error| CommandFailure::runtime(error.to_string()))
+}
+
 fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     input: &LiveRunInput,
     visibility: ProviderVisibility,
@@ -2160,6 +2380,26 @@ fn validate_input_with_git<'a>(
     now: chrono::DateTime<Utc>,
     git_workspace: Option<&GitWorkspaceIdentity>,
 ) -> Result<ValidatedInput<'a>, CommandFailure> {
+    validate_input_with_capture_mode(
+        input,
+        variant,
+        now,
+        git_workspace,
+        CaptureRootMode::RequireEmpty,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fail-closed intake audit stays linear so all identity comparisons remain visible"
+)]
+fn validate_input_with_capture_mode<'a>(
+    input: &'a LiveRunInput,
+    variant: LiveVariant,
+    now: chrono::DateTime<Utc>,
+    git_workspace: Option<&GitWorkspaceIdentity>,
+    capture_mode: CaptureRootMode,
+) -> Result<ValidatedInput<'a>, CommandFailure> {
     if input.schema_version != "ao.next.live-run-input.v1"
         || input.task_id.trim().is_empty()
         || input.trial_id.trim().is_empty()
@@ -2205,15 +2445,20 @@ fn validate_input_with_git<'a>(
             "trial identity does not match the sealed schedule",
         ));
     }
-    ao_next_core::contracts::validate_intake(
-        &input.request,
-        &ao_next_core::contracts::IntakeExpectation {
-            run_id: input.request.run_id.clone(),
-            source: input.request.source.clone(),
-            workspace: input.request.workspace.clone(),
-            now,
-        },
-    )
+    let expectation = ao_next_core::contracts::IntakeExpectation {
+        run_id: input.request.run_id.clone(),
+        source: input.request.source.clone(),
+        workspace: input.request.workspace.clone(),
+        now,
+    };
+    match capture_mode {
+        CaptureRootMode::RequireEmpty => {
+            ao_next_core::contracts::validate_intake(&input.request, &expectation)
+        }
+        CaptureRootMode::RequireRetained => {
+            ao_next_core::contracts::validate_intake_identity(&input.request, &expectation)
+        }
+    }
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if input.request.source.head != task.source_digest
         || input.request.workspace.seed_digest != task.workspace_seed_digest
@@ -2255,18 +2500,24 @@ fn validate_input_with_git<'a>(
         (_, None) => {}
     }
     validate_objective_file(input, task)?;
-    let initial_files = snapshot_product_tree(
-        &input.request.workspace.root,
-        input.request.limits.max_input_bytes,
-        git_workspace,
-    )?;
-    if canonical_digest(&initial_files)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-        != task.workspace_seed_digest
-    {
-        return Err(CommandFailure::invalid_input("workspace seed drifted"));
-    }
-    validate_source_snapshot(input, task, &initial_files)?;
+    let source = load_source_snapshot(input, task)?;
+    let initial_files = if capture_mode == CaptureRootMode::RequireEmpty {
+        let initial_files = snapshot_product_tree(
+            &input.request.workspace.root,
+            input.request.limits.max_input_bytes,
+            git_workspace,
+        )?;
+        if canonical_digest(&initial_files)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+            != task.workspace_seed_digest
+            || source.files != initial_files
+        {
+            return Err(CommandFailure::invalid_input("workspace seed drifted"));
+        }
+        initial_files
+    } else {
+        source.files
+    };
     let visible = snapshot_tree(
         &input.visible_fixtures,
         input.request.limits.max_input_bytes,
@@ -2288,6 +2539,8 @@ fn validate_input_with_git<'a>(
     ensure_private_capture_root(
         &input.raw_capture_root,
         &input.request.authority.allowed_roots,
+        capture_mode,
+        input.request.limits.max_output_bytes,
     )?;
     ensure_checked_output_schema(&input.output_schema, input.request.limits.max_input_bytes)?;
     let hidden_file_bytes = hidden
@@ -2321,11 +2574,10 @@ fn validate_objective_file(
     Ok(())
 }
 
-fn validate_source_snapshot(
+fn load_source_snapshot(
     input: &LiveRunInput,
     task: &EvaluationTask,
-    initial_files: &[SnapshotEntry],
-) -> Result<(), CommandFailure> {
+) -> Result<SourceSnapshot, CommandFailure> {
     let source_bytes = read_bounded_regular(&input.source_snapshot)?;
     let source: SourceSnapshot = decode_strict_json(
         &source_bytes,
@@ -2335,14 +2587,13 @@ fn validate_source_snapshot(
     if source.schema_version != "ao.next.source-snapshot.v1"
         || source.task_id != input.task_id
         || source.tree_digest != task.workspace_seed_digest
-        || source.files != initial_files
         || canonical_digest(&source)
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
             != task.source_digest
     {
         return Err(CommandFailure::invalid_input("source snapshot drifted"));
     }
-    Ok(())
+    Ok(source)
 }
 
 fn hidden_material_exposed(
@@ -2392,7 +2643,9 @@ fn revalidate_post_git_inputs(
         Some(git_workspace),
     )?;
     validate_objective_file(input, task)?;
-    validate_source_snapshot(input, task, &workspace)?;
+    if load_source_snapshot(input, task)?.files != workspace {
+        return Err(CommandFailure::invalid_input("source snapshot drifted"));
+    }
     let visible = snapshot_tree(
         &input.visible_fixtures,
         input.request.limits.max_input_bytes,
@@ -2431,11 +2684,17 @@ pub(super) fn revalidate_prepared_live_input(
 fn ensure_private_capture_root(
     path: &Path,
     worker_roots: &[PathBuf],
+    mode: CaptureRootMode,
+    maximum_output_bytes: u64,
 ) -> Result<(), CommandFailure> {
     ensure_outside_roots(path, worker_roots)?;
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    #[cfg(windows)]
+    let reparse_point = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    #[cfg(not(windows))]
+    let reparse_point = false;
+    if metadata.file_type().is_symlink() || reparse_point || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "raw capture root is not a regular non-symlink directory",
         ));
@@ -2449,24 +2708,69 @@ fn ensure_private_capture_root(
             ));
         }
     }
-    let mut entries = std::fs::read_dir(path)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if entries
-        .next()
-        .transpose()
+    let entries = std::fs::read_dir(path)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-        .is_some()
-    {
-        return Err(CommandFailure::invalid_input(
-            "raw capture root is not empty",
-        ));
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if mode == CaptureRootMode::RequireEmpty {
+        if !entries.is_empty() {
+            return Err(CommandFailure::invalid_input(
+                "raw capture root is not empty",
+            ));
+        }
+        return Ok(());
+    }
+    let mut capture_bytes = 0_u64;
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| CommandFailure::invalid_input("raw capture name is not UTF-8"))?;
+        if !names.insert(name.clone()) {
+            return Err(CommandFailure::invalid_input(
+                "raw capture path is duplicated",
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        #[cfg(windows)]
+        let reparse_point = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        #[cfg(not(windows))]
+        let reparse_point = false;
+        let capture = name.starts_with("capture-")
+            && (name.ends_with(".stdout") || name.ends_with(".stderr"));
+        let metadata_file = matches!(
+            name.as_str(),
+            "capture-index.json" | "capture-index.json.incomplete" | "capture-terminal.json"
+        );
+        if metadata.file_type().is_symlink()
+            || reparse_point
+            || !metadata.is_file()
+            || (!capture && !metadata_file)
+            || (metadata_file && metadata.len() > 1024 * 1024)
+        {
+            return Err(CommandFailure::invalid_input(
+                "raw capture root contains an unsafe or unknown entry",
+            ));
+        }
+        if capture {
+            capture_bytes = capture_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                CommandFailure::invalid_input("raw capture byte count overflowed")
+            })?;
+            if capture_bytes > maximum_output_bytes {
+                return Err(CommandFailure::invalid_input(
+                    "raw capture exceeds its sealed output bound",
+                ));
+            }
+        }
     }
     Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CaptureContext {
+pub(super) struct CaptureContext {
     run_id: String,
     trial_id: String,
     workspace_instance_id: String,
@@ -2483,7 +2787,7 @@ struct CaptureRuntimeIdentity {
     worker_id: String,
 }
 
-fn capture_context(input: &LiveRunInput, variant: LiveVariant) -> CaptureContext {
+pub(super) fn capture_context(input: &LiveRunInput, variant: LiveVariant) -> CaptureContext {
     CaptureContext {
         run_id: input.request.run_id.clone(),
         trial_id: input.trial_id.clone(),
@@ -2631,6 +2935,17 @@ fn verify_raw_capture_index(
         .map_err(|error| CommandFailure::evidence(error.message))?;
     let index: RawCaptureIndex = decode_strict_json(&bytes, 1024 * 1024)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    verify_raw_capture_index_value(root, context, expected_digest, maximum_output_bytes, &index)?;
+    Ok(())
+}
+
+fn verify_raw_capture_index_value(
+    root: &Path,
+    context: &CaptureContext,
+    expected_digest: &Digest,
+    maximum_output_bytes: u64,
+    index: &RawCaptureIndex,
+) -> Result<Vec<InvocationOutput>, CommandFailure> {
     if index.schema_version != "ao.next.raw-provider-capture-index.v2"
         || index.run_id != context.run_id
         || index.trial_id != context.trial_id
@@ -2645,6 +2960,7 @@ fn verify_raw_capture_index(
         ));
     }
     let mut paths = BTreeSet::new();
+    let mut outputs = Vec::with_capacity(index.entries.len());
     for (capture_order, entry) in index.entries.iter().enumerate() {
         if entry.capture_order != u32::try_from(capture_order).unwrap_or(u32::MAX) {
             return Err(CommandFailure::evidence(
@@ -2672,7 +2988,89 @@ fn verify_raw_capture_index(
                 "retained provider capture digest or byte count mismatched",
             ));
         }
+        outputs.push(InvocationOutput {
+            status: entry.status,
+            stdout,
+            stderr,
+        });
     }
+    Ok(outputs)
+}
+
+pub(super) fn load_verified_capture(
+    root: &Path,
+    context: &CaptureContext,
+    provider_state: &ProviderJournalState,
+    maximum_output_bytes: u64,
+) -> Result<(InvocationOutput, Digest, CapturePublication), CommandFailure> {
+    let raw_capture_digest = provider_state.raw_capture_digest.as_ref().ok_or_else(|| {
+        CommandFailure::invalid_input("provider outcome is unknown without retained capture")
+    })?;
+    let final_path = root.join("capture-index.json");
+    let incomplete_path = root.join("capture-index.json.incomplete");
+    let source = if final_path.exists() || final_path.is_symlink() {
+        &final_path
+    } else {
+        &incomplete_path
+    };
+    let bytes = read_bounded_path(source, 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.message))?;
+    let index: RawCaptureIndex = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let index_digest =
+        canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if provider_state
+        .capture_index_digest
+        .as_ref()
+        .is_some_and(|expected| expected != &index_digest)
+    {
+        return Err(CommandFailure::evidence(
+            "raw capture index identity or digest is contradictory",
+        ));
+    }
+    let outputs =
+        verify_raw_capture_index_value(root, context, &index_digest, maximum_output_bytes, &index)?;
+    let [output] = outputs.as_slice() else {
+        return Err(CommandFailure::evidence(
+            "recovery requires exactly one retained N7 capture",
+        ));
+    };
+    if &canonical_digest(&(output.status, &output.stdout, &output.stderr))
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        != raw_capture_digest
+    {
+        return Err(CommandFailure::evidence(
+            "retained provider capture contradicts the journal",
+        ));
+    }
+    let store = CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let publication = store
+        .recover(&index_digest)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if publication.digest() != &index_digest {
+        return Err(CommandFailure::evidence(
+            "capture publication digest drifted",
+        ));
+    }
+    verify_raw_capture_index(root, context, &index_digest, maximum_output_bytes)?;
+    Ok((output.clone(), index_digest, publication))
+}
+
+pub(super) fn gate_retained_capture(
+    input: &LiveRunInput,
+    context: &CaptureContext,
+    index_digest: &Digest,
+    output: &InvocationOutput,
+) -> Result<(), CommandFailure> {
+    verify_and_gate_capture(
+        &input.raw_capture_root,
+        context,
+        index_digest,
+        &input.request.model_profile.runtime,
+        output,
+        input.request.limits.max_tokens,
+    )?;
     Ok(())
 }
 

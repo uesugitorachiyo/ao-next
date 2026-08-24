@@ -10,6 +10,7 @@ AO Next is not established as superior, production-ready, released, published, d
 
 - `README.md` defines the operator surface and qualification boundary.
 - `docs/architecture.md` defines the thin-envelope architecture and non-goals.
+- `docs/superpowers/specs/2026-08-23-ao-next-dual-process-cross-platform-successor-design.md` defines the proposed repair-first Engine/Mission monorepo target. It does not authorize implementation, provider use, release, adoption, or AO2 retirement.
 - `docs/contracts/*.schema.json` and Rust types in `ao-next-core` jointly own checked-in wire contracts; drift must fail verification.
 - `docs/evaluation/` owns paired comparison protocol and decision policy.
 - Core module tests own state, policy, effect, evidence, recovery, and terminal behavior.

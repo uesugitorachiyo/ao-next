@@ -1174,14 +1174,14 @@ impl CheckpointJournal {
                 .clone();
             let name = path
                 .file_name()
-                .ok_or_else(|| RecoveryError::UnsafePath(path.to_path_buf()))?;
+                .ok_or_else(|| RecoveryError::UnsafePath(path.clone()))?;
             let opened = create_existing_terminal_file(&root, &self.root, name, bytes)?;
             let mut binding = binding
                 .lock()
                 .map_err(|error| RecoveryError::Io(error.to_string()))?;
             if binding
                 .terminal_files
-                .insert(path.to_path_buf(), opened)
+                .insert(path.clone(), opened)
                 .is_some()
             {
                 return Err(RecoveryError::EventDigestMismatch);

@@ -1,6 +1,13 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(windows)]
+use std::fs::{File, OpenOptions};
+#[cfg(windows)]
+use std::io::{Read as _, Take};
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -16,6 +23,20 @@ use crate::contracts::{
 use crate::engine::MAX_EFFECTS_PER_TURN;
 use crate::evidence::digest_bytes;
 use crate::strict_json::{canonical_digest, decode_strict_json};
+
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+
+#[cfg(any(test, windows))]
+const fn windows_reparse_point(attributes: u32) -> bool {
+    attributes & 0x400 != 0
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderVisibleFile {
@@ -44,9 +65,9 @@ impl ProviderVisibility {
         visible_fixture_digest: &Digest,
         maximum_bytes: usize,
     ) -> Result<Self, AdapterError> {
-        let (source_files, source_identity) = visible_files(workspace_root, maximum_bytes)?;
+        let (source_files, source_identity) = visible_files(workspace_root, maximum_bytes, true)?;
         let (visible_fixtures, fixture_identity) =
-            visible_files(visible_fixture_root, maximum_bytes)?;
+            visible_files(visible_fixture_root, maximum_bytes, false)?;
         if &canonical_digest(&source_identity)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?
             != workspace_seed_digest
@@ -62,7 +83,7 @@ impl ProviderVisibility {
     }
 
     fn from_workspace(root: &Path, maximum_bytes: usize) -> Result<Self, AdapterError> {
-        let (source_files, _) = visible_files(root, maximum_bytes)?;
+        let (source_files, _) = visible_files(root, maximum_bytes, true)?;
         Self::new(source_files, Vec::new())
     }
 
@@ -82,9 +103,16 @@ impl ProviderVisibility {
 
 #[derive(Serialize)]
 struct VisibleFileIdentity {
-    path: PathBuf,
+    path: String,
     sha256: Digest,
     size_bytes: u64,
+}
+
+struct CapturedVisibleFile {
+    relative: PathBuf,
+    text: String,
+    bytes: Vec<u8>,
+    digest: Digest,
 }
 
 pub trait ProcessRunner {
@@ -605,87 +633,133 @@ fn build_prompt(
 fn visible_files(
     root: &Path,
     maximum_bytes: usize,
+    omit_root_git: bool,
 ) -> Result<(Vec<ProviderVisibleFile>, Vec<VisibleFileIdentity>), AdapterError> {
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    #[cfg(windows)]
+    let reparse_point = windows_reparse_point(metadata.file_attributes());
+    #[cfg(not(windows))]
+    let reparse_point = false;
+    if metadata.file_type().is_symlink() || reparse_point || !metadata.is_dir() {
         return Err(AdapterError::Runtime(
             "provider-visible root is not a regular non-symlink directory".into(),
         ));
     }
-    let mut paths = Vec::new();
-    collect_visible_paths(root, root, &mut paths)?;
-    paths.sort();
     let mut total = 0_usize;
-    let mut files = Vec::with_capacity(paths.len());
-    let mut identities = Vec::with_capacity(paths.len());
-    for path in paths {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        let relative_text = safe_relative_text(relative)?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(AdapterError::Runtime(
-                "provider-visible inventory contains a non-regular file".into(),
-            ));
-        }
-        let bytes =
-            std::fs::read(&path).map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        total = total.checked_add(bytes.len()).ok_or_else(|| {
-            AdapterError::Runtime("provider-visible byte count overflowed".into())
-        })?;
-        if bytes.len() > maximum_bytes || total > maximum_bytes {
-            return Err(AdapterError::Runtime(
-                "provider-visible inventory exceeded its byte bound".into(),
-            ));
-        }
-        let content = std::str::from_utf8(&bytes)
-            .map_err(|_| AdapterError::Runtime("provider-visible file is not UTF-8".into()))?
-            .to_owned();
-        let digest = digest_bytes(&bytes);
+    let mut captured = Vec::new();
+    collect_visible_files(
+        root,
+        root,
+        omit_root_git,
+        maximum_bytes,
+        &mut total,
+        &mut captured,
+    )?;
+    captured.sort_by(|left, right| left.relative.cmp(&right.relative));
+    let mut files = Vec::with_capacity(captured.len());
+    let mut identities = Vec::with_capacity(captured.len());
+    for captured in captured {
+        let path = safe_relative_text(&captured.relative)?;
         files.push(ProviderVisibleFile {
-            path: relative_text,
-            content,
-            digest: digest.clone(),
+            path: path.clone(),
+            content: captured.text,
+            digest: captured.digest.clone(),
         });
         identities.push(VisibleFileIdentity {
-            path: relative.to_path_buf(),
-            sha256: digest,
-            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            path,
+            sha256: captured.digest,
+            size_bytes: u64::try_from(captured.bytes.len()).unwrap_or(u64::MAX),
         });
     }
     Ok((files, identities))
 }
 
-fn collect_visible_paths(
+fn collect_visible_files(
     root: &Path,
     directory: &Path,
-    paths: &mut Vec<PathBuf>,
+    omit_root_git: bool,
+    maximum_bytes: usize,
+    total: &mut usize,
+    files: &mut Vec<CapturedVisibleFile>,
 ) -> Result<(), AdapterError> {
-    let mut entries = std::fs::read_dir(directory)
+    collect_visible_files_with_probe(
+        root,
+        directory,
+        omit_root_git,
+        maximum_bytes,
+        total,
+        files,
+        &mut |_: &Path| {},
+    )
+}
+
+fn collect_visible_files_with_probe(
+    root: &Path,
+    directory: &Path,
+    omit_root_git: bool,
+    maximum_bytes: usize,
+    total: &mut usize,
+    files: &mut Vec<CapturedVisibleFile>,
+    before_file_read: &mut dyn FnMut(&Path),
+) -> Result<(), AdapterError> {
+    #[cfg(windows)]
+    let _directory_anchor = open_visible_directory(directory)?;
+    let entries = std::fs::read_dir(directory)
         .map_err(|error| AdapterError::Runtime(error.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        #[cfg(windows)]
+        let reparse_point = windows_reparse_point(metadata.file_attributes());
+        #[cfg(not(windows))]
+        let reparse_point = false;
+        if metadata.file_type().is_symlink() || reparse_point {
+            return Err(AdapterError::Runtime(
+                "provider-visible inventory contains a symlink or reparse point".into(),
+            ));
+        }
+        if omit_root_git && directory == root && entry.file_name() == ".git" && metadata.is_dir() {
+            continue;
+        }
         let relative = path
             .strip_prefix(root)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
         safe_relative_text(relative)?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(AdapterError::Runtime(
-                "provider-visible inventory contains a symlink".into(),
-            ));
-        }
         if metadata.is_dir() {
-            collect_visible_paths(root, &path, paths)?;
+            collect_visible_files_with_probe(
+                root,
+                &path,
+                omit_root_git,
+                maximum_bytes,
+                total,
+                files,
+                before_file_read,
+            )?;
         } else if metadata.is_file() {
-            paths.push(path);
+            before_file_read(&path);
+            let bytes = read_visible_file(&path, maximum_bytes)?;
+            *total = total.checked_add(bytes.len()).ok_or_else(|| {
+                AdapterError::Runtime("provider-visible byte count overflowed".into())
+            })?;
+            if bytes.len() > maximum_bytes || *total > maximum_bytes {
+                return Err(AdapterError::Runtime(
+                    "provider-visible inventory exceeded its byte bound".into(),
+                ));
+            }
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| AdapterError::Runtime("provider-visible file is not UTF-8".into()))?
+                .to_owned();
+            let digest = digest_bytes(&bytes);
+            files.push(CapturedVisibleFile {
+                relative: relative.to_path_buf(),
+                text,
+                bytes,
+                digest,
+            });
         } else {
             return Err(AdapterError::Runtime(
                 "provider-visible inventory contains a special file".into(),
@@ -693,6 +767,60 @@ fn collect_visible_paths(
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn read_visible_file(path: &Path, _: usize) -> Result<Vec<u8>, AdapterError> {
+    std::fs::read(path).map_err(|error| AdapterError::Runtime(error.to_string()))
+}
+
+#[cfg(windows)]
+fn open_visible_directory(path: &Path) -> Result<File, AdapterError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if !metadata.is_dir() || windows_reparse_point(metadata.file_attributes()) {
+        return Err(AdapterError::Runtime(
+            "provider-visible root or directory is a reparse point".into(),
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn read_visible_file(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, AdapterError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if !metadata.is_file() || windows_reparse_point(metadata.file_attributes()) {
+        return Err(AdapterError::Runtime(
+            "provider-visible file is a reparse point".into(),
+        ));
+    }
+    let limit = u64::try_from(maximum_bytes).unwrap_or(u64::MAX);
+    let mut bytes = Vec::new();
+    let mut bounded: Take<File> = file.take(limit.saturating_add(1));
+    bounded
+        .read_to_end(&mut bytes)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if bytes.len() > maximum_bytes {
+        return Err(AdapterError::Runtime(
+            "provider-visible inventory exceeded its byte bound".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn safe_relative_text(path: &Path) -> Result<String, AdapterError> {
@@ -805,4 +933,94 @@ fn required_u64(value: &Value) -> Result<u64, AdapterError> {
     value
         .as_u64()
         .ok_or_else(|| AdapterError::Runtime("trusted usage counter is not a u64".into()))
+}
+
+#[cfg(test)]
+mod reparse_tests {
+    #[test]
+    fn provider_visibility_identity_digest_uses_portable_nested_path() {
+        let root = tempfile::TempDir::new().expect("root");
+        std::fs::create_dir(root.path().join("nested")).expect("nested directory");
+        std::fs::write(root.path().join("nested/file.txt"), b"original\n").expect("nested file");
+        let (_, identities) =
+            super::visible_files(root.path(), 64 * 1024, false).expect("visible identities");
+
+        assert_eq!(
+            crate::strict_json::canonical_digest(&identities).expect("actual digest"),
+            crate::strict_json::canonical_digest(&serde_json::json!([{
+                "path": "nested/file.txt",
+                "sha256": crate::evidence::digest_bytes(b"original\n"),
+                "size_bytes": 9
+            }]))
+            .expect("portable literal digest")
+        );
+    }
+
+    #[test]
+    fn windows_reparse_attribute_is_unsafe() {
+        assert!(super::windows_reparse_point(0x400));
+        assert!(!super::windows_reparse_point(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_visibility_holds_nested_ancestor_until_file_read() {
+        use tempfile::TempDir;
+
+        let root = TempDir::new().expect("root");
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).expect("nested directory");
+        std::fs::write(nested.join("file.txt"), b"original\n").expect("original file");
+
+        let outside = TempDir::new().expect("outside");
+        std::fs::write(outside.path().join("file.txt"), b"swapped\n").expect("outside file");
+        let junction_parent = TempDir::new().expect("junction parent");
+        let junction = junction_parent.path().join("candidate");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path())
+            .output()
+            .expect("create junction candidate");
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let original = nested.join("file.txt");
+        let moved = root.path().join("moved");
+        let mut rename_failed = None;
+        let mut probe = |path: &std::path::Path| {
+            if path == original {
+                let result = std::fs::rename(&nested, &moved);
+                rename_failed = Some(result.is_err());
+                if result.is_ok() {
+                    std::fs::rename(&junction, &nested).expect("replace nested with junction");
+                }
+            }
+        };
+        let mut total = 0;
+        let mut captured = Vec::new();
+
+        super::collect_visible_files_with_probe(
+            root.path(),
+            root.path(),
+            false,
+            64 * 1024,
+            &mut total,
+            &mut captured,
+            &mut probe,
+        )
+        .expect("capture provider visibility");
+
+        assert_eq!(rename_failed, Some(true), "nested ancestor was renameable");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].relative,
+            std::path::Path::new("nested/file.txt")
+        );
+        assert_eq!(captured[0].bytes, b"original\n");
+    }
 }

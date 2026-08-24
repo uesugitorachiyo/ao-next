@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod capture;
 pub mod contracts;
 pub mod effects;
 pub mod engine;

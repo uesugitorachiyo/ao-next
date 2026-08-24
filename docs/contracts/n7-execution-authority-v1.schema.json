@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "authority_id": { "type": "string" },
+    "base_commit": { "pattern": "^[0-9a-f]{40}$", "type": "string" },
+    "expires_at": { "format": "date-time", "type": "string" },
+    "issued_at": { "format": "date-time", "type": "string" },
+    "issued_by": { "type": "string" },
+    "preparation_input_digest": { "type": "string" },
+    "preparation_request_digest": { "type": "string" },
+    "prepared_run_digest": { "type": "string" },
+    "provider_process_allowance": { "const": 1, "format": "uint32", "minimum": 0.0, "type": "integer" },
+    "requested_authority_digest": { "type": "string" },
+    "schema_version": { "type": "string" },
+    "workspace_digest": { "type": "string" },
+    "workspace_identity_digest": { "type": "string" },
+    "workspace_root": { "type": "string" },
+    "write_scope_digest": { "type": "string" }
+  },
+  "required": ["authority_id", "base_commit", "expires_at", "issued_at", "issued_by", "preparation_input_digest", "preparation_request_digest", "prepared_run_digest", "provider_process_allowance", "requested_authority_digest", "schema_version", "workspace_digest", "workspace_identity_digest", "workspace_root", "write_scope_digest"],
+  "title": "N7ExecutionAuthority",
+  "type": "object"
+}

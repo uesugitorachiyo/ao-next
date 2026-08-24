@@ -3,6 +3,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::{Schema, SchemaObject, StringValidation};
 use schemars::{JsonSchema, schema_for};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -316,6 +318,185 @@ pub struct TerminalReadback {
     pub exact_next_action: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedRunReceipt {
+    pub schema_version: String,
+    pub run_id: String,
+    pub input_digest: Digest,
+    pub request_digest: Digest,
+    pub repository_root: PathBuf,
+    pub common_directory: PathBuf,
+    pub branch: String,
+    #[serde(deserialize_with = "deserialize_git_commit")]
+    #[schemars(schema_with = "git_commit_schema")]
+    pub base_commit: String,
+    pub control_digest: Digest,
+    pub index_digest: Digest,
+    pub workspace_digest: Digest,
+    pub journal_identity_digest: Digest,
+    pub prepared_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(deserialize_with = "deserialize_zero_provider_calls")]
+    #[schemars(schema_with = "zero_provider_calls_schema")]
+    pub provider_calls: u32,
+    #[serde(deserialize_with = "deserialize_unsafe_to_execute")]
+    #[schemars(schema_with = "unsafe_to_execute_schema")]
+    pub safe_to_execute: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct N7ExecutionAuthority {
+    pub schema_version: String,
+    pub authority_id: String,
+    pub issued_by: String,
+    pub prepared_run_digest: Digest,
+    pub preparation_input_digest: Digest,
+    pub preparation_request_digest: Digest,
+    #[serde(deserialize_with = "deserialize_git_commit")]
+    #[schemars(schema_with = "git_commit_schema")]
+    pub base_commit: String,
+    pub workspace_identity_digest: Digest,
+    pub workspace_digest: Digest,
+    pub workspace_root: PathBuf,
+    pub requested_authority_digest: Digest,
+    pub write_scope_digest: Digest,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(deserialize_with = "deserialize_one_provider_process")]
+    #[schemars(schema_with = "one_provider_process_schema")]
+    pub provider_process_allowance: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct N7ExecutionAuthorityExpectation {
+    pub execution_authority_digest: Digest,
+    pub prepared_run_digest: Digest,
+    pub preparation_input_digest: Digest,
+    pub preparation_request_digest: Digest,
+    pub base_commit: String,
+    pub workspace_identity_digest: Digest,
+    pub workspace_digest: Digest,
+    pub workspace_root: PathBuf,
+    pub requested_authority_digest: Digest,
+    pub write_scope_digest: Digest,
+    pub prepared_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct N7RequestedWriteScope<'a> {
+    workspace_root: &'a PathBuf,
+    capabilities: &'a BTreeSet<Capability>,
+    allowed_roots: &'a [PathBuf],
+    allowed_programs: &'a BTreeSet<String>,
+    network: &'a NetworkPolicy,
+    allowed_network_hosts: &'a BTreeSet<String>,
+    external_effects: &'a ExternalEffectPolicy,
+}
+
+/// Digests the exact write-capable scope requested by an N7 preparation input.
+///
+/// # Errors
+///
+/// Returns a strict JSON error if canonical serialization fails.
+pub fn n7_requested_write_scope_digest(
+    request: &RunRequest,
+) -> Result<Digest, crate::strict_json::StrictJsonError> {
+    crate::strict_json::canonical_digest(&N7RequestedWriteScope {
+        workspace_root: &request.workspace.root,
+        capabilities: &request.authority.capabilities,
+        allowed_roots: &request.authority.allowed_roots,
+        allowed_programs: &request.authority.allowed_programs,
+        network: &request.authority.network,
+        allowed_network_hosts: &request.authority.allowed_network_hosts,
+        external_effects: &request.authority.external_effects,
+    })
+}
+
+fn deserialize_git_commit<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(
+            "base_commit must be 40 lowercase hexadecimal characters",
+        ))
+    }
+}
+
+fn deserialize_zero_provider_calls<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("provider_calls must be zero"))
+    }
+}
+
+fn deserialize_unsafe_to_execute<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = bool::deserialize(deserializer)?;
+    if value {
+        Err(D::Error::custom("safe_to_execute must be false"))
+    } else {
+        Ok(value)
+    }
+}
+
+fn deserialize_one_provider_process<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 1 {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(
+            "provider_process_allowance must be exactly one",
+        ))
+    }
+}
+
+fn git_commit_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = String::json_schema(generator).into();
+    schema.string = Some(Box::new(StringValidation {
+        pattern: Some("^[0-9a-f]{40}$".into()),
+        ..StringValidation::default()
+    }));
+    schema.into()
+}
+
+fn zero_provider_calls_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = u32::json_schema(generator).into();
+    schema.const_value = Some(Value::from(0));
+    schema.into()
+}
+
+fn unsafe_to_execute_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = bool::json_schema(generator).into();
+    schema.const_value = Some(Value::from(false));
+    schema.into()
+}
+
+fn one_provider_process_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = u32::json_schema(generator).into();
+    schema.const_value = Some(Value::from(1));
+    schema.into()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntakeExpectation {
     pub run_id: String,
@@ -340,6 +521,10 @@ pub enum IntakeError {
     RequestSchemaMismatch,
     #[error("workspace root is not authority-bound")]
     WorkspaceRootNotAllowed,
+    #[error("N7 execution authority identity or scope mismatch")]
+    N7ExecutionAuthorityMismatch,
+    #[error("N7 execution authority is not current")]
+    N7ExecutionAuthorityNotCurrent,
 }
 
 /// Validates request freshness and exact run, source, workspace, and root bindings.
@@ -349,6 +534,20 @@ pub enum IntakeError {
 /// Returns [`IntakeError`] when a schema, identity, freshness, or authority-root
 /// binding differs from the operator-authored expectation.
 pub fn validate_intake(
+    request: &RunRequest,
+    expectation: &IntakeExpectation,
+) -> Result<(), IntakeError> {
+    validate_intake_identity(request, expectation)?;
+    validate_authority_current(&request.authority, expectation.now)
+}
+
+/// Validates exact request identity and authority shape without granting freshness.
+///
+/// # Errors
+///
+/// Returns [`IntakeError`] when a schema, identity, authority interval, or
+/// workspace-root binding differs from the operator-authored expectation.
+pub fn validate_intake_identity(
     request: &RunRequest,
     expectation: &IntakeExpectation,
 ) -> Result<(), IntakeError> {
@@ -367,10 +566,7 @@ pub fn validate_intake(
     if request.workspace != expectation.workspace {
         return Err(IntakeError::WorkspaceIdentityMismatch);
     }
-    if request.authority.issued_at > expectation.now
-        || request.authority.expires_at <= expectation.now
-        || request.authority.issued_at >= request.authority.expires_at
-    {
+    if request.authority.issued_at >= request.authority.expires_at {
         return Err(IntakeError::AuthorityNotCurrent);
     }
     if !request
@@ -379,6 +575,72 @@ pub fn validate_intake(
         .contains(&request.workspace.root)
     {
         return Err(IntakeError::WorkspaceRootNotAllowed);
+    }
+    Ok(())
+}
+
+/// Validates that an authority envelope is current at one exact instant.
+///
+/// # Errors
+///
+/// Returns [`IntakeError::AuthorityNotCurrent`] unless
+/// `issued_at <= now < expires_at`.
+pub fn validate_authority_current(
+    authority: &AuthorityEnvelope,
+    now: DateTime<Utc>,
+) -> Result<(), IntakeError> {
+    if authority.issued_at > now || authority.expires_at <= now {
+        return Err(IntakeError::AuthorityNotCurrent);
+    }
+    Ok(())
+}
+
+/// Validates a separately issued N7 authority against one exact prepared run.
+///
+/// # Errors
+///
+/// Returns [`IntakeError::N7ExecutionAuthorityMismatch`] for schema, identity,
+/// preparation, Git, workspace, requested-scope, interval, or process-allowance drift.
+pub fn validate_n7_execution_authority_identity(
+    authority: &N7ExecutionAuthority,
+    expectation: &N7ExecutionAuthorityExpectation,
+) -> Result<(), IntakeError> {
+    if crate::strict_json::canonical_digest(authority)
+        .map_err(|_| IntakeError::N7ExecutionAuthorityMismatch)?
+        != expectation.execution_authority_digest
+        || authority.schema_version != "ao.next.n7-execution-authority.v1"
+        || authority.authority_id.trim().is_empty()
+        || authority.issued_by.trim().is_empty()
+        || authority.prepared_run_digest != expectation.prepared_run_digest
+        || authority.preparation_input_digest != expectation.preparation_input_digest
+        || authority.preparation_request_digest != expectation.preparation_request_digest
+        || authority.base_commit != expectation.base_commit
+        || authority.workspace_identity_digest != expectation.workspace_identity_digest
+        || authority.workspace_digest != expectation.workspace_digest
+        || authority.workspace_root != expectation.workspace_root
+        || authority.requested_authority_digest != expectation.requested_authority_digest
+        || authority.write_scope_digest != expectation.write_scope_digest
+        || authority.issued_at <= expectation.prepared_at
+        || authority.issued_at >= authority.expires_at
+        || authority.provider_process_allowance != 1
+    {
+        return Err(IntakeError::N7ExecutionAuthorityMismatch);
+    }
+    Ok(())
+}
+
+/// Validates N7 execution-authority freshness at one exact admission instant.
+///
+/// # Errors
+///
+/// Returns [`IntakeError::N7ExecutionAuthorityNotCurrent`] unless
+/// `issued_at <= now < expires_at`.
+pub fn validate_n7_execution_authority_current(
+    authority: &N7ExecutionAuthority,
+    now: DateTime<Utc>,
+) -> Result<(), IntakeError> {
+    if authority.issued_at > now || authority.expires_at <= now {
+        return Err(IntakeError::N7ExecutionAuthorityNotCurrent);
     }
     Ok(())
 }
@@ -425,6 +687,14 @@ pub fn generated_contract_schemas() -> BTreeMap<&'static str, Value> {
         (
             "terminal-readback-v1.schema.json",
             serde_json::to_value(schema_for!(TerminalReadback)).expect("schema serialization"),
+        ),
+        (
+            "prepared-run-v1.schema.json",
+            serde_json::to_value(schema_for!(PreparedRunReceipt)).expect("schema serialization"),
+        ),
+        (
+            "n7-execution-authority-v1.schema.json",
+            serde_json::to_value(schema_for!(N7ExecutionAuthority)).expect("schema serialization"),
         ),
     ])
 }

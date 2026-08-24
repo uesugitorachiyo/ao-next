@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use ao_next_core::adapter::AdapterIdentity;
 use ao_next_core::contracts::{
-    AuthorityEnvelope, Capability, Digest, ExternalEffectPolicy, ModelProfile, NetworkPolicy,
-    RunLimits, RunRequest, SourceIdentity, StructuredCommand, VerifierProfile, WorkspaceIdentity,
+    AuthorityEnvelope, Capability, Digest, EffectKind, EffectRequest, ExternalEffectPolicy,
+    ModelProfile, NetworkPolicy, RunLimits, RunRequest, SourceIdentity, StructuredCommand,
+    VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::evidence::{
     ArtifactSpec, ArtifactStore, EvidenceError, StoreLimits, digest_bytes, seal_verified_run,
@@ -14,7 +15,7 @@ use ao_next_core::recovery::{
     Checkpoint, CheckpointIdentity, CheckpointJournal, JournalEvent, JournalEventKind,
     RecoveryError, write_durable_event_log,
 };
-use ao_next_core::strict_json::{canonical_digest, decode_strict_json};
+use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{
     LocalProductVerifier, ProductVerifier, VerificationPlan, VerifiedWorkspace, VerifierRegistry,
 };
@@ -102,6 +103,38 @@ fn request(root: &Path) -> RunRequest {
             max_output_bytes: 4_096,
             max_tokens: 1_000,
         },
+    }
+}
+
+struct Fixture {
+    recovery: TempDir,
+    request: RunRequest,
+    journal: CheckpointJournal,
+}
+
+fn fixture() -> Fixture {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("execution journal");
+    Fixture {
+        recovery,
+        request,
+        journal,
+    }
+}
+
+fn effect(request: &RunRequest) -> EffectRequest {
+    EffectRequest {
+        effect_id: "effect-01".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
     }
 }
 
@@ -455,11 +488,78 @@ fn recovery_events() -> Vec<JournalEvent> {
         JournalEvent {
             schema_version: "ao.next.journal-event.v1".into(),
             sequence: 1,
+            kind: JournalEventKind::VerificationStarted { attempt: 0 },
+        },
+        JournalEvent {
+            schema_version: "ao.next.journal-event.v1".into(),
+            sequence: 2,
             kind: JournalEventKind::VerifierRecorded {
                 report_digest: digest(ONE_DIGEST),
             },
         },
     ]
+}
+
+fn journal_event(sequence: u64, kind: JournalEventKind) -> JournalEvent {
+    JournalEvent {
+        schema_version: "ao.next.journal-event.v1".into(),
+        sequence,
+        kind,
+    }
+}
+
+fn provider_lifecycle_events() -> Vec<JournalEvent> {
+    vec![
+        journal_event(
+            0,
+            JournalEventKind::ProviderRequestIntent {
+                prepared_run_digest: digest_bytes(b"prepared"),
+                execution_authority_digest: digest_bytes(b"authority"),
+            },
+        ),
+        journal_event(
+            1,
+            JournalEventKind::ProviderProcessStarted {
+                invocation_digest: digest_bytes(b"invocation"),
+            },
+        ),
+        journal_event(
+            2,
+            JournalEventKind::ProviderOutputRetained {
+                raw_capture_digest: digest_bytes(b"raw-capture"),
+            },
+        ),
+        journal_event(
+            3,
+            JournalEventKind::ProviderCaptureIndexPublished {
+                index_digest: digest_bytes(b"capture-index"),
+            },
+        ),
+        journal_event(
+            4,
+            JournalEventKind::ProviderCaptureVerified {
+                index_digest: digest_bytes(b"capture-index"),
+            },
+        ),
+        journal_event(
+            5,
+            JournalEventKind::AdapterTurnNormalized {
+                turn_digest: digest_bytes(b"adapter-turn"),
+            },
+        ),
+    ]
+}
+
+fn checkpoint_for_events(request: &RunRequest, sequence: u64, events_digest: Digest) -> Checkpoint {
+    Checkpoint {
+        schema_version: "ao.next.checkpoint.v1".into(),
+        run_id: request.run_id.clone(),
+        sequence,
+        identity: CheckpointIdentity::from_request(request).expect("checkpoint identity"),
+        committed_effects: BTreeSet::new(),
+        events_digest,
+        recorded_at: timestamp("2026-08-05T12:00:02Z"),
+    }
 }
 
 #[test]
@@ -478,7 +578,7 @@ fn interrupted_n7_resume_skips_committed_effect_and_requires_durable_verifier_ev
     let checkpoint = Checkpoint {
         schema_version: "ao.next.checkpoint.v1".into(),
         run_id: request.run_id.clone(),
-        sequence: 2,
+        sequence: 3,
         identity: identity.clone(),
         committed_effects: BTreeSet::from(["effect-01".into()]),
         events_digest,
@@ -520,7 +620,7 @@ fn recovery_rejects_every_changed_identity_and_checkpoint_digest() {
     let checkpoint = Checkpoint {
         schema_version: "ao.next.checkpoint.v1".into(),
         run_id: request.run_id.clone(),
-        sequence: 2,
+        sequence: 3,
         identity: identity.clone(),
         committed_effects: BTreeSet::from(["effect-01".into()]),
         events_digest,
@@ -568,6 +668,740 @@ fn recovery_rejects_every_changed_identity_and_checkpoint_digest() {
         journal.resume(&identity, &["effect-01".into()]),
         Err(RecoveryError::CheckpointDigestMismatch { .. })
     ));
+}
+
+#[test]
+fn provider_capture_events_are_ordered_before_effect_intent() {
+    let fixture = fixture();
+    let prepared = digest_bytes(b"prepared");
+    let invocation = digest_bytes(b"invocation");
+    let raw = digest_bytes(b"raw-capture");
+    let index = digest_bytes(b"capture-index");
+    let turn = digest_bytes(b"adapter-turn");
+
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &prepared, &digest_bytes(b"authority"))
+        .expect("intent");
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &invocation)
+        .expect("started");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &raw)
+        .expect("retained");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &index)
+        .expect("published");
+    fixture
+        .journal
+        .record_provider_capture_verified(&fixture.request, &index)
+        .expect("verified");
+    fixture
+        .journal
+        .record_adapter_turn_normalized(&fixture.request, &turn)
+        .expect("normalized");
+
+    let state = fixture
+        .journal
+        .provider_state(&fixture.request)
+        .expect("state");
+    assert_eq!(state.prepared_run_digest, Some(prepared));
+    assert_eq!(state.invocation_digest, Some(invocation));
+    assert_eq!(state.capture_index_digest, Some(index));
+    assert_eq!(state.adapter_turn_digest, Some(turn));
+    assert!(state.provider_process_started);
+}
+
+#[test]
+fn provider_intent_binds_execution_authority() {
+    let fixture = fixture();
+    let prepared_digest = digest_bytes(b"prepared");
+    let authority = serde_json::json!({"authority_id": "n7-authority-01"});
+    let authority_digest = canonical_digest(&authority).expect("authority digest");
+
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &prepared_digest, &authority_digest)
+        .expect("provider intent");
+
+    assert_eq!(
+        fixture
+            .journal
+            .provider_state(&fixture.request)
+            .expect("provider state")
+            .execution_authority_digest,
+        Some(authority_digest),
+    );
+}
+
+#[test]
+fn provider_intent_execution_authority_digest_mutation_fails_closed() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+    let event_path = std::fs::read_dir(fixture.recovery.path().join("journal/execution-events"))
+        .expect("execution events")
+        .next()
+        .expect("provider event")
+        .expect("event entry")
+        .path();
+    let mut event: serde_json::Value = decode_strict_json(
+        &std::fs::read(&event_path).expect("provider event bytes"),
+        4_096,
+    )
+    .expect("provider event JSON");
+    event["kind"]["execution_authority_digest"] =
+        serde_json::json!(digest_bytes(b"substituted-authority"));
+    std::fs::write(
+        &event_path,
+        canonical_json_bytes(&event).expect("mutated provider event"),
+    )
+    .expect("mutated provider event write");
+
+    assert!(matches!(
+        fixture.journal.provider_state(&fixture.request),
+        Err(RecoveryError::EventDigestMismatch)
+    ));
+}
+
+#[test]
+fn read_only_provider_state_rejects_missing_journal_without_creation() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal_root = recovery.path().join("missing-journal");
+
+    assert!(
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &request).is_err(),
+        "missing journal opened as request-bound"
+    );
+    assert!(
+        !journal_root.exists(),
+        "read-only open created journal root"
+    );
+}
+
+#[test]
+fn read_only_provider_state_rejects_missing_events_without_creation() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let journal_root = recovery.path().join("journal");
+    let journal = CheckpointJournal::new(&journal_root, 16 * 1024).expect("journal");
+    journal.bind_request(&request).expect("request binding");
+    assert!(CheckpointJournal::open_bound(&journal_root, 16 * 1024, &request).is_err());
+    assert!(
+        !journal_root.join("execution-events").exists(),
+        "read-only provider state created event directory"
+    );
+}
+
+#[test]
+fn read_only_provider_state_rejects_tampered_identity_without_rewrite() {
+    let fixture = fixture();
+    let identity_path = fixture
+        .recovery
+        .path()
+        .join("journal/execution-identity.json");
+    std::fs::write(&identity_path, b"{}").expect("tampered identity");
+
+    assert!(
+        CheckpointJournal::open_bound(
+            fixture.recovery.path().join("journal"),
+            16 * 1024,
+            &fixture.request,
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(identity_path).expect("identity bytes"), b"{}");
+}
+
+fn record_complete_provider_lifecycle(fixture: &Fixture) {
+    let index = digest_bytes(b"capture-index");
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &digest_bytes(b"invocation"))
+        .expect("provider start");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+        .expect("provider output");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &index)
+        .expect("capture published");
+    fixture
+        .journal
+        .record_provider_capture_verified(&fixture.request, &index)
+        .expect("capture verified");
+    fixture
+        .journal
+        .record_adapter_turn_normalized(&fixture.request, &digest_bytes(b"turn"))
+        .expect("turn normalized");
+}
+
+#[cfg(windows)]
+fn mutation_completed(result: std::io::Result<()>, action: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || matches!(error.raw_os_error(), Some(5 | 32)) =>
+        {
+            false
+        }
+        Err(error) => panic!("{action}: {error}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn mutation_completed(result: std::io::Result<()>, action: &str) -> bool {
+    result.unwrap_or_else(|error| panic!("{action}: {error}"));
+    true
+}
+
+#[test]
+fn existing_only_journal_rejects_same_byte_identity_swap_before_terminal_append() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    journal
+        .begin_verification(&fixture.request)
+        .expect("verification start");
+    journal
+        .record_verifier(&fixture.request, &digest_bytes(b"report"))
+        .expect("verifier record");
+    let identity_path = journal_root.join("execution-identity.json");
+    let identity_bytes = std::fs::read(&identity_path).expect("identity bytes");
+    if !mutation_completed(std::fs::remove_file(&identity_path), "remove identity") {
+        return;
+    }
+    std::fs::write(&identity_path, identity_bytes).expect("replacement identity");
+    let events_before = std::fs::read_dir(journal_root.join("execution-events"))
+        .expect("execution events")
+        .count();
+
+    assert!(
+        journal
+            .publish_terminal_record(&fixture.request, br#"{"terminal":"passed"}"#)
+            .is_err(),
+        "replacement identity authorized terminal publication"
+    );
+    assert_eq!(
+        std::fs::read_dir(journal_root.join("execution-events"))
+            .expect("execution events")
+            .count(),
+        events_before
+    );
+    assert!(
+        std::fs::read_dir(&journal_root)
+            .expect("journal root")
+            .all(|entry| !entry
+                .expect("journal entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with("terminal-"))
+    );
+}
+
+#[test]
+fn existing_only_journal_does_not_recreate_deleted_event_directory() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    let events = journal_root.join("execution-events");
+    if !mutation_completed(std::fs::remove_dir_all(&events), "remove execution events") {
+        return;
+    }
+
+    assert!(journal.begin_verification(&fixture.request).is_err());
+    assert!(!events.exists(), "existing-only journal recreated events");
+}
+
+#[test]
+fn existing_only_journal_rejects_same_byte_event_directory_swap() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    let events = journal_root.join("execution-events");
+    let replacement = journal_root.join("replacement-events");
+    std::fs::create_dir(&replacement).expect("replacement directory");
+    for entry in std::fs::read_dir(&events).expect("execution events") {
+        let entry = entry.expect("event entry");
+        std::fs::copy(entry.path(), replacement.join(entry.file_name())).expect("copy event");
+    }
+    let original = journal_root.join("original-events");
+    if !mutation_completed(std::fs::rename(&events, &original), "move original events") {
+        return;
+    }
+    std::fs::rename(&replacement, &events).expect("install replacement events");
+
+    assert!(
+        journal.provider_state_read_only(&fixture.request).is_err(),
+        "replacement event directory retained journal authority"
+    );
+}
+
+#[test]
+fn existing_only_journal_rejects_deleted_bound_event_file() {
+    let fixture = fixture();
+    record_complete_provider_lifecycle(&fixture);
+    let journal_root = fixture.recovery.path().join("journal");
+    let journal =
+        CheckpointJournal::open_bound(&journal_root, 16 * 1024, &fixture.request).expect("journal");
+    let event = std::fs::read_dir(journal_root.join("execution-events"))
+        .expect("execution events")
+        .map(|entry| entry.expect("event entry").path())
+        .max()
+        .expect("last event");
+    if !mutation_completed(std::fs::remove_file(&event), "remove event") {
+        return;
+    }
+
+    assert!(
+        journal.provider_state_read_only(&fixture.request).is_err(),
+        "shorter event prefix retained journal authority"
+    );
+    assert!(!event.exists(), "existing-only journal recreated event");
+}
+
+#[cfg(windows)]
+#[test]
+fn open_bound_rejects_windows_reparse_journal_paths() {
+    let root_fixture = fixture();
+    record_complete_provider_lifecycle(&root_fixture);
+    let link = root_fixture.recovery.path().join("journal-link");
+    match std::os::windows::fs::symlink_dir(root_fixture.recovery.path().join("journal"), &link) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314) =>
+        {
+            return;
+        }
+        Err(error) => panic!("journal reparse root: {error}"),
+    }
+
+    assert!(CheckpointJournal::open_bound(&link, 16 * 1024, &root_fixture.request).is_err());
+
+    let identity = fixture();
+    record_complete_provider_lifecycle(&identity);
+    let identity_path = identity
+        .recovery
+        .path()
+        .join("journal/execution-identity.json");
+    let identity_target = identity.recovery.path().join("identity-target.json");
+    std::fs::copy(&identity_path, &identity_target).expect("identity target");
+    std::fs::remove_file(&identity_path).expect("remove identity");
+    std::os::windows::fs::symlink_file(&identity_target, &identity_path).expect("identity reparse");
+    assert!(
+        CheckpointJournal::open_bound(
+            identity.recovery.path().join("journal"),
+            16 * 1024,
+            &identity.request,
+        )
+        .is_err()
+    );
+
+    let directory = fixture();
+    record_complete_provider_lifecycle(&directory);
+    let event_directory = directory.recovery.path().join("journal/execution-events");
+    let event_target = directory.recovery.path().join("event-target");
+    std::fs::rename(&event_directory, &event_target).expect("move event directory");
+    std::os::windows::fs::symlink_dir(&event_target, &event_directory)
+        .expect("event directory reparse");
+    assert!(
+        CheckpointJournal::open_bound(
+            directory.recovery.path().join("journal"),
+            16 * 1024,
+            &directory.request,
+        )
+        .is_err()
+    );
+
+    let event = fixture();
+    record_complete_provider_lifecycle(&event);
+    let event_directory = event.recovery.path().join("journal/execution-events");
+    let event_path = std::fs::read_dir(&event_directory)
+        .expect("execution events")
+        .next()
+        .expect("event")
+        .expect("event entry")
+        .path();
+    let event_target = event.recovery.path().join("event-target.json");
+    std::fs::copy(&event_path, &event_target).expect("event target");
+    std::fs::remove_file(&event_path).expect("remove event");
+    std::os::windows::fs::symlink_file(&event_target, &event_path).expect("event reparse");
+    assert!(
+        CheckpointJournal::open_bound(
+            event.recovery.path().join("journal"),
+            16 * 1024,
+            &event.request,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn provider_intent_without_capture_is_unknown_and_cannot_restart() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("intent");
+    let state = fixture
+        .journal
+        .provider_state(&fixture.request)
+        .expect("state");
+    assert!(state.outcome_unknown());
+    assert!(
+        fixture
+            .journal
+            .provider_may_start(&fixture.request)
+            .is_err()
+    );
+}
+
+#[test]
+fn pristine_request_binding_rejects_any_existing_event() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+
+    assert!(matches!(
+        fixture.journal.bind_pristine_request(&fixture.request),
+        Err(RecoveryError::EventSequenceInvalid)
+    ));
+}
+
+#[test]
+fn effect_intent_requires_normalized_adapter_turn() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+
+    assert!(
+        fixture
+            .journal
+            .record_effect_intent(&fixture.request, &effect(&fixture.request))
+            .is_err()
+    );
+}
+
+#[test]
+fn exact_effect_set_rejects_journal_only_intent() {
+    let fixture = fixture();
+    let index = digest_bytes(b"capture-index");
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &digest_bytes(b"invocation"))
+        .expect("provider start");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+        .expect("provider output");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &index)
+        .expect("capture published");
+    fixture
+        .journal
+        .record_provider_capture_verified(&fixture.request, &index)
+        .expect("capture verified");
+    fixture
+        .journal
+        .record_adapter_turn_normalized(&fixture.request, &digest_bytes(b"turn"))
+        .expect("turn normalized");
+    let expected = effect(&fixture.request);
+    let mut extra = expected.clone();
+    extra.effect_id = "journal-only-effect".into();
+    extra.paths = vec!["journal-only.txt".into()];
+    fixture
+        .journal
+        .record_effect_intent(&fixture.request, &extra)
+        .expect("journal-only intent");
+
+    assert!(matches!(
+        fixture.journal.effect_states(&fixture.request, &[expected]),
+        Err(RecoveryError::EffectIdentityMismatch)
+    ));
+}
+
+#[test]
+fn provider_event_reordering_digest_drift_and_duplicates_fail_closed() {
+    let fixture = fixture();
+    assert!(
+        fixture
+            .journal
+            .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+            .is_err()
+    );
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("intent");
+    assert!(
+        fixture
+            .journal
+            .record_provider_request_intent(
+                &fixture.request,
+                &digest_bytes(b"other"),
+                &digest_bytes(b"other-authority"),
+            )
+            .is_err()
+    );
+    fixture
+        .journal
+        .record_provider_process_started(&fixture.request, &digest_bytes(b"invocation"))
+        .expect("started");
+    fixture
+        .journal
+        .record_provider_output_retained(&fixture.request, &digest_bytes(b"raw"))
+        .expect("retained");
+    fixture
+        .journal
+        .record_provider_capture_published(&fixture.request, &digest_bytes(b"index"))
+        .expect("published");
+    assert!(
+        fixture
+            .journal
+            .record_provider_capture_verified(&fixture.request, &digest_bytes(b"other-index"))
+            .is_err()
+    );
+}
+
+#[test]
+fn provider_intent_blocks_verification_start() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("intent");
+
+    assert!(
+        fixture
+            .journal
+            .begin_verification(&fixture.request)
+            .is_err()
+    );
+}
+
+#[test]
+fn verification_rejects_unknown_effects_and_later_effect_intents() {
+    let unknown = fixture();
+    let pending = effect(&unknown.request);
+    unknown
+        .journal
+        .record_effect_intent(&unknown.request, &pending)
+        .expect("effect intent");
+    assert!(
+        unknown
+            .journal
+            .begin_verification(&unknown.request)
+            .is_err(),
+        "verification started with an unknown effect"
+    );
+
+    let verified = fixture();
+    verified
+        .journal
+        .begin_verification(&verified.request)
+        .expect("verification start");
+    assert!(
+        verified
+            .journal
+            .effect_state(&verified.request, &effect(&verified.request))
+            .is_err(),
+        "fresh effect remained eligible after verification"
+    );
+    assert!(
+        verified
+            .journal
+            .record_effect_intent(&verified.request, &effect(&verified.request))
+            .is_err(),
+        "effect intent followed verification"
+    );
+}
+
+#[test]
+fn checkpoint_rejects_wrong_attempt_and_non_terminal_last_sequences() {
+    for (name, events) in [
+        (
+            "wrong-attempt",
+            vec![
+                journal_event(0, JournalEventKind::VerificationStarted { attempt: 7 }),
+                journal_event(
+                    1,
+                    JournalEventKind::VerifierRecorded {
+                        report_digest: digest_bytes(b"report"),
+                    },
+                ),
+            ],
+        ),
+        (
+            "event-after-terminal",
+            vec![
+                journal_event(0, JournalEventKind::VerificationStarted { attempt: 0 }),
+                journal_event(
+                    1,
+                    JournalEventKind::VerifierRecorded {
+                        report_digest: digest_bytes(b"report"),
+                    },
+                ),
+                journal_event(
+                    2,
+                    JournalEventKind::TerminalPublished {
+                        record_digest: digest_bytes(b"terminal"),
+                    },
+                ),
+                journal_event(3, JournalEventKind::VerificationStarted { attempt: 1 }),
+                journal_event(
+                    4,
+                    JournalEventKind::VerifierRecorded {
+                        report_digest: digest_bytes(b"later-report"),
+                    },
+                ),
+            ],
+        ),
+    ] {
+        let recovery = TempDir::new().expect("recovery");
+        let request = request(recovery.path());
+        let event_path = recovery.path().join(format!("{name}.jsonl"));
+        let events_digest =
+            write_durable_event_log(&event_path, &events, 16 * 1024).expect("event log");
+        let checkpoint = checkpoint_for_events(&request, events.len() as u64, events_digest);
+        let journal =
+            CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024).expect("journal");
+
+        assert!(
+            journal.commit(&checkpoint, &event_path).is_err(),
+            "accepted {name} lifecycle"
+        );
+    }
+}
+
+#[test]
+fn provider_checkpoint_rejects_incomplete_lifecycle_with_terminal() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let events = vec![
+        journal_event(
+            0,
+            JournalEventKind::ProviderRequestIntent {
+                prepared_run_digest: digest_bytes(b"prepared"),
+                execution_authority_digest: digest_bytes(b"authority"),
+            },
+        ),
+        journal_event(1, JournalEventKind::VerificationStarted { attempt: 0 }),
+        journal_event(
+            2,
+            JournalEventKind::VerifierRecorded {
+                report_digest: digest_bytes(b"report"),
+            },
+        ),
+        journal_event(
+            3,
+            JournalEventKind::TerminalPublished {
+                record_digest: digest_bytes(b"terminal"),
+            },
+        ),
+    ];
+    let events_path = recovery.path().join("events.jsonl");
+    let events_digest =
+        write_durable_event_log(&events_path, &events, 16 * 1024).expect("event log");
+    let checkpoint = checkpoint_for_events(&request, events.len() as u64, events_digest);
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("checkpoint journal");
+
+    assert!(journal.commit(&checkpoint, &events_path).is_err());
+}
+
+#[test]
+fn provider_checkpoint_rejects_unknown_event_fields() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let mut events = provider_lifecycle_events();
+    events.push(journal_event(
+        6,
+        JournalEventKind::VerificationStarted { attempt: 0 },
+    ));
+    events.push(journal_event(
+        7,
+        JournalEventKind::VerifierRecorded {
+            report_digest: digest_bytes(b"report"),
+        },
+    ));
+    let mut bytes = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        if index == 0 {
+            let mut value = serde_json::to_value(event).expect("event value");
+            value["kind"]["unexpected"] = serde_json::json!(true);
+            bytes.extend_from_slice(&canonical_json_bytes(&value).expect("extended event"));
+        } else {
+            bytes.extend_from_slice(&canonical_json_bytes(event).expect("event"));
+        }
+        bytes.push(b'\n');
+    }
+    let events_path = recovery.path().join("events.jsonl");
+    std::fs::write(&events_path, &bytes).expect("event log");
+    let checkpoint = checkpoint_for_events(&request, events.len() as u64, digest_bytes(&bytes));
+    let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
+        .expect("checkpoint journal");
+
+    assert!(journal.commit(&checkpoint, &events_path).is_err());
 }
 
 #[test]
@@ -696,6 +1530,47 @@ fn verification_resume_and_terminal_publication_are_identity_bound_and_idempoten
         journal.publish_terminal_record(&request, b"{}"),
         Err(RecoveryError::EventDigestMismatch)
     ));
+}
+
+#[test]
+fn terminal_file_without_event_is_reused_and_event_is_appended_once() {
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(recovery.path());
+    let root = recovery.path().join("journal");
+    let journal = CheckpointJournal::new(&root, 16 * 1024).expect("execution journal");
+    journal
+        .begin_verification(&request)
+        .expect("verification start");
+    journal
+        .record_verifier(&request, &digest(ONE_DIGEST))
+        .expect("verifier record");
+    let terminal = br#"{"schema_version":"ao.next.test-terminal.v1","wall_clock_ms":41}"#;
+    let digest = digest_bytes(terminal);
+    let digest_hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("digest prefix");
+    let terminal_path = root.join(format!("terminal-{digest_hex}.json"));
+    std::fs::write(&terminal_path, terminal).expect("orphan terminal bytes");
+
+    assert_eq!(
+        journal
+            .recover_terminal_record(&request)
+            .expect("recover terminal")
+            .expect("terminal bytes"),
+        terminal
+    );
+    assert_eq!(
+        journal
+            .recover_terminal_record(&request)
+            .expect("idempotent recovery")
+            .expect("terminal bytes"),
+        terminal
+    );
+    assert_eq!(
+        std::fs::read(terminal_path).expect("terminal file"),
+        terminal
+    );
 }
 
 #[test]

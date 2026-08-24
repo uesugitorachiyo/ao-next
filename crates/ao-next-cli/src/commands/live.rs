@@ -7,6 +7,8 @@ use std::os::fd::AsRawFd as _;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt as _;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,24 +19,28 @@ use ao_next_core::adapter::process::{
     ProviderVisibility, RuntimeCapture, RuntimeEnvelopeCapture, capture_runtime_output,
 };
 use ao_next_core::adapter::{
-    CancellationToken, InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation,
-    TokenUsage,
+    AdapterError, AdapterIdentity, AdapterTurn, CancellationToken, EffectObservation,
+    InvocationError, InvocationLimits, InvocationOutput, PreparedInvocation, RuntimeAdapter,
+    TokenUsage, TurnContext, claude, codex,
 };
-use ao_next_core::adapter::{EffectObservation, codex};
+use ao_next_core::capture::{CaptureIndexStore, CapturePublication};
 use ao_next_core::contracts::{
-    Capability, Digest, ExternalEffectPolicy, NetworkPolicy, RunRequest, RunState,
+    Capability, Digest, ExternalEffectPolicy, N7ExecutionAuthority,
+    N7ExecutionAuthorityExpectation, NetworkPolicy, PreparedRunReceipt, RunRequest, RunState,
+    n7_requested_write_scope_digest, validate_n7_execution_authority_current,
+    validate_n7_execution_authority_identity,
 };
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOutcome};
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::recovery::CheckpointJournal;
+use ao_next_core::recovery::{CheckpointIdentity, CheckpointJournal, ProviderJournalState};
 use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{CommandEngineVerifier, CommandVerifierProfile};
 use ao_next_eval::corpus::{
     CorpusManifest, EvaluationTask, FUNCTIONAL_SENTINEL_TASK_ID, VariantProfile,
 };
 use ao_next_eval::metrics::{ExecutionVariant, MeasurementOrigin, RunMeasurement, TokenRow};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -54,13 +60,76 @@ const GIT_TIMEOUT_MS: u64 = 10_000;
 const LIVE_TOKEN_ENVELOPE: u64 = 564_288;
 const ADAPTER_TURN_SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../../docs/contracts/adapter-turn-v1.schema.json");
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+#[cfg(any(test, windows))]
+const fn windows_reparse_point(attributes: u32) -> bool {
+    attributes & 0x400 != 0
+}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+fn unsafe_link_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        windows_reparse_point(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_non_reparse(path: &Path, directory: bool) -> Result<std::fs::File, CommandFailure> {
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | if directory {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if unsafe_link_metadata(&metadata) || metadata.is_dir() != directory {
+        return Err(CommandFailure::invalid_input(
+            "Windows path is a reparse point or has the wrong file type",
+        ));
+    }
+    Ok(file)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum LiveVariant {
+pub(super) enum LiveVariant {
     N0,
     N4,
     N7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CaptureRootMode {
+    RequireEmpty,
+    RequireRetained,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestAuthorityMode {
+    Current,
+    RequestedScope,
 }
 
 impl LiveVariant {
@@ -75,7 +144,7 @@ impl LiveVariant {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct LiveRunInput {
+pub(super) struct LiveRunInput {
     schema_version: String,
     corpus: CorpusManifest,
     task_id: String,
@@ -88,11 +157,16 @@ struct LiveRunInput {
     visible_fixtures: PathBuf,
     hidden_tests: PathBuf,
     output_schema: PathBuf,
-    raw_capture_root: PathBuf,
-    request: RunRequest,
+    pub(super) raw_capture_root: PathBuf,
+    pub(super) request: RunRequest,
     command_verifier: CommandVerifierProfile,
     #[serde(default)]
     current_ao: Option<CurrentAoBinding>,
+}
+
+pub(super) struct TrustedLiveInput {
+    pub(super) input: LiveRunInput,
+    pub(super) bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -123,31 +197,74 @@ struct SourceSnapshot {
     files: Vec<SnapshotEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LiveRunRecord {
-    schema_version: &'static str,
+    schema_version: String,
     variant: LiveVariant,
     terminal_state: RunState,
     measurement: RunMeasurement,
     capture_digests: Vec<Digest>,
     raw_capture_index_digest: Digest,
     verifier_report_digest: Option<Digest>,
+    n7_execution_authority_digest: Option<Digest>,
     git_workspace: GitWorkspaceIdentity,
     ao2_control_diagnostics: Vec<serde_json::Value>,
     native_effect_observations: Vec<EffectObservation>,
     record_digest: Digest,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[allow(clippy::too_many_arguments)]
+fn live_record_digest(
+    variant: LiveVariant,
+    terminal_state: &RunState,
+    measurement: &RunMeasurement,
+    capture_digests: &[Digest],
+    raw_capture_index_digest: &Digest,
+    verifier_report_digest: Option<&Digest>,
+    n7_execution_authority_digest: Option<&Digest>,
+    git_workspace: &GitWorkspaceIdentity,
+    ao2_control_diagnostics: &[serde_json::Value],
+    native_effect_observations: &[EffectObservation],
+) -> Result<Digest, CommandFailure> {
+    let mut semantic_measurement = serde_json::to_value(measurement)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if variant == LiveVariant::N7 {
+        let semantic_measurement = semantic_measurement.as_object_mut().ok_or_else(|| {
+            CommandFailure::evidence("live measurement projection is not an object")
+        })?;
+        if semantic_measurement.remove("wall_clock_ms").is_none()
+            || semantic_measurement.remove("model_wait_ms").is_none()
+        {
+            return Err(CommandFailure::evidence(
+                "live measurement timing projection is incomplete",
+            ));
+        }
+    }
+    canonical_digest(&(
+        variant,
+        terminal_state,
+        &semantic_measurement,
+        capture_digests,
+        raw_capture_index_digest,
+        verifier_report_digest,
+        n7_execution_authority_digest,
+        git_workspace,
+        ao2_control_diagnostics,
+        native_effect_observations,
+    ))
+    .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct GitWorkspaceIdentity {
-    repository_root: PathBuf,
-    common_dir: PathBuf,
-    head_commit: String,
-    branch: &'static str,
-    control_digest: Digest,
-    index_digest: Digest,
+pub(super) struct GitWorkspaceIdentity {
+    pub(super) repository_root: PathBuf,
+    pub(super) common_dir: PathBuf,
+    pub(super) head_commit: String,
+    pub(super) branch: String,
+    pub(super) control_digest: Digest,
+    pub(super) index_digest: Digest,
 }
 
 struct ValidatedInput<'a> {
@@ -346,9 +463,7 @@ fn open_bound_fake_program(
     }
     let metadata = std::fs::symlink_metadata(program)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > 512 * 1024 * 1024
+    if unsafe_link_metadata(&metadata) || !metadata.is_file() || metadata.len() > 512 * 1024 * 1024
     {
         return Err(CommandFailure::invalid_input(
             "provider-free fake program is not a bounded regular non-symlink file",
@@ -446,7 +561,7 @@ pub(crate) fn provider_free_capture_root(input_path: &Path) -> Result<PathBuf, C
         .ok_or_else(|| CommandFailure::invalid_input("live input capture root is missing"))
 }
 
-pub(crate) fn verify_provider_free_capture(
+pub(super) fn verify_provider_free_capture(
     input_path: &Path,
     variant: LiveVariant,
     expected_index_digest: &Digest,
@@ -462,7 +577,7 @@ pub(crate) fn verify_provider_free_capture(
     )
 }
 
-pub(crate) fn preflight_provider_free_row(
+pub(super) fn preflight_provider_free_row(
     input_path: &Path,
     variant: LiveVariant,
     trusted_corpus_digest: &Digest,
@@ -555,7 +670,7 @@ pub(crate) fn preflight_provider_free_row(
     })
 }
 
-pub(crate) fn execute_provider_free_row(
+pub(super) fn execute_provider_free_row(
     input_path: &Path,
     variant: LiveVariant,
     trusted_corpus_digest: &Digest,
@@ -631,7 +746,7 @@ pub(crate) fn execute_provider_free_row(
     })
 }
 
-pub(crate) fn reject_provider_free_input(
+pub(super) fn reject_provider_free_input(
     input_path: &Path,
     variant: LiveVariant,
     trusted_corpus_digest: &Digest,
@@ -660,7 +775,7 @@ pub(crate) fn reject_provider_free_input(
     }
 }
 
-struct CaptureFirstRunner<R> {
+struct CaptureFirstRunner<'a, R> {
     runner: R,
     raw_capture_root: PathBuf,
     capture_context: CaptureContext,
@@ -668,9 +783,44 @@ struct CaptureFirstRunner<R> {
     retained_failure: Arc<Mutex<Option<CommandFailure>>>,
     runtime: String,
     max_tokens: u64,
+    journal: Option<&'a CheckpointJournal>,
+    request: &'a RunRequest,
+    prepared_run_digest: Digest,
+    execution_authority: Option<&'a N7ExecutionAuthority>,
+    execution_authority_digest: Option<&'a Digest>,
 }
 
-impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
+pub(super) struct PreparedN7Context {
+    pub(super) git_workspace: GitWorkspaceIdentity,
+    pub(super) prepared_run_digest: Digest,
+    pub(super) execution_authority: N7ExecutionAuthority,
+    pub(super) execution_authority_digest: Digest,
+    pub(super) journal: CheckpointJournal,
+}
+
+struct RetainedN7Execution {
+    turn: AdapterTurn,
+    capture: RuntimeCapture,
+    output: InvocationOutput,
+    index_digest: Digest,
+}
+
+struct RetainedN7Adapter {
+    identity: AdapterIdentity,
+    run_id: String,
+    source: ao_next_core::contracts::SourceIdentity,
+    workspace: ao_next_core::contracts::WorkspaceIdentity,
+    authority_digest: Digest,
+    policy_digest: Digest,
+    verifier_profile_digest: Digest,
+    turn: Option<AdapterTurn>,
+}
+
+impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "capture and journal durability ordering remains visible at the process boundary"
+    )]
     fn run(
         &mut self,
         invocation: &PreparedInvocation,
@@ -686,14 +836,65 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
                 "duplicate provider capture identity".into(),
             ));
         }
+        let provider_invocation_digest =
+            invocation_digest(invocation).map_err(|error| InvocationError::Io(error.message))?;
+        if self.execution_authority.is_some_and(|authority| {
+            validate_n7_execution_authority_current(authority, Utc::now()).is_err()
+        }) {
+            return Err(InvocationError::Io(
+                "N7 execution authority is not current before provider intent".into(),
+            ));
+        }
+        if let Some(journal) = self.journal {
+            let execution_authority_digest = self.execution_authority_digest.ok_or_else(|| {
+                InvocationError::Io("N7 execution authority digest is missing".into())
+            })?;
+            journal
+                .provider_may_start(self.request)
+                .and_then(|()| {
+                    journal.record_provider_request_intent(
+                        self.request,
+                        &self.prepared_run_digest,
+                        execution_authority_digest,
+                    )
+                })
+                .and_then(|()| {
+                    journal
+                        .record_provider_process_started(self.request, &provider_invocation_digest)
+                })
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
         let output = self.runner.run(invocation, cancellation)?;
-        let digest = persist_raw_captures(
+        let (index, index_digest) = retain_raw_capture_files(
             &self.raw_capture_root,
             &self.capture_context,
             &[],
             std::slice::from_ref(&output),
+            Some(&provider_invocation_digest),
         )
         .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        let staged_digest = stage_raw_capture_index(&self.raw_capture_root, &index)
+            .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        if staged_digest != index_digest {
+            return Err(InvocationError::Io(
+                "capture failure: staged index digest drifted".into(),
+            ));
+        }
+        let raw_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
+            .map_err(|error| InvocationError::Io(error.to_string()))?;
+        if let Some(journal) = self.journal {
+            journal
+                .record_provider_output_retained(self.request, &raw_digest)
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
+        let publication = publish_staged_raw_capture_index(&self.raw_capture_root, &staged_digest)
+            .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        let digest = publication.digest().clone();
+        if let Some(journal) = self.journal {
+            journal
+                .record_provider_capture_published(self.request, &digest)
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
         *self
             .retained_index
             .lock()
@@ -704,6 +905,18 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
             .map_err(|error| InvocationError::Io(error.to_string()))?
             .clone()
             .ok_or_else(|| InvocationError::Io("retained capture index is missing".into()))?;
+        verify_raw_capture_index(
+            &self.raw_capture_root,
+            &self.capture_context,
+            &expected_digest,
+            self.capture_context.maximum_output_bytes,
+        )
+        .map_err(|error| InvocationError::Io(error.message))?;
+        if let Some(journal) = self.journal {
+            journal
+                .record_provider_capture_verified(self.request, &expected_digest)
+                .map_err(|error| InvocationError::Io(error.to_string()))?;
+        }
         if let Err(error) = verify_and_gate_capture(
             &self.raw_capture_root,
             &self.capture_context,
@@ -722,6 +935,62 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<R> {
         }
         Ok(output)
     }
+}
+
+impl RuntimeAdapter for RetainedN7Adapter {
+    fn identity(&self) -> AdapterIdentity {
+        self.identity.clone()
+    }
+
+    fn execute_turn(&mut self, context: &TurnContext) -> Result<AdapterTurn, AdapterError> {
+        if context.run_id != self.run_id
+            || context.turn_index != 0
+            || context.repair_attempt != 0
+            || context.source != self.source
+            || context.workspace != self.workspace
+            || context.authority_digest != self.authority_digest
+            || context.policy_digest != self.policy_digest
+            || context.verifier_profile_digest != self.verifier_profile_digest
+            || !context.effect_observations.is_empty()
+        {
+            return Err(AdapterError::Runtime(
+                "retained adapter context drifted from immutable request bindings".into(),
+            ));
+        }
+        self.turn
+            .take()
+            .ok_or_else(|| AdapterError::Runtime("retained turn already consumed".into()))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderInvocationIdentity<'a> {
+    schema_version: &'static str,
+    program: &'a str,
+    args: &'a [String],
+    working_directory_digest: Digest,
+    stdin_digest: Digest,
+    environment_key_names: Vec<&'a str>,
+}
+
+fn invocation_digest(invocation: &PreparedInvocation) -> Result<Digest, CommandFailure> {
+    let working_directory_digest = canonical_digest(&invocation.cwd)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let environment_key_names = invocation
+        .environment
+        .as_ref()
+        .map(|environment| environment.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    canonical_digest(&ProviderInvocationIdentity {
+        schema_version: "ao.next.provider-invocation.v1",
+        program: &invocation.program,
+        args: &invocation.args,
+        working_directory_digest,
+        stdin_digest: digest_bytes(&invocation.stdin),
+        environment_key_names,
+    })
+    .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
 impl<R> SingleProviderProcess<R> {
@@ -749,25 +1018,237 @@ impl<R: ProcessRunner> ProcessRunner for SingleProviderProcess<R> {
     }
 }
 
-pub fn execute(args: &LiveRunArgs, variant: LiveVariant) -> Result<CommandOutput, CommandFailure> {
+pub(super) fn execute(
+    args: &LiveRunArgs,
+    variant: LiveVariant,
+) -> Result<CommandOutput, CommandFailure> {
     if std::env::var("AO_NEXT_LIVE_PROVIDER_CALLS").as_deref() != Ok("operator-authorized") {
         return Err(CommandFailure::authorization(
             "live provider calls require separate operator authorization",
         ));
     }
+    let prepared_run = match (variant, args.prepared_run.as_ref(), args.authority.as_ref()) {
+        (LiveVariant::N7, Some(receipt), Some(authority)) => Some((receipt, authority)),
+        (LiveVariant::N7, None, _) => {
+            return Err(CommandFailure::invalid_input(
+                "--prepared-run is required for N7 live execution",
+            ));
+        }
+        (LiveVariant::N7, Some(_), None) => {
+            return Err(CommandFailure::invalid_input(
+                "--authority is required for N7 live execution",
+            ));
+        }
+        (LiveVariant::N0 | LiveVariant::N4, Some(_), _)
+        | (LiveVariant::N0 | LiveVariant::N4, _, Some(_)) => {
+            return Err(CommandFailure::invalid_input(
+                "--prepared-run and --authority are forbidden for live baselines",
+            ));
+        }
+        (LiveVariant::N0 | LiveVariant::N4, None, None) => None,
+    };
     let trusted = trusted_bindings(
         args.trusted_corpus_digest.as_deref(),
         args.trusted_verifier_profile_digest.as_deref(),
     )?;
-    let input: LiveRunInput = decode_file(&args.input)?;
-    validate_trusted_bindings(&input, &trusted)?;
-    execute_with_runners(
-        &input,
-        variant,
-        MeasurementOrigin::LiveProvider,
-        BoundedProcessRunner,
-        BoundedProcessRunner,
+    if let Some((prepared_run, authority_path)) = prepared_run {
+        let input_bytes = read_bounded_regular(&args.input)?;
+        let input: LiveRunInput = decode_strict_json(&input_bytes, 1024 * 1024)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        validate_trusted_bindings(&input, &trusted)?;
+        let receipt: PreparedRunReceipt = decode_file(prepared_run)?;
+        let authority: N7ExecutionAuthority = decode_file(authority_path)?;
+        let prepared = validate_prepared_run(
+            &args.input,
+            &input_bytes,
+            &input,
+            &receipt,
+            authority,
+            Utc::now(),
+        )?;
+        execute_with_prepared_runners(
+            &input,
+            variant,
+            MeasurementOrigin::LiveProvider,
+            BoundedProcessRunner,
+            BoundedProcessRunner,
+            Some(prepared),
+        )
+    } else {
+        let input: LiveRunInput = decode_file(&args.input)?;
+        validate_trusted_bindings(&input, &trusted)?;
+        execute_with_runners(
+            &input,
+            variant,
+            MeasurementOrigin::LiveProvider,
+            BoundedProcessRunner,
+            BoundedProcessRunner,
+        )
+    }
+}
+
+fn validate_prepared_run(
+    input_path: &Path,
+    input_bytes: &[u8],
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    authority: N7ExecutionAuthority,
+    now: DateTime<Utc>,
+) -> Result<PreparedN7Context, CommandFailure> {
+    let (git_workspace, prepared_run_digest) =
+        validate_prepared_run_with_mode(input_path, input_bytes, input, receipt, now, true)?;
+    let execution_authority_digest = canonical_digest(&authority)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    validate_execution_authority(
+        input,
+        receipt,
+        &prepared_run_digest,
+        &authority,
+        &execution_authority_digest,
+        now,
+        true,
+    )?;
+    let journal = CheckpointJournal::new(
+        execution_journal_root(input),
+        execution_journal_maximum_bytes(&input.request),
     )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    Ok(PreparedN7Context {
+        git_workspace,
+        prepared_run_digest,
+        execution_authority: authority,
+        execution_authority_digest,
+        journal,
+    })
+}
+
+pub(super) fn validate_prepared_run_for_recovery(
+    input_path: &Path,
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    now: DateTime<Utc>,
+) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
+    let input_bytes = read_bounded_regular(input_path)?;
+    validate_prepared_run_with_mode(input_path, &input_bytes, input, receipt, now, false)
+}
+
+fn validate_prepared_run_with_mode(
+    input_path: &Path,
+    input_bytes: &[u8],
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    now: DateTime<Utc>,
+    require_current: bool,
+) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
+    let request_digest = canonical_digest(&input.request)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let journal_identity = CheckpointIdentity::from_request(&input.request)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let repository_root = std::fs::canonicalize(&input.request.workspace.root)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if receipt.schema_version != "ao.next.prepared-run.v1"
+        || receipt.run_id != input.request.run_id
+        || receipt.input_digest != digest_bytes(input_bytes)
+        || receipt.request_digest != request_digest
+        || receipt.repository_root != repository_root
+        || receipt.branch != GIT_BRANCH
+        || receipt.workspace_digest != input.request.workspace.seed_digest
+        || receipt.journal_identity_digest
+            != canonical_digest(&journal_identity)
+                .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+        || receipt.prepared_at >= receipt.expires_at
+        || (require_current && receipt.expires_at <= now)
+        || receipt.provider_calls != 0
+        || receipt.safe_to_execute
+    {
+        return Err(CommandFailure::invalid_input(
+            "prepared-run identity or expiry drifted",
+        ));
+    }
+    let git_workspace = GitWorkspaceIdentity {
+        repository_root: receipt.repository_root.clone(),
+        common_dir: receipt.common_directory.clone(),
+        head_commit: receipt.base_commit.clone(),
+        branch: GIT_BRANCH.into(),
+        control_digest: receipt.control_digest.clone(),
+        index_digest: receipt.index_digest.clone(),
+    };
+    verify_git_workspace(&git_workspace, require_current)
+        .map_err(|error| CommandFailure::invalid_input(error.message))?;
+    if require_current {
+        validate_prepared_input(input, LiveVariant::N7, now, &git_workspace)?;
+        revalidate_prepared_live_input(input, &git_workspace)?;
+    } else {
+        validate_input_with_capture_mode(
+            input,
+            LiveVariant::N7,
+            now,
+            Some(&git_workspace),
+            CaptureRootMode::RequireRetained,
+            RequestAuthorityMode::RequestedScope,
+        )?;
+    }
+    if require_current {
+        let journal = CheckpointJournal::new(
+            execution_journal_root(input),
+            execution_journal_maximum_bytes(&input.request),
+        )
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        journal
+            .bind_pristine_request(&input.request)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    }
+    if read_bounded_regular(input_path)? != input_bytes {
+        return Err(CommandFailure::invalid_input(
+            "live input drifted after prepared-run validation",
+        ));
+    }
+    let prepared_run_digest = canonical_digest(receipt)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    Ok((git_workspace, prepared_run_digest))
+}
+
+pub(super) fn validate_execution_authority(
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    prepared_run_digest: &Digest,
+    authority: &N7ExecutionAuthority,
+    execution_authority_digest: &Digest,
+    now: DateTime<Utc>,
+    require_current: bool,
+) -> Result<(), CommandFailure> {
+    let expectation = N7ExecutionAuthorityExpectation {
+        execution_authority_digest: execution_authority_digest.clone(),
+        prepared_run_digest: prepared_run_digest.clone(),
+        preparation_input_digest: receipt.input_digest.clone(),
+        preparation_request_digest: receipt.request_digest.clone(),
+        base_commit: receipt.base_commit.clone(),
+        workspace_identity_digest: canonical_digest(&input.request.workspace)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        workspace_digest: receipt.workspace_digest.clone(),
+        workspace_root: receipt.repository_root.clone(),
+        requested_authority_digest: canonical_digest(&input.request.authority)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        write_scope_digest: n7_requested_write_scope_digest(&input.request)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        prepared_at: receipt.prepared_at,
+    };
+    validate_n7_execution_authority_identity(authority, &expectation)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if require_current {
+        validate_n7_execution_authority_current(authority, now)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    }
+    Ok(())
+}
+
+pub(super) fn revalidate_recovery_before_mutation(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+) -> Result<(), CommandFailure> {
+    verify_git_workspace(git_workspace, true)
+        .map_err(|error| CommandFailure::invalid_input(error.message))?;
+    revalidate_prepared_live_input(input, git_workspace)
 }
 
 pub fn preflight(args: &PreflightLiveInputArgs) -> Result<CommandOutput, CommandFailure> {
@@ -847,6 +1328,58 @@ fn validate_trusted_bindings(
         ));
     }
     Ok(())
+}
+
+pub(super) fn load_trusted_live_input(
+    path: &Path,
+    variant: LiveVariant,
+    trusted_corpus_digest: &str,
+    trusted_verifier_profile_digest: &str,
+    now: DateTime<Utc>,
+) -> Result<TrustedLiveInput, CommandFailure> {
+    let bytes = read_bounded_regular(path)?;
+    let input: LiveRunInput = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let trusted = trusted_bindings(
+        Some(trusted_corpus_digest),
+        Some(trusted_verifier_profile_digest),
+    )?;
+    validate_trusted_bindings(&input, &trusted)?;
+    validate_input_with_capture_mode(
+        &input,
+        variant,
+        now,
+        None,
+        CaptureRootMode::RequireEmpty,
+        RequestAuthorityMode::RequestedScope,
+    )?;
+    Ok(TrustedLiveInput { input, bytes })
+}
+
+pub(super) fn load_trusted_live_input_for_recovery(
+    path: &Path,
+    variant: LiveVariant,
+    trusted_corpus_digest: &str,
+    trusted_verifier_profile_digest: &str,
+    now: DateTime<Utc>,
+) -> Result<LiveRunInput, CommandFailure> {
+    let bytes = read_bounded_regular(path)?;
+    let input: LiveRunInput = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let trusted = trusted_bindings(
+        Some(trusted_corpus_digest),
+        Some(trusted_verifier_profile_digest),
+    )?;
+    validate_trusted_bindings(&input, &trusted)?;
+    validate_input_with_capture_mode(
+        &input,
+        variant,
+        now,
+        None,
+        CaptureRootMode::RequireRetained,
+        RequestAuthorityMode::RequestedScope,
+    )?;
+    Ok(input)
 }
 
 fn required_live_token_envelope(
@@ -1024,28 +1557,202 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     provider_runner: P,
     verifier_runner: V,
 ) -> Result<CommandOutput, CommandFailure> {
+    execute_with_prepared_runners(
+        input,
+        variant,
+        measurement_origin,
+        provider_runner,
+        verifier_runner,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the run record is assembled once so every measured field remains visibly source-bound"
+)]
+fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
+    input: &LiveRunInput,
+    variant: LiveVariant,
+    measurement_origin: MeasurementOrigin,
+    provider_runner: P,
+    verifier_runner: V,
+    prepared: Option<PreparedN7Context>,
+) -> Result<CommandOutput, CommandFailure> {
+    execute_with_prepared_runner_mode(
+        input,
+        variant,
+        measurement_origin,
+        provider_runner,
+        verifier_runner,
+        prepared,
+        None,
+    )
+}
+
+pub(super) fn execute_recovered_live(
+    input: &LiveRunInput,
+    turn: AdapterTurn,
+    capture: RuntimeCapture,
+    output: InvocationOutput,
+    prepared: PreparedN7Context,
+    retained_index: &Digest,
+) -> Result<CommandOutput, CommandFailure> {
+    execute_with_prepared_runner_mode(
+        input,
+        LiveVariant::N7,
+        MeasurementOrigin::LiveProvider,
+        BoundedProcessRunner,
+        BoundedProcessRunner,
+        Some(prepared),
+        Some(RetainedN7Execution {
+            turn,
+            capture,
+            output,
+            index_digest: retained_index.clone(),
+        }),
+    )
+}
+
+pub(super) fn recovered_terminal_output(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+    index_digest: &Digest,
+    capture: &RuntimeCapture,
+    execution_authority_digest: &Digest,
+    bytes: &[u8],
+) -> Result<CommandOutput, CommandFailure> {
+    let record: LiveRunRecord = decode_strict_json(
+        bytes,
+        usize::try_from(execution_journal_maximum_bytes(&input.request)).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let task = input
+        .corpus
+        .tasks
+        .iter()
+        .find(|task| task.task_id == input.task_id)
+        .ok_or_else(|| CommandFailure::evidence("task is not in the sealed corpus"))?;
+    if record.schema_version != "ao.next.live-run-record.v1"
+        || record.variant != LiveVariant::N7
+        || record.git_workspace != *git_workspace
+        || record.raw_capture_index_digest != *index_digest
+        || record.capture_digests != [capture.raw_capture_digest.clone()]
+        || record.verifier_report_digest.is_none()
+        || record.n7_execution_authority_digest.as_ref() != Some(execution_authority_digest)
+        || record.measurement.corpus_digest != input.corpus.corpus_digest
+        || record.measurement.run_id != input.request.run_id
+        || record.measurement.trial_id != input.trial_id
+        || record.measurement.workspace_instance_id != input.workspace_instance_id
+        || record.measurement.task_id != input.task_id
+        || record.measurement.source_digest != task.source_digest
+        || record.measurement.workspace_seed_digest != task.workspace_seed_digest
+        || live_record_digest(
+            record.variant,
+            &record.terminal_state,
+            &record.measurement,
+            &record.capture_digests,
+            &record.raw_capture_index_digest,
+            record.verifier_report_digest.as_ref(),
+            record.n7_execution_authority_digest.as_ref(),
+            &record.git_workspace,
+            &record.ao2_control_diagnostics,
+            &record.native_effect_observations,
+        )? != record.record_digest
+        || canonical_json_bytes(&record)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?
+            != bytes
+    {
+        return Err(CommandFailure::evidence(
+            "retained terminal record identity is contradictory",
+        ));
+    }
+    let status = match record.terminal_state {
+        _ if record.measurement.hidden_test_exposure => 7,
+        RunState::Passed => 0,
+        RunState::Interrupted => 6,
+        RunState::Failed => 5,
+        _ => 4,
+    };
+    let summary = format!(
+        "N7 run {} ended {:?}",
+        input.request.run_id, record.terminal_state
+    );
+    let value = serde_json::to_value(record)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    Ok(CommandOutput::new(value, summary, status))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the run record is assembled once so every measured field remains visibly source-bound"
+)]
+fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
+    input: &LiveRunInput,
+    variant: LiveVariant,
+    measurement_origin: MeasurementOrigin,
+    provider_runner: P,
+    verifier_runner: V,
+    prepared: Option<PreparedN7Context>,
+    recovery: Option<RetainedN7Execution>,
+) -> Result<CommandOutput, CommandFailure> {
     let started_at = Utc::now();
     let started = Instant::now();
-    let validated = validate_input(input, variant, started_at)?;
-    let provider_visibility = if variant == LiveVariant::N7 {
-        Some(
-            ProviderVisibility::from_live_roots(
-                &input.request.workspace.root,
-                &validated.task.workspace_seed_digest,
-                &input.visible_fixtures,
-                &validated.task.visible_fixtures_digest,
-                usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
-            )
-            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+    let validated = if let Some(prepared) = &prepared {
+        validate_input_with_capture_mode(
+            input,
+            variant,
+            started_at,
+            Some(&prepared.git_workspace),
+            if recovery.is_some() {
+                CaptureRootMode::RequireRetained
+            } else {
+                CaptureRootMode::RequireEmpty
+            },
+            RequestAuthorityMode::RequestedScope,
+        )?
+    } else {
+        validate_input(input, variant, started_at)?
+    };
+    let (
+        git_workspace,
+        prepared_run_digest,
+        execution_authority,
+        execution_authority_digest,
+        prepared_journal,
+    ) = if let Some(prepared) = prepared {
+        if variant != LiveVariant::N7 {
+            return Err(CommandFailure::invalid_input(
+                "prepared-run context is restricted to N7",
+            ));
+        }
+        (
+            prepared.git_workspace,
+            prepared.prepared_run_digest,
+            Some(prepared.execution_authority),
+            Some(prepared.execution_authority_digest),
+            Some(prepared.journal),
         )
+    } else {
+        let git_workspace = prepare_git_workspace(
+            &input.request.workspace.root,
+            &input.request.authority.allowed_roots,
+            &validated.task.workspace_seed_digest,
+        )?;
+        let digest = canonical_digest(&git_workspace)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        (git_workspace, digest, None, None, None)
+    };
+    let provider_visibility = if variant == LiveVariant::N7 && recovery.is_none() {
+        Some(n7_provider_visibility(input, validated.task)?)
     } else {
         None
     };
-    let git_workspace = prepare_git_workspace(
-        &input.request.workspace.root,
-        &input.request.authority.allowed_roots,
-        &validated.task.workspace_seed_digest,
-    )?;
+    let provider_intent_authority_digest = (variant == LiveVariant::N7).then(|| {
+        execution_authority_digest
+            .clone()
+            .unwrap_or_else(|| digest_bytes(b"ao.next.provider-free-no-execution-authority.v1"))
+    });
     let cancellation = CancellationToken::new();
     let invocation_limits = invocation_limits(&input.request)?;
     let mut verifier = CommandEngineVerifier::new(
@@ -1053,14 +1760,37 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         input.command_verifier.clone(),
         verifier_runner,
         cancellation.clone(),
-        started_at,
+        if variant == LiveVariant::N7 {
+            input.request.authority.issued_at
+        } else {
+            started_at
+        },
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    let retained_index = Arc::new(Mutex::new(None));
+    let retained_index = Arc::new(Mutex::new(
+        recovery
+            .as_ref()
+            .map(|retained| retained.index_digest.clone()),
+    ));
     let retained_failure = Arc::new(Mutex::new(None));
     let capture_context = capture_context(input, variant);
-    verify_git_workspace(&git_workspace, true)?;
-    revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
+    verify_git_workspace(&git_workspace, recovery.is_none())?;
+    if recovery.is_none() {
+        revalidate_post_git_inputs(input, validated.task, &git_workspace)?;
+    }
+    let journal = if variant == LiveVariant::N7 {
+        Some(if let Some(journal) = prepared_journal {
+            journal
+        } else {
+            CheckpointJournal::new(
+                execution_journal_root(input),
+                execution_journal_maximum_bytes(&input.request),
+            )
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        })
+    } else {
+        None
+    };
 
     let execution = match variant {
         LiveVariant::N0 => execute_n0(
@@ -1071,22 +1801,43 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
             &cancellation,
             invocation_limits,
         ),
-        LiveVariant::N7 => execute_n7(
-            input,
-            provider_visibility.expect("N7 visibility constructed"),
-            CaptureFirstRunner {
-                runner: provider_runner,
-                raw_capture_root: input.raw_capture_root.clone(),
-                capture_context: capture_context.clone(),
-                retained_index: retained_index.clone(),
-                retained_failure: retained_failure.clone(),
-                runtime: input.request.model_profile.runtime.clone(),
-                max_tokens: input.request.limits.max_tokens,
-            },
-            &mut verifier,
-            cancellation.clone(),
-            invocation_limits,
-        ),
+        LiveVariant::N7 => {
+            if let Some(retained) = recovery {
+                execute_n7_retained(
+                    input,
+                    retained,
+                    &mut verifier,
+                    journal.as_ref().expect("N7 journal constructed"),
+                    execution_authority
+                        .as_ref()
+                        .expect("prepared N7 authority validated"),
+                )
+            } else {
+                execute_n7(
+                    input,
+                    provider_visibility.expect("N7 visibility constructed"),
+                    CaptureFirstRunner {
+                        runner: provider_runner,
+                        raw_capture_root: input.raw_capture_root.clone(),
+                        capture_context: capture_context.clone(),
+                        retained_index: retained_index.clone(),
+                        retained_failure: retained_failure.clone(),
+                        runtime: input.request.model_profile.runtime.clone(),
+                        max_tokens: input.request.limits.max_tokens,
+                        journal: journal.as_ref(),
+                        request: &input.request,
+                        prepared_run_digest: prepared_run_digest.clone(),
+                        execution_authority: execution_authority.as_ref(),
+                        execution_authority_digest: provider_intent_authority_digest.as_ref(),
+                    },
+                    &mut verifier,
+                    cancellation.clone(),
+                    invocation_limits,
+                    journal.as_ref().expect("N7 journal constructed"),
+                    execution_authority.as_ref(),
+                )
+            }
+        }
         LiveVariant::N4 => execute_n4(
             input,
             CaptureFirstRunner {
@@ -1097,6 +1848,11 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
                 retained_failure: retained_failure.clone(),
                 runtime: input.request.model_profile.runtime.clone(),
                 max_tokens: input.request.limits.max_tokens,
+                journal: None,
+                request: &input.request,
+                prepared_run_digest,
+                execution_authority: None,
+                execution_authority_digest: None,
             },
             &mut verifier,
             &cancellation,
@@ -1333,29 +2089,31 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
         hidden_test_exposure,
     };
     let verifier_report_digest = report.and_then(|report| canonical_digest(report).ok());
+    let n7_execution_authority_digest = execution_authority_digest;
     let native_effect_observations = outcome
         .as_ref()
         .map_or_else(Vec::new, |outcome| outcome.effect_observations.clone());
-    let record_digest = canonical_digest(&(
+    let record_digest = live_record_digest(
         variant,
         &terminal_state,
         &measurement,
         &capture_digests,
         &raw_capture_index_digest,
-        &verifier_report_digest,
+        verifier_report_digest.as_ref(),
+        n7_execution_authority_digest.as_ref(),
         &git_workspace,
         &ao2_control_diagnostics,
         &native_effect_observations,
-    ))
-    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    )?;
     let record = LiveRunRecord {
-        schema_version: "ao.next.live-run-record.v1",
+        schema_version: "ao.next.live-run-record.v1".into(),
         variant,
         terminal_state: terminal_state.clone(),
         measurement,
         capture_digests,
         raw_capture_index_digest,
         verifier_report_digest,
+        n7_execution_authority_digest,
         git_workspace,
         ao2_control_diagnostics,
         native_effect_observations,
@@ -1371,12 +2129,11 @@ fn execute_with_runners<P: ProcessRunner, V: ProcessRunner>(
     if variant == LiveVariant::N7 && report.is_some() {
         let terminal_bytes = canonical_json_bytes(&record)
             .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-        CheckpointJournal::new(
-            execution_journal_root(input),
-            execution_journal_maximum_bytes(&input.request),
-        )
-        .and_then(|journal| journal.publish_terminal_record(&input.request, &terminal_bytes))
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+        journal
+            .as_ref()
+            .expect("N7 journal constructed")
+            .publish_terminal_record(&input.request, &terminal_bytes)
+            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     }
     let value = serde_json::to_value(record)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
@@ -1464,12 +2221,16 @@ fn execute_n0<P: ProcessRunner, V: ProcessRunner>(
         stdout: run.stdout,
         stderr: run.stderr,
     };
-    let retained_capture_index = persist_raw_captures(
+    let (index, _) = retain_raw_capture_files(
         &input.raw_capture_root,
         capture_context,
         &[],
         std::slice::from_ref(&provider_output),
+        Some(&invocation_digest(&invocation)?),
     )?;
+    let retained_capture_index = publish_raw_capture_index(&input.raw_capture_root, &index)?
+        .digest()
+        .clone();
     let capture = verify_and_gate_capture(
         &input.raw_capture_root,
         capture_context,
@@ -1594,7 +2355,7 @@ fn decode_current_ao_output(
     );
     let sandbox_metadata = std::fs::symlink_metadata(&sandbox_path)
         .map_err(|error| CommandFailure::runtime(error.to_string()))?;
-    if sandbox_metadata.file_type().is_symlink() || !sandbox_metadata.is_dir() {
+    if unsafe_link_metadata(&sandbox_metadata) || !sandbox_metadata.is_dir() {
         return Err(CommandFailure::runtime(
             "current-AO sandbox is not a regular directory",
         ));
@@ -1770,6 +2531,70 @@ fn ao2_control_diagnostic(
     })
 }
 
+fn n7_provider_visibility(
+    input: &LiveRunInput,
+    task: &EvaluationTask,
+) -> Result<ProviderVisibility, CommandFailure> {
+    ProviderVisibility::from_live_roots(
+        &input.request.workspace.root,
+        &task.workspace_seed_digest,
+        &input.visible_fixtures,
+        &task.visible_fixtures_digest,
+        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))
+}
+
+pub(super) fn normalize_retained_turn(
+    input: &LiveRunInput,
+    output: &InvocationOutput,
+) -> Result<(AdapterTurn, RuntimeCapture), CommandFailure> {
+    let identity = AdapterIdentity {
+        runtime: input.request.model_profile.runtime.clone(),
+        model_identifier: input.request.model_profile.model_identifier.clone(),
+        adapter_version: input.request.model_profile.adapter_version.clone(),
+        worker_id: WORKER_ID.into(),
+    };
+    let capture = capture_runtime_output(
+        &identity.runtime,
+        output,
+        usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    let normalized = match identity.runtime.as_str() {
+        "codex" => codex::normalize_output(
+            identity.clone(),
+            &output.stdout,
+            usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+        ),
+        "claude" => claude::normalize_output(
+            identity.clone(),
+            &output.stdout,
+            usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+        ),
+        _ => unreachable!("validated N7 runtime"),
+    }
+    .map_err(|error| CommandFailure::runtime(error.to_string()))?;
+    if normalized.identity != identity {
+        return Err(CommandFailure::runtime("runtime identity drifted"));
+    }
+    let mut turn = normalized.turn;
+    turn.usage = capture.usage.clone();
+    Ok((
+        turn,
+        RuntimeCapture {
+            turn_index: 0,
+            raw_capture_digest: capture.raw_capture_digest,
+            usage: capture.usage,
+            model_wait_ms: 0,
+        },
+    ))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "N7 keeps every validated runtime and authority boundary explicit"
+)]
 fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     input: &LiveRunInput,
     visibility: ProviderVisibility,
@@ -1777,6 +2602,8 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     verifier: &mut CommandEngineVerifier<V>,
     cancellation: CancellationToken,
     limits: InvocationLimits,
+    journal: &CheckpointJournal,
+    execution_authority: Option<&N7ExecutionAuthority>,
 ) -> Result<LiveExecution, CommandFailure> {
     let config = ProcessAdapterConfig::from_request_with_visibility(
         &input.request,
@@ -1794,13 +2621,18 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
         usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
     );
-    let journal = CheckpointJournal::new(
-        execution_journal_root(input),
-        execution_journal_maximum_bytes(&input.request),
-    )
-    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    let outcome =
-        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, &journal);
+    let engine = DirectEngine::new(&broker);
+    let outcome = if let Some(execution_authority) = execution_authority {
+        engine.run_durable_n7(
+            &input.request,
+            &mut adapter,
+            verifier,
+            journal,
+            execution_authority,
+        )
+    } else {
+        engine.run_durable(&input.request, &mut adapter, verifier, journal)
+    };
     let terminal_state = outcome.terminal_state.clone();
     Ok((
         terminal_state,
@@ -1812,13 +2644,58 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     ))
 }
 
-fn execution_journal_root(input: &LiveRunInput) -> PathBuf {
+fn execute_n7_retained<V: ProcessRunner>(
+    input: &LiveRunInput,
+    retained: RetainedN7Execution,
+    verifier: &mut CommandEngineVerifier<V>,
+    journal: &CheckpointJournal,
+    execution_authority: &N7ExecutionAuthority,
+) -> Result<LiveExecution, CommandFailure> {
+    let mut adapter = RetainedN7Adapter {
+        identity: AdapterIdentity {
+            runtime: input.request.model_profile.runtime.clone(),
+            model_identifier: input.request.model_profile.model_identifier.clone(),
+            adapter_version: input.request.model_profile.adapter_version.clone(),
+            worker_id: WORKER_ID.into(),
+        },
+        run_id: input.request.run_id.clone(),
+        source: input.request.source.clone(),
+        workspace: input.request.workspace.clone(),
+        authority_digest: canonical_digest(&input.request.authority)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        policy_digest: input.request.policy_digest.clone(),
+        verifier_profile_digest: input.request.verifier_profile.profile_digest.clone(),
+        turn: Some(retained.turn),
+    };
+    let broker = LocalEffectBroker::new(
+        input.request.limits.max_effect_timeout_ms,
+        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
+        usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
+    );
+    let outcome = DirectEngine::new(&broker).run_durable_n7(
+        &input.request,
+        &mut adapter,
+        verifier,
+        journal,
+        execution_authority,
+    );
+    Ok((
+        outcome.terminal_state.clone(),
+        Some(outcome),
+        vec![retained.capture],
+        vec![retained.output],
+        Some(retained.index_digest),
+        Vec::new(),
+    ))
+}
+
+pub(super) fn execution_journal_root(input: &LiveRunInput) -> PathBuf {
     let mut root = input.raw_capture_root.as_os_str().to_os_string();
     root.push(".journal");
     PathBuf::from(root)
 }
 
-fn execution_journal_maximum_bytes(request: &RunRequest) -> u64 {
+pub(super) fn execution_journal_maximum_bytes(request: &RunRequest) -> u64 {
     request
         .limits
         .max_input_bytes
@@ -1883,15 +2760,62 @@ fn execute_n4<P: ProcessRunner, V: ProcessRunner>(
     ))
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the fail-closed intake audit stays linear so all identity comparisons remain visible"
-)]
 fn validate_input(
     input: &LiveRunInput,
     variant: LiveVariant,
     now: chrono::DateTime<Utc>,
 ) -> Result<ValidatedInput<'_>, CommandFailure> {
+    validate_input_with_git(input, variant, now, None)
+}
+
+fn validate_prepared_input<'a>(
+    input: &'a LiveRunInput,
+    variant: LiveVariant,
+    now: chrono::DateTime<Utc>,
+    git_workspace: &GitWorkspaceIdentity,
+) -> Result<ValidatedInput<'a>, CommandFailure> {
+    validate_input_with_capture_mode(
+        input,
+        variant,
+        now,
+        Some(git_workspace),
+        CaptureRootMode::RequireEmpty,
+        RequestAuthorityMode::RequestedScope,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fail-closed intake audit stays linear so all identity comparisons remain visible"
+)]
+fn validate_input_with_git<'a>(
+    input: &'a LiveRunInput,
+    variant: LiveVariant,
+    now: chrono::DateTime<Utc>,
+    git_workspace: Option<&GitWorkspaceIdentity>,
+) -> Result<ValidatedInput<'a>, CommandFailure> {
+    validate_input_with_capture_mode(
+        input,
+        variant,
+        now,
+        git_workspace,
+        CaptureRootMode::RequireEmpty,
+        RequestAuthorityMode::Current,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fail-closed intake audit stays linear so all identity comparisons remain visible"
+)]
+fn validate_input_with_capture_mode<'a>(
+    input: &'a LiveRunInput,
+    variant: LiveVariant,
+    now: chrono::DateTime<Utc>,
+    git_workspace: Option<&GitWorkspaceIdentity>,
+    capture_mode: CaptureRootMode,
+    authority_mode: RequestAuthorityMode,
+) -> Result<ValidatedInput<'a>, CommandFailure> {
     if input.schema_version != "ao.next.live-run-input.v1"
         || input.task_id.trim().is_empty()
         || input.trial_id.trim().is_empty()
@@ -1937,15 +2861,20 @@ fn validate_input(
             "trial identity does not match the sealed schedule",
         ));
     }
-    ao_next_core::contracts::validate_intake(
-        &input.request,
-        &ao_next_core::contracts::IntakeExpectation {
-            run_id: input.request.run_id.clone(),
-            source: input.request.source.clone(),
-            workspace: input.request.workspace.clone(),
-            now,
-        },
-    )
+    let expectation = ao_next_core::contracts::IntakeExpectation {
+        run_id: input.request.run_id.clone(),
+        source: input.request.source.clone(),
+        workspace: input.request.workspace.clone(),
+        now,
+    };
+    match authority_mode {
+        RequestAuthorityMode::Current => {
+            ao_next_core::contracts::validate_intake(&input.request, &expectation)
+        }
+        RequestAuthorityMode::RequestedScope => {
+            ao_next_core::contracts::validate_intake_identity(&input.request, &expectation)
+        }
+    }
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     if input.request.source.head != task.source_digest
         || input.request.workspace.seed_digest != task.workspace_seed_digest
@@ -1986,38 +2915,25 @@ fn validate_input(
         }
         (_, None) => {}
     }
-    let objective = read_bounded_regular(&input.objective)?;
-    if objective != input.request.objective.as_bytes()
-        || digest_bytes(&objective) != task.objective_digest
-    {
-        return Err(CommandFailure::invalid_input("objective identity drifted"));
-    }
-    let initial_files = snapshot_tree(
-        &input.request.workspace.root,
-        input.request.limits.max_input_bytes,
-    )?;
-    if canonical_digest(&initial_files)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-        != task.workspace_seed_digest
-    {
-        return Err(CommandFailure::invalid_input("workspace seed drifted"));
-    }
-    let source_bytes = read_bounded_regular(&input.source_snapshot)?;
-    let source: SourceSnapshot = decode_strict_json(
-        &source_bytes,
-        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
-    )
-    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if source.schema_version != "ao.next.source-snapshot.v1"
-        || source.task_id != input.task_id
-        || source.tree_digest != task.workspace_seed_digest
-        || source.files != initial_files
-        || canonical_digest(&source)
+    validate_objective_file(input, task)?;
+    let source = load_source_snapshot(input, task)?;
+    let initial_files = if capture_mode == CaptureRootMode::RequireEmpty {
+        let initial_files = snapshot_product_tree(
+            &input.request.workspace.root,
+            input.request.limits.max_input_bytes,
+            git_workspace,
+        )?;
+        if canonical_digest(&initial_files)
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-            != task.source_digest
-    {
-        return Err(CommandFailure::invalid_input("source snapshot drifted"));
-    }
+            != task.workspace_seed_digest
+            || source.files != initial_files
+        {
+            return Err(CommandFailure::invalid_input("workspace seed drifted"));
+        }
+        initial_files
+    } else {
+        source.files
+    };
     let visible = snapshot_tree(
         &input.visible_fixtures,
         input.request.limits.max_input_bytes,
@@ -2039,6 +2955,8 @@ fn validate_input(
     ensure_private_capture_root(
         &input.raw_capture_root,
         &input.request.authority.allowed_roots,
+        capture_mode,
+        input.request.limits.max_output_bytes,
     )?;
     ensure_checked_output_schema(&input.output_schema, input.request.limits.max_input_bytes)?;
     let hidden_file_bytes = hidden
@@ -2057,6 +2975,41 @@ fn validate_input(
         hidden_file_digests: hidden.into_iter().map(|entry| entry.sha256).collect(),
         hidden_file_bytes,
     })
+}
+
+fn validate_objective_file(
+    input: &LiveRunInput,
+    task: &EvaluationTask,
+) -> Result<(), CommandFailure> {
+    let objective = read_bounded_regular(&input.objective)?;
+    if objective != input.request.objective.as_bytes()
+        || digest_bytes(&objective) != task.objective_digest
+    {
+        return Err(CommandFailure::invalid_input("objective identity drifted"));
+    }
+    Ok(())
+}
+
+fn load_source_snapshot(
+    input: &LiveRunInput,
+    task: &EvaluationTask,
+) -> Result<SourceSnapshot, CommandFailure> {
+    let source_bytes = read_bounded_regular(&input.source_snapshot)?;
+    let source: SourceSnapshot = decode_strict_json(
+        &source_bytes,
+        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if source.schema_version != "ao.next.source-snapshot.v1"
+        || source.task_id != input.task_id
+        || source.tree_digest != task.workspace_seed_digest
+        || canonical_digest(&source)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+            != task.source_digest
+    {
+        return Err(CommandFailure::invalid_input("source snapshot drifted"));
+    }
+    Ok(source)
 }
 
 fn hidden_material_exposed(
@@ -2105,6 +3058,10 @@ fn revalidate_post_git_inputs(
         input.request.limits.max_input_bytes,
         Some(git_workspace),
     )?;
+    validate_objective_file(input, task)?;
+    if load_source_snapshot(input, task)?.files != workspace {
+        return Err(CommandFailure::invalid_input("source snapshot drifted"));
+    }
     let visible = snapshot_tree(
         &input.visible_fixtures,
         input.request.limits.max_input_bytes,
@@ -2127,14 +3084,29 @@ fn revalidate_post_git_inputs(
     ensure_checked_output_schema(&input.output_schema, input.request.limits.max_input_bytes)
 }
 
+pub(super) fn revalidate_prepared_live_input(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+) -> Result<(), CommandFailure> {
+    let task = input
+        .corpus
+        .tasks
+        .iter()
+        .find(|task| task.task_id == input.task_id)
+        .ok_or_else(|| CommandFailure::invalid_input("task is not in the sealed corpus"))?;
+    revalidate_post_git_inputs(input, task, git_workspace)
+}
+
 fn ensure_private_capture_root(
     path: &Path,
     worker_roots: &[PathBuf],
+    mode: CaptureRootMode,
+    maximum_output_bytes: u64,
 ) -> Result<(), CommandFailure> {
     ensure_outside_roots(path, worker_roots)?;
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "raw capture root is not a regular non-symlink directory",
         ));
@@ -2148,24 +3120,64 @@ fn ensure_private_capture_root(
             ));
         }
     }
-    let mut entries = std::fs::read_dir(path)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if entries
-        .next()
-        .transpose()
+    let entries = std::fs::read_dir(path)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-        .is_some()
-    {
-        return Err(CommandFailure::invalid_input(
-            "raw capture root is not empty",
-        ));
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if mode == CaptureRootMode::RequireEmpty {
+        if !entries.is_empty() {
+            return Err(CommandFailure::invalid_input(
+                "raw capture root is not empty",
+            ));
+        }
+        return Ok(());
+    }
+    let mut capture_bytes = 0_u64;
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| CommandFailure::invalid_input("raw capture name is not UTF-8"))?;
+        if !names.insert(name.clone()) {
+            return Err(CommandFailure::invalid_input(
+                "raw capture path is duplicated",
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        let capture = name.starts_with("capture-")
+            && (name.ends_with(".stdout") || name.ends_with(".stderr"));
+        let metadata_file = matches!(
+            name.as_str(),
+            "capture-index.json" | "capture-index.json.incomplete" | "capture-terminal.json"
+        );
+        if unsafe_link_metadata(&metadata)
+            || !metadata.is_file()
+            || (!capture && !metadata_file)
+            || (metadata_file && metadata.len() > 1024 * 1024)
+        {
+            return Err(CommandFailure::invalid_input(
+                "raw capture root contains an unsafe or unknown entry",
+            ));
+        }
+        if capture {
+            capture_bytes = capture_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                CommandFailure::invalid_input("raw capture byte count overflowed")
+            })?;
+            if capture_bytes > maximum_output_bytes {
+                return Err(CommandFailure::invalid_input(
+                    "raw capture exceeds its sealed output bound",
+                ));
+            }
+        }
     }
     Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CaptureContext {
+pub(super) struct CaptureContext {
     run_id: String,
     trial_id: String,
     workspace_instance_id: String,
@@ -2182,7 +3194,7 @@ struct CaptureRuntimeIdentity {
     worker_id: String,
 }
 
-fn capture_context(input: &LiveRunInput, variant: LiveVariant) -> CaptureContext {
+pub(super) fn capture_context(input: &LiveRunInput, variant: LiveVariant) -> CaptureContext {
     CaptureContext {
         run_id: input.request.run_id.clone(),
         trial_id: input.trial_id.clone(),
@@ -2213,6 +3225,7 @@ struct RawCaptureIndex {
     run_id: String,
     trial_id: String,
     workspace_instance_id: String,
+    provider_invocation_digest: Option<Digest>,
     runtime_identity: CaptureRuntimeIdentity,
     entries: Vec<RawCaptureIndexEntry>,
 }
@@ -2232,12 +3245,13 @@ struct RawCaptureIndexEntry {
     stderr_size_bytes: u64,
 }
 
-fn persist_raw_captures(
+fn retain_raw_capture_files(
     root: &Path,
     context: &CaptureContext,
     captures: &[RuntimeCapture],
     outputs: &[InvocationOutput],
-) -> Result<Digest, CommandFailure> {
+    provider_invocation_digest: Option<&Digest>,
+) -> Result<(RawCaptureIndex, Digest), CommandFailure> {
     if outputs.is_empty() {
         return Err(CommandFailure::evidence(
             "raw provider capture coverage is incomplete",
@@ -2289,35 +3303,44 @@ fn persist_raw_captures(
         run_id: context.run_id.clone(),
         trial_id: context.trial_id.clone(),
         workspace_instance_id: context.workspace_instance_id.clone(),
+        provider_invocation_digest: provider_invocation_digest.cloned(),
         runtime_identity: context.runtime_identity.clone(),
         entries,
     };
     let digest =
         canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    let bytes =
-        serde_json::to_vec(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    publish_private_index(root, &bytes, true)?;
-    Ok(digest)
+    Ok((index, digest))
 }
 
-fn publish_private_index(root: &Path, bytes: &[u8], publish: bool) -> Result<(), CommandFailure> {
-    let incomplete = root.join("capture-index.json.incomplete");
-    let completed = root.join("capture-index.json");
-    write_private_new(&incomplete, bytes)?;
-    if !publish {
-        return Err(CommandFailure::evidence(
-            "capture index publication was interrupted",
-        ));
-    }
-    std::fs::hard_link(&incomplete, &completed)
+fn publish_raw_capture_index(
+    root: &Path,
+    index: &RawCaptureIndex,
+) -> Result<CapturePublication, CommandFailure> {
+    let bytes =
+        canonical_json_bytes(index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let store = CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    std::fs::File::open(root)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    std::fs::remove_file(&incomplete)
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    std::fs::File::open(root)
-        .and_then(|directory| directory.sync_all())
+    store
+        .publish(&bytes)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+fn stage_raw_capture_index(root: &Path, index: &RawCaptureIndex) -> Result<Digest, CommandFailure> {
+    let bytes =
+        canonical_json_bytes(index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        .stage_incomplete(&bytes)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+fn publish_staged_raw_capture_index(
+    root: &Path,
+    expected: &Digest,
+) -> Result<CapturePublication, CommandFailure> {
+    CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        .publish_staged(expected)
         .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
@@ -2331,6 +3354,17 @@ fn verify_raw_capture_index(
         .map_err(|error| CommandFailure::evidence(error.message))?;
     let index: RawCaptureIndex = decode_strict_json(&bytes, 1024 * 1024)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    verify_raw_capture_index_value(root, context, expected_digest, maximum_output_bytes, &index)?;
+    Ok(())
+}
+
+fn verify_raw_capture_index_value(
+    root: &Path,
+    context: &CaptureContext,
+    expected_digest: &Digest,
+    maximum_output_bytes: u64,
+    index: &RawCaptureIndex,
+) -> Result<Vec<InvocationOutput>, CommandFailure> {
     if index.schema_version != "ao.next.raw-provider-capture-index.v2"
         || index.run_id != context.run_id
         || index.trial_id != context.trial_id
@@ -2345,6 +3379,7 @@ fn verify_raw_capture_index(
         ));
     }
     let mut paths = BTreeSet::new();
+    let mut outputs = Vec::with_capacity(index.entries.len());
     for (capture_order, entry) in index.entries.iter().enumerate() {
         if entry.capture_order != u32::try_from(capture_order).unwrap_or(u32::MAX) {
             return Err(CommandFailure::evidence(
@@ -2372,7 +3407,110 @@ fn verify_raw_capture_index(
                 "retained provider capture digest or byte count mismatched",
             ));
         }
+        outputs.push(InvocationOutput {
+            status: entry.status,
+            stdout,
+            stderr,
+        });
     }
+    Ok(outputs)
+}
+
+pub(super) fn load_verified_capture(
+    root: &Path,
+    context: &CaptureContext,
+    provider_state: &ProviderJournalState,
+    maximum_output_bytes: u64,
+) -> Result<(InvocationOutput, Digest, CapturePublication), CommandFailure> {
+    let raw_capture_digest = provider_state.raw_capture_digest.as_ref().ok_or_else(|| {
+        CommandFailure::invalid_input("provider outcome is unknown without retained capture")
+    })?;
+    let final_path = root.join("capture-index.json");
+    let incomplete_path = root.join("capture-index.json.incomplete");
+    let source = if final_path.exists() || final_path.is_symlink() {
+        &final_path
+    } else {
+        &incomplete_path
+    };
+    let bytes = read_bounded_path(source, 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.message))?;
+    let index: RawCaptureIndex = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let index_digest =
+        canonical_digest(&index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if index.provider_invocation_digest.as_ref() != provider_state.invocation_digest.as_ref()
+        || provider_state.invocation_digest.is_none()
+    {
+        return Err(CommandFailure::evidence(
+            "provider invocation digest contradicts the journal",
+        ));
+    }
+    if provider_state
+        .capture_index_digest
+        .as_ref()
+        .is_some_and(|expected| expected != &index_digest)
+    {
+        return Err(CommandFailure::evidence(
+            "raw capture index identity or digest is contradictory",
+        ));
+    }
+    let [entry] = index.entries.as_slice() else {
+        return Err(CommandFailure::evidence(
+            "recovery requires exactly one retained N7 capture",
+        ));
+    };
+    if entry.capture_order != 0
+        || entry.turn_index != 0
+        || entry.stdout_path != "capture-000.stdout"
+        || entry.stderr_path != "capture-000.stderr"
+    {
+        return Err(CommandFailure::evidence(
+            "retained N7 capture turn or path identity is contradictory",
+        ));
+    }
+    let outputs =
+        verify_raw_capture_index_value(root, context, &index_digest, maximum_output_bytes, &index)?;
+    let [output] = outputs.as_slice() else {
+        return Err(CommandFailure::evidence(
+            "recovery requires exactly one retained N7 capture",
+        ));
+    };
+    if &canonical_digest(&(output.status, &output.stdout, &output.stderr))
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        != raw_capture_digest
+    {
+        return Err(CommandFailure::evidence(
+            "retained provider capture contradicts the journal",
+        ));
+    }
+    let store = CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let publication = store
+        .recover(&index_digest)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    if publication.digest() != &index_digest {
+        return Err(CommandFailure::evidence(
+            "capture publication digest drifted",
+        ));
+    }
+    verify_raw_capture_index(root, context, &index_digest, maximum_output_bytes)?;
+    Ok((output.clone(), index_digest, publication))
+}
+
+pub(super) fn gate_retained_capture(
+    input: &LiveRunInput,
+    context: &CaptureContext,
+    index_digest: &Digest,
+    output: &InvocationOutput,
+) -> Result<(), CommandFailure> {
+    verify_and_gate_capture(
+        &input.raw_capture_root,
+        context,
+        index_digest,
+        &input.request.model_profile.runtime,
+        output,
+        input.request.limits.max_tokens,
+    )?;
     Ok(())
 }
 
@@ -2446,7 +3584,7 @@ fn checked_capture_path(root: &Path, relative: &str) -> Result<PathBuf, CommandF
     let path = root.join(path);
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_file() {
         return Err(CommandFailure::evidence(
             "raw capture is not a regular non-symlink file",
         ));
@@ -2531,7 +3669,7 @@ fn validate_current_ao_binding(
         }
         let metadata = std::fs::symlink_metadata(program)
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-        if metadata.file_type().is_symlink()
+        if unsafe_link_metadata(&metadata)
             || !metadata.is_file()
             || metadata.len() > 512 * 1024 * 1024
         {
@@ -2627,30 +3765,36 @@ fn ensure_checked_output_schema(path: &Path, maximum_bytes: u64) -> Result<(), C
     clippy::too_many_lines,
     reason = "the deterministic seed repository contract is intentionally visible in one boundary"
 )]
-fn prepare_git_workspace(
+pub(super) fn prepare_git_workspace(
     root: &Path,
     allowed_roots: &[PathBuf],
     seed_digest: &Digest,
 ) -> Result<GitWorkspaceIdentity, CommandFailure> {
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "workspace is not a regular non-symlink directory",
         ));
     }
+    #[cfg(windows)]
+    let _workspace_anchor = open_windows_non_reparse(root, true)?;
     let repository_root = std::fs::canonicalize(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    #[cfg(windows)]
+    let mut allowed_anchors = Vec::with_capacity(allowed_roots.len());
     let allowed = allowed_roots
         .iter()
         .try_fold(false, |matched, allowed_root| {
             let metadata = std::fs::symlink_metadata(allowed_root)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
                 return Err(CommandFailure::invalid_input(
                     "authority root is not a regular non-symlink directory",
                 ));
             }
+            #[cfg(windows)]
+            allowed_anchors.push(open_windows_non_reparse(allowed_root, true)?);
             let allowed_root = std::fs::canonicalize(allowed_root)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
             Ok(matched || repository_root.starts_with(allowed_root))
@@ -2767,13 +3911,15 @@ fn prepare_git_workspace(
         index_digest: git_index_digest(&repository_top)?,
         common_dir,
         head_commit,
-        branch: GIT_BRANCH,
+        branch: GIT_BRANCH.into(),
     };
     verify_git_workspace(&identity, false)?;
     Ok(identity)
 }
 
 fn reject_git_metadata(root: &Path) -> Result<(), CommandFailure> {
+    #[cfg(windows)]
+    let mut directory_anchors = vec![open_windows_non_reparse(root, true)?];
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory)
@@ -2792,14 +3938,19 @@ fn reject_git_metadata(root: &Path) -> Result<(), CommandFailure> {
             }
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-            if metadata.file_type().is_symlink() {
+            if unsafe_link_metadata(&metadata) {
                 return Err(CommandFailure::invalid_input(
                     "workspace contains a symlink",
                 ));
             }
             if metadata.is_dir() {
+                #[cfg(windows)]
+                directory_anchors.push(open_windows_non_reparse(&path, true)?);
                 pending.push(path);
-            } else if !metadata.is_file() {
+            } else if metadata.is_file() {
+                #[cfg(windows)]
+                drop(open_windows_non_reparse(&path, false)?);
+            } else {
                 return Err(CommandFailure::invalid_input(
                     "workspace contains a non-regular entry",
                 ));
@@ -2866,7 +4017,7 @@ fn git_program() -> Result<PathBuf, CommandFailure> {
         let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
             continue;
         };
-        if !metadata.file_type().is_symlink() && metadata.is_file() {
+        if !unsafe_link_metadata(&metadata) && metadata.is_file() {
             return std::fs::canonicalize(candidate)
                 .map_err(|error| CommandFailure::runtime(error.to_string()));
         }
@@ -2945,7 +4096,7 @@ fn verify_git_workspace(
 ) -> Result<(), CommandFailure> {
     let git_metadata = std::fs::symlink_metadata(identity.repository_root.join(".git"))
         .map_err(|error| CommandFailure::runtime(error.to_string()))?;
-    if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
+    if unsafe_link_metadata(&git_metadata) || !git_metadata.is_dir() {
         return Err(CommandFailure::runtime(
             "prepared root Git metadata is not an ordinary directory",
         ));
@@ -3045,13 +4196,15 @@ fn snapshot_product_tree(
     }
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "snapshot root is not a regular non-symlink directory",
         ));
     }
     let canonical_root = std::fs::canonicalize(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    #[cfg(windows)]
+    let mut directory_anchors = vec![open_windows_non_reparse(&canonical_root, true)?];
     let mut pending = vec![canonical_root.clone()];
     let mut paths = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -3074,14 +4227,18 @@ fn snapshot_product_tree(
             }
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-            if metadata.file_type().is_symlink() {
+            if unsafe_link_metadata(&metadata) {
                 return Err(CommandFailure::invalid_input(
                     "snapshot tree contains a symlink",
                 ));
             }
             if metadata.is_dir() {
+                #[cfg(windows)]
+                directory_anchors.push(open_windows_non_reparse(&path, true)?);
                 pending.push(path);
             } else if metadata.is_file() {
+                #[cfg(windows)]
+                drop(open_windows_non_reparse(&path, false)?);
                 paths.push(path);
             } else {
                 return Err(CommandFailure::invalid_input(
@@ -3123,14 +4280,40 @@ fn snapshot_product_tree(
 }
 
 fn read_bounded_path(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, CommandFailure> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > maximum_bytes {
-        return Err(CommandFailure::invalid_input(
-            "file is not a bounded regular non-symlink file",
-        ));
+    #[cfg(windows)]
+    {
+        let file = open_windows_non_reparse(path, false)?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if metadata.len() > maximum_bytes {
+            return Err(CommandFailure::invalid_input(
+                "file is not a bounded regular non-reparse file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
+            return Err(CommandFailure::invalid_input(
+                "file is not a bounded regular non-reparse file",
+            ));
+        }
+        Ok(bytes)
     }
-    std::fs::read(path).map_err(|error| CommandFailure::invalid_input(error.to_string()))
+    #[cfg(not(windows))]
+    {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if unsafe_link_metadata(&metadata) || !metadata.is_file() || metadata.len() > maximum_bytes
+        {
+            return Err(CommandFailure::invalid_input(
+                "file is not a bounded regular non-symlink file",
+            ));
+        }
+        std::fs::read(path).map_err(|error| CommandFailure::invalid_input(error.to_string()))
+    }
 }
 
 fn count_changed_files(before: &[SnapshotEntry], after: &[SnapshotEntry]) -> u32 {
@@ -3194,6 +4377,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn windows_reparse_attribute_is_unsafe() {
+        assert!(windows_reparse_point(0x400));
+        assert!(!windows_reparse_point(0));
+    }
 
     struct FakeProvider {
         outputs: VecDeque<InvocationOutput>,
@@ -3270,6 +4459,26 @@ mod tests {
         result: Option<Result<InvocationOutput, InvocationError>>,
     }
 
+    struct CollidingJournalRunner {
+        event_root: PathBuf,
+    }
+
+    impl ProcessRunner for CollidingJournalRunner {
+        fn run(
+            &mut self,
+            _: &PreparedInvocation,
+            _: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            std::fs::write(self.event_root.join("invalid-event"), b"collision")
+                .expect("journal collision");
+            Ok(InvocationOutput {
+                status: 0,
+                stdout: b"retained".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
     impl ProcessRunner for FixedProcessResult {
         fn run(
             &mut self,
@@ -3329,7 +4538,7 @@ mod tests {
             }
             let metadata =
                 std::fs::symlink_metadata(&program).map_err(|error| error.to_string())?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+            if unsafe_link_metadata(&metadata) || !metadata.is_file() {
                 return Err("provider-free program is not a regular non-symlink file".into());
             }
             let expected = Digest::new(
@@ -4017,6 +5226,26 @@ mod tests {
     }
 
     #[test]
+    fn trusted_live_input_keeps_the_exact_bytes_it_decoded() {
+        let n7 = fixture(LiveVariant::N7);
+        let input_path = n7.root.path().join("trusted-live-input.json");
+        let bytes = serde_json::to_vec(&n7.input).expect("live input bytes");
+        std::fs::write(&input_path, &bytes).expect("live input");
+
+        let loaded = load_trusted_live_input(
+            &input_path,
+            LiveVariant::N7,
+            n7.input.corpus.corpus_digest.as_str(),
+            n7.input.command_verifier.profile_digest.as_str(),
+            Utc::now(),
+        )
+        .expect("trusted live input");
+
+        assert_eq!(loaded.bytes, bytes);
+        assert_eq!(loaded.input.request.run_id, n7.input.request.run_id);
+    }
+
+    #[test]
     fn provider_free_preflight_leaves_workspace_ready_for_exact_live_execution() {
         assert!(std::env::var_os("AO_NEXT_LIVE_PROVIDER_CALLS").is_none());
         let n7 = fixture(LiveVariant::N7);
@@ -4168,7 +5397,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn digest_bound_fake_executable_runs_the_real_n7_provider_free_path() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the one-process integration keeps preparation and exact journal order visible"
+    )]
+    fn provider_journal_orders_the_real_n7_provider_free_path() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let n7 = fixture(LiveVariant::N7);
@@ -4238,10 +5471,15 @@ mod tests {
         );
         let journal_root = execution_journal_root(&n7.input);
         assert!(journal_root.join("execution-identity.json").is_file());
-        let mut event_kinds = std::fs::read_dir(journal_root.join("execution-events"))
+        let mut event_paths = std::fs::read_dir(journal_root.join("execution-events"))
             .expect("execution events")
-            .map(|entry| {
-                let bytes = std::fs::read(entry.expect("event entry").path()).expect("event");
+            .map(|entry| entry.expect("event entry").path())
+            .collect::<Vec<_>>();
+        event_paths.sort();
+        let event_kinds = event_paths
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(path).expect("event");
                 serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")["kind"]
                     ["kind"]
                     .as_str()
@@ -4249,15 +5487,20 @@ mod tests {
                     .to_string()
             })
             .collect::<Vec<_>>();
-        event_kinds.sort();
         assert_eq!(
             event_kinds,
             [
-                "effect_completed",
+                "provider_request_intent",
+                "provider_process_started",
+                "provider_output_retained",
+                "provider_capture_index_published",
+                "provider_capture_verified",
+                "adapter_turn_normalized",
                 "effect_intent",
-                "terminal_published",
+                "effect_completed",
                 "verification_started",
                 "verifier_recorded",
+                "terminal_published",
             ]
         );
         let terminal_records = std::fs::read_dir(&journal_root)
@@ -5275,7 +6518,7 @@ else:
         wrong_head.head_commit = "0".repeat(40);
         assert!(verify_git_workspace(&wrong_head, true).is_err());
         let mut wrong_branch = identities[0].1.clone();
-        wrong_branch.branch = "wrong-branch";
+        wrong_branch.branch = "wrong-branch".into();
         assert!(verify_git_workspace(&wrong_branch, true).is_err());
         let mut wrong_common_dir = identities[0].1.clone();
         wrong_common_dir.common_dir = wrong_common_dir.repository_root.join("missing-common-dir");
@@ -5768,6 +7011,37 @@ else:
         );
     }
 
+    #[test]
+    fn post_git_revalidation_rejects_source_snapshot_drift() {
+        let n7 = fixture(LiveVariant::N7);
+        let task = n7
+            .input
+            .corpus
+            .tasks
+            .iter()
+            .find(|task| task.task_id == n7.input.task_id)
+            .expect("selected task")
+            .clone();
+        let git = prepare_git_workspace(
+            &n7.input.request.workspace.root,
+            &n7.input.request.authority.allowed_roots,
+            &n7.input.request.workspace.seed_digest,
+        )
+        .expect("Git workspace");
+        let mut source: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&n7.input.source_snapshot).expect("source bytes"),
+        )
+        .expect("source snapshot");
+        source["task_id"] = serde_json::json!("drifted-source");
+        std::fs::write(
+            &n7.input.source_snapshot,
+            serde_json::to_vec(&source).expect("drifted source bytes"),
+        )
+        .expect("drifted source snapshot");
+
+        assert!(revalidate_post_git_inputs(&n7.input, &task, &git).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn capture_index_is_atomic_private_and_identity_bound() {
@@ -5912,7 +7186,64 @@ else:
     }
 
     #[test]
-    fn capture_retention_rejects_interruption_duplicates_bounds_paths_and_short_writes() {
+    fn baseline_record_digest_binds_observed_timing() {
+        let fixture = fixture(LiveVariant::N4);
+        let output = execute_with_runners(
+            &fixture.input,
+            LiveVariant::N4,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(None)]),
+                direct_write: Some(fixture.product.clone()),
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+        )
+        .expect("captured N4 run");
+        let record: LiveRunRecord = serde_json::from_value(output.value).expect("live run record");
+
+        for variant in [LiveVariant::N0, LiveVariant::N4] {
+            let original = live_record_digest(
+                variant,
+                &record.terminal_state,
+                &record.measurement,
+                &record.capture_digests,
+                &record.raw_capture_index_digest,
+                record.verifier_report_digest.as_ref(),
+                record.n7_execution_authority_digest.as_ref(),
+                &record.git_workspace,
+                &record.ao2_control_diagnostics,
+                &record.native_effect_observations,
+            )
+            .expect("original digest");
+            let mut wall_clock_changed = record.measurement.clone();
+            wall_clock_changed.wall_clock_ms = wall_clock_changed.wall_clock_ms.saturating_add(1);
+            let mut model_wait_changed = record.measurement.clone();
+            model_wait_changed.model_wait_ms = model_wait_changed.model_wait_ms.saturating_add(1);
+            for changed in [&wall_clock_changed, &model_wait_changed] {
+                assert_ne!(
+                    live_record_digest(
+                        variant,
+                        &record.terminal_state,
+                        changed,
+                        &record.capture_digests,
+                        &record.raw_capture_index_digest,
+                        record.verifier_report_digest.as_ref(),
+                        record.n7_execution_authority_digest.as_ref(),
+                        &record.git_workspace,
+                        &record.ao2_control_diagnostics,
+                        &record.native_effect_observations,
+                    )
+                    .expect("changed digest"),
+                    original,
+                    "{variant:?} digest ignored observed timing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn capture_retention_rejects_duplicates_bounds_paths_and_short_writes() {
         struct ZeroWriter;
         impl std::io::Write for ZeroWriter {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -5932,37 +7263,28 @@ else:
             std::io::ErrorKind::WriteZero
         );
 
-        let interrupted = TempDir::new().expect("interrupted capture root");
-        write_private_new(&interrupted.path().join("capture-000.stdout"), b"stdout")
-            .expect("stdout");
-        write_private_new(&interrupted.path().join("capture-000.stderr"), b"stderr")
-            .expect("stderr");
-        assert!(publish_private_index(interrupted.path(), b"{}", false).is_err());
-        assert!(
-            interrupted
-                .path()
-                .join("capture-index.json.incomplete")
-                .is_file()
-        );
-        assert!(!interrupted.path().join("capture-index.json").exists());
-        assert!(interrupted.path().join("capture-000.stdout").is_file());
-
         let duplicate = fixture(LiveVariant::N4);
         let context = capture_context(&duplicate.input, LiveVariant::N4);
         let output = codex_output(None);
-        let first = persist_raw_captures(
+        let (index, _) = retain_raw_capture_files(
             &duplicate.input.raw_capture_root,
             &context,
             &[],
             std::slice::from_ref(&output),
+            None,
         )
         .expect("first immutable capture");
+        let first = publish_raw_capture_index(&duplicate.input.raw_capture_root, &index)
+            .expect("first immutable index")
+            .digest()
+            .clone();
         assert!(
-            persist_raw_captures(
+            retain_raw_capture_files(
                 &duplicate.input.raw_capture_root,
                 &context,
                 &[],
                 std::slice::from_ref(&output),
+                None,
             )
             .is_err()
         );
@@ -5978,7 +7300,7 @@ else:
         let mut context = capture_context(&oversized.input, LiveVariant::N4);
         context.maximum_output_bytes = 1;
         assert!(
-            persist_raw_captures(
+            retain_raw_capture_files(
                 &oversized.input.raw_capture_root,
                 &context,
                 &[],
@@ -5987,6 +7309,7 @@ else:
                     stdout: b"too large".to_vec(),
                     stderr: Vec::new(),
                 }],
+                None,
             )
             .is_err()
         );
@@ -5997,7 +7320,7 @@ else:
             0
         );
 
-        assert!(checked_capture_path(interrupted.path(), "../escape").is_err());
+        assert!(checked_capture_path(&duplicate.input.raw_capture_root, "../escape").is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -6017,6 +7340,60 @@ else:
             .expect("unsafe permissions");
             assert!(validate_input(&unsafe_root.input, LiveVariant::N4, Utc::now()).is_err());
         }
+    }
+
+    #[test]
+    fn capture_index_is_staged_before_output_retained_event_can_fail() {
+        let fixture = fixture(LiveVariant::N7);
+        let journal = CheckpointJournal::new(
+            execution_journal_root(&fixture.input),
+            execution_journal_maximum_bytes(&fixture.input.request),
+        )
+        .expect("journal");
+        let event_root = execution_journal_root(&fixture.input).join("execution-events");
+        let retained_index = Arc::new(Mutex::new(None));
+        let retained_failure = Arc::new(Mutex::new(None));
+        let context = capture_context(&fixture.input, LiveVariant::N7);
+        let execution_authority_digest = digest_bytes(b"authority");
+        let mut runner = CaptureFirstRunner {
+            runner: CollidingJournalRunner { event_root },
+            raw_capture_root: fixture.input.raw_capture_root.clone(),
+            capture_context: context,
+            retained_index,
+            retained_failure,
+            runtime: "codex".into(),
+            max_tokens: fixture.input.request.limits.max_tokens,
+            journal: Some(&journal),
+            request: &fixture.input.request,
+            prepared_run_digest: digest_bytes(b"prepared"),
+            execution_authority: None,
+            execution_authority_digest: Some(&execution_authority_digest),
+        };
+        let invocation = PreparedInvocation {
+            program: "provider".into(),
+            args: Vec::new(),
+            stdin: Vec::new(),
+            cwd: fixture.input.request.workspace.root.clone(),
+            environment: None,
+            limits: invocation_limits(&fixture.input.request).expect("limits"),
+        };
+
+        assert!(runner.run(&invocation, &CancellationToken::new()).is_err());
+        assert!(
+            fixture
+                .input
+                .raw_capture_root
+                .join("capture-index.json.incomplete")
+                .is_file(),
+            "canonical incomplete index must precede provider_output_retained"
+        );
+        assert!(
+            !fixture
+                .input
+                .raw_capture_root
+                .join("capture-index.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -6042,6 +7419,7 @@ else:
         )
         .expect("offline N0");
         assert_eq!(output.status, 0);
+        assert!(output.value["n7_execution_authority_digest"].is_null());
         assert_eq!(output.value["measurement"]["variant"], "N0");
         assert_eq!(output.value["measurement"]["tokens"]["input_tokens"], 11);
 
@@ -6059,6 +7437,7 @@ else:
         )
         .expect("offline N4");
         assert_eq!(output.status, 0);
+        assert!(output.value["n7_execution_authority_digest"].is_null());
         assert_eq!(output.value["terminal_state"], "passed");
         assert_eq!(output.value["measurement"]["variant"], "N4");
         assert_eq!(output.value["measurement"]["provider_usage_trusted"], true);
@@ -6109,6 +7488,7 @@ else:
         )
         .expect("offline N7");
         assert_eq!(output.status, 0);
+        assert!(output.value["n7_execution_authority_digest"].is_null());
         assert_eq!(output.value["terminal_state"], "passed");
         assert_eq!(output.value["measurement"]["variant"], "N7");
         assert_eq!(output.value["measurement"]["tokens"]["input_tokens"], 11);
@@ -6116,6 +7496,128 @@ else:
         assert_eq!(output.value["measurement"]["changed_files"], 1);
         assert_eq!(output.value["measurement"]["worker_count"], 1);
         assert_eq!(output.value["measurement"]["dynamic_fanout"], false);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one path proves the admitted journal owns provider intent and terminal publication"
+    )]
+    fn prepared_n7_threads_one_admitted_authority_digest() {
+        let n7 = fixture(LiveVariant::N7);
+        let git_workspace = prepare_git_workspace(
+            &n7.input.request.workspace.root,
+            &n7.input.request.authority.allowed_roots,
+            &n7.input.request.workspace.seed_digest,
+        )
+        .expect("prepared Git workspace");
+        let prepared_run_digest = canonical_digest(&git_workspace).expect("prepared digest");
+        let now = Utc::now();
+        let execution_authority = N7ExecutionAuthority {
+            schema_version: "ao.next.n7-execution-authority.v1".into(),
+            authority_id: "threaded-authority".into(),
+            issued_by: "operator".into(),
+            prepared_run_digest: prepared_run_digest.clone(),
+            preparation_input_digest: digest_bytes(b"input"),
+            preparation_request_digest: canonical_digest(&n7.input.request).expect("request"),
+            base_commit: git_workspace.head_commit.clone(),
+            workspace_identity_digest: canonical_digest(&n7.input.request.workspace)
+                .expect("workspace identity"),
+            workspace_digest: n7.input.request.workspace.seed_digest.clone(),
+            workspace_root: git_workspace.repository_root.clone(),
+            requested_authority_digest: canonical_digest(&n7.input.request.authority)
+                .expect("requested authority"),
+            write_scope_digest: n7_requested_write_scope_digest(&n7.input.request)
+                .expect("write scope"),
+            issued_at: now - Duration::minutes(1),
+            expires_at: now + Duration::hours(1),
+            provider_process_allowance: 1,
+        };
+        let admitted_digest = digest_bytes(b"admitted execution authority");
+        assert_ne!(
+            admitted_digest,
+            canonical_digest(&execution_authority).expect("document digest")
+        );
+        let turn = AdapterTurn {
+            actions: vec![
+                AdapterAction::Effect(EffectRequest {
+                    effect_id: "write-product".into(),
+                    run_id: n7.input.request.run_id.clone(),
+                    kind: EffectKind::WriteFile,
+                    program: None,
+                    content: Some("ready\n".into()),
+                    args: Vec::new(),
+                    paths: vec![PathBuf::from("product.txt")],
+                    timeout_ms: 0,
+                    input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+                }),
+                AdapterAction::Verify,
+            ],
+            usage: TokenUsage::default(),
+            model_claimed_success: true,
+            control_mutations: Vec::new(),
+        };
+        let admitted_journal_root = n7.root.path().join("admitted-journal");
+        let create_capable_journal =
+            CheckpointJournal::new(&admitted_journal_root, 128 * 1024).expect("journal");
+        create_capable_journal
+            .bind_request(&n7.input.request)
+            .expect("request binding");
+        std::fs::create_dir(admitted_journal_root.join("execution-events"))
+            .expect("event directory");
+        let admitted_journal =
+            CheckpointJournal::open_bound(&admitted_journal_root, 128 * 1024, &n7.input.request)
+                .expect("existing-only journal");
+
+        let output = execute_with_prepared_runners(
+            &n7.input,
+            LiveVariant::N7,
+            MeasurementOrigin::OfflineFixture,
+            FakeProvider {
+                outputs: VecDeque::from([codex_output(Some(&turn))]),
+                direct_write: None,
+                additional_write: None,
+            },
+            BoundedProcessRunner,
+            Some(PreparedN7Context {
+                git_workspace,
+                prepared_run_digest,
+                execution_authority,
+                execution_authority_digest: admitted_digest.clone(),
+                journal: admitted_journal,
+            }),
+        )
+        .expect("prepared N7 execution");
+
+        assert_eq!(
+            output.value["n7_execution_authority_digest"],
+            admitted_digest.as_str()
+        );
+        let intent = std::fs::read_dir(admitted_journal_root.join("execution-events"))
+            .expect("execution events")
+            .map(|entry| {
+                let bytes = std::fs::read(entry.expect("event entry").path()).expect("event");
+                serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")
+            })
+            .find(|event| event["kind"]["kind"] == "provider_request_intent")
+            .expect("provider intent");
+        assert_eq!(
+            intent["kind"]["execution_authority_digest"],
+            admitted_digest.as_str()
+        );
+        assert!(
+            !execution_journal_root(&n7.input).exists(),
+            "prepared execution reconstructed the default journal"
+        );
+        assert_eq!(
+            std::fs::read_dir(&admitted_journal_root)
+                .expect("journal root")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("terminal-"))
+                .count(),
+            1,
+            "same admitted journal did not publish the terminal"
+        );
     }
 
     #[test]

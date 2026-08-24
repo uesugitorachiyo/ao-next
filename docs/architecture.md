@@ -2,11 +2,13 @@
 
 AO Next is a separate Rust modular monolith supervised by AO Mission. Mission retains objective identity, checkpoints, and terminal reconciliation while AO Next owns strict intake, one-worker direct execution, effect admission, product verification, evidence, and recovery.
 
-The N7 execution path binds a request-identity journal before dispatch. Each authorized native effect records create-only intent before execution and content-addressed completion afterward; intent without completion is unknown and cannot be retried automatically. Verification starts and reports are journaled, and the final mechanically verified N7 record is retained at a content-addressed terminal path before the CLI returns it.
+The N7 execution path prepares a deterministic Git seed and non-authorizing receipt before dispatch. The operator then issues one `ao.next.n7-execution-authority.v1` document bound to that receipt and observed Git base. The Engine validates the document before provider intent and again at each fresh effect admission. Each authorized native effect records create-only intent before execution and content-addressed completion afterward; intent without completion is unknown and cannot be retried. One journal lifecycle validator enforces provider, effect, verification, and terminal order on recovery, appends, checkpoints, verifier records, and terminal publication.
 
 ```text
-operator objective and authority
+operator objective and requested scope
         -> strict intake validation
+        -> prepared Git receipt
+        -> post-preparation N7 execution authority
         -> one runtime adapter and one worker
         -> structured effect broker
         -> authorized local workspace effects
@@ -24,3 +26,5 @@ Hidden tests remain outside worker workspaces and authority roots. Verifier comm
 The launch candidate has no dynamic worker creation, runtime graph growth, permanent planner or reviewer roles, workflow compiler, or generic workflow language. Those remain future questions only if paired evaluation shows the direct candidate repeatedly needs them.
 
 Prompt and tool instructions begin small for each model profile. Instructions are added only after repeated measured failure. Verification, safety, permissions, and evidence remain deterministic harness responsibilities rather than prompt conventions.
+
+Fresh capture retention writes and synchronizes raw files and the canonical incomplete index before the journal records `provider_output_retained`. The Engine then publishes the staged final name and records publication and verification. `recover-live` accepts incomplete-only and final-only crash states from retained bytes. It reads the prepared receipt, N7 authority, journal, and Git identity without starting or resolving a provider. Provider intent without retained output and effect intent without completion remain terminally unknown. Completed effects can proceed to verification after authority expiry; a fresh effect cannot.

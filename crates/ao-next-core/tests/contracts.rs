@@ -4,11 +4,16 @@ use std::path::PathBuf;
 use ao_next_core::contracts::{
     AdapterIdentity, ArtifactEntry, ArtifactManifest, AuthorityEnvelope, Capability, Digest,
     EffectDecision, EffectEvent, EffectKind, EffectRequest, ExternalEffectPolicy,
-    IntakeExpectation, ModelProfile, NetworkPolicy, RunLimits, RunRequest, RunState,
-    SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport,
-    VerifierResult, WorkspaceIdentity, generated_contract_schemas, validate_intake,
+    IntakeExpectation, ModelProfile, N7ExecutionAuthority, N7ExecutionAuthorityExpectation,
+    NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest, RunState, SourceIdentity,
+    StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport, VerifierResult,
+    WorkspaceIdentity, generated_contract_schemas, n7_requested_write_scope_digest,
+    validate_authority_current, validate_intake, validate_intake_identity,
+    validate_n7_execution_authority_current, validate_n7_execution_authority_identity,
 };
-use ao_next_core::strict_json::{StrictJsonError, canonical_digest, decode_strict_json};
+use ao_next_core::strict_json::{
+    StrictJsonError, canonical_digest, canonical_json_bytes, decode_strict_json,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -196,6 +201,186 @@ fn terminal_readback() -> TerminalReadback {
     }
 }
 
+fn prepared_run_receipt() -> PreparedRunReceipt {
+    PreparedRunReceipt {
+        schema_version: "ao.next.prepared-run.v1".into(),
+        run_id: "run-prepared-01".into(),
+        input_digest: digest(ZERO_DIGEST),
+        request_digest: digest(ONE_DIGEST),
+        repository_root: PathBuf::from("workspace"),
+        common_directory: PathBuf::from("workspace/.git"),
+        branch: "ao-next-sealed-seed".into(),
+        base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        control_digest: digest(ZERO_DIGEST),
+        index_digest: digest(ONE_DIGEST),
+        workspace_digest: digest(ZERO_DIGEST),
+        journal_identity_digest: digest(ONE_DIGEST),
+        prepared_at: timestamp("2026-08-23T00:00:00Z"),
+        expires_at: timestamp("2026-08-24T00:00:00Z"),
+        provider_calls: 0,
+        safe_to_execute: false,
+    }
+}
+
+fn n7_execution_authority() -> N7ExecutionAuthority {
+    N7ExecutionAuthority {
+        schema_version: "ao.next.n7-execution-authority.v1".into(),
+        authority_id: "n7-authority-01".into(),
+        issued_by: "operator".into(),
+        prepared_run_digest: digest(ZERO_DIGEST),
+        preparation_input_digest: digest(ONE_DIGEST),
+        preparation_request_digest: digest(ZERO_DIGEST),
+        base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        workspace_identity_digest: digest(ONE_DIGEST),
+        workspace_digest: digest(ZERO_DIGEST),
+        workspace_root: PathBuf::from("workspace"),
+        requested_authority_digest: digest(ONE_DIGEST),
+        write_scope_digest: digest(ZERO_DIGEST),
+        issued_at: timestamp("2026-08-23T00:01:00Z"),
+        expires_at: timestamp("2026-08-23T01:01:00Z"),
+        provider_process_allowance: 1,
+    }
+}
+
+fn n7_execution_authority_expectation() -> N7ExecutionAuthorityExpectation {
+    let authority = n7_execution_authority();
+    N7ExecutionAuthorityExpectation {
+        execution_authority_digest: canonical_digest(&authority).expect("authority digest"),
+        prepared_run_digest: authority.prepared_run_digest.clone(),
+        preparation_input_digest: authority.preparation_input_digest.clone(),
+        preparation_request_digest: authority.preparation_request_digest.clone(),
+        base_commit: authority.base_commit.clone(),
+        workspace_identity_digest: authority.workspace_identity_digest.clone(),
+        workspace_digest: authority.workspace_digest.clone(),
+        workspace_root: authority.workspace_root.clone(),
+        requested_authority_digest: authority.requested_authority_digest.clone(),
+        write_scope_digest: authority.write_scope_digest.clone(),
+        prepared_at: timestamp("2026-08-23T00:00:00Z"),
+    }
+}
+
+#[test]
+fn n7_execution_authority_digest_distinguishes_exact_documents() {
+    let authority_a = n7_execution_authority();
+    let mut authority_b = authority_a.clone();
+    authority_b.authority_id = "n7-authority-02".into();
+    authority_b.issued_by = "second-operator".into();
+    authority_b.issued_at = timestamp("2026-08-23T00:02:00Z");
+    authority_b.expires_at = timestamp("2026-08-23T02:02:00Z");
+
+    let now = timestamp("2026-08-23T00:30:00Z");
+    validate_n7_execution_authority_current(&authority_a, now).expect("authority A current");
+    validate_n7_execution_authority_current(&authority_b, now).expect("authority B current");
+    assert_ne!(
+        canonical_digest(&authority_a).expect("authority A digest"),
+        canonical_digest(&authority_b).expect("authority B digest"),
+    );
+    let mut expectation = n7_execution_authority_expectation();
+    expectation.execution_authority_digest =
+        canonical_digest(&authority_b).expect("authority B digest");
+    assert!(validate_n7_execution_authority_identity(&authority_a, &expectation).is_err());
+}
+
+#[test]
+fn prepared_run_receipt_round_trips_with_exact_git_identity() {
+    let receipt = prepared_run_receipt();
+    let bytes = canonical_json_bytes(&receipt).expect("receipt bytes");
+    let decoded: PreparedRunReceipt =
+        decode_strict_json(&bytes, 64 * 1024).expect("receipt decode");
+    assert_eq!(decoded, receipt);
+}
+
+#[test]
+fn prepared_run_receipt_rejects_unsafe_runtime_values() {
+    for (field, invalid) in [
+        ("base_commit", serde_json::json!("A".repeat(40))),
+        ("provider_calls", serde_json::json!(1)),
+        ("safe_to_execute", serde_json::json!(true)),
+    ] {
+        let mut receipt = serde_json::to_value(prepared_run_receipt()).expect("receipt value");
+        receipt[field] = invalid;
+        let bytes = serde_json::to_vec(&receipt).expect("invalid receipt bytes");
+        assert!(
+            decode_strict_json::<PreparedRunReceipt>(&bytes, 64 * 1024).is_err(),
+            "unsafe {field} decoded"
+        );
+    }
+}
+
+#[test]
+fn n7_execution_authority_is_post_preparation_exact_and_current() {
+    let authority = n7_execution_authority();
+    let expectation = n7_execution_authority_expectation();
+    let bytes = canonical_json_bytes(&authority).expect("authority bytes");
+    let decoded: N7ExecutionAuthority =
+        decode_strict_json(&bytes, 64 * 1024).expect("authority decode");
+
+    validate_n7_execution_authority_identity(&decoded, &expectation)
+        .expect("exact post-preparation authority");
+    validate_n7_execution_authority_current(&decoded, timestamp("2026-08-23T00:30:00Z"))
+        .expect("current authority");
+    assert!(
+        validate_n7_execution_authority_current(&decoded, decoded.expires_at).is_err(),
+        "expiry is exclusive"
+    );
+}
+
+#[test]
+fn n7_execution_authority_rejects_every_binding_drift() {
+    let expectation = n7_execution_authority_expectation();
+    for mutation in [
+        "schema",
+        "identity",
+        "prepared-run",
+        "input",
+        "request",
+        "base",
+        "workspace-identity",
+        "workspace-digest",
+        "workspace-root",
+        "requested-authority",
+        "write-scope",
+        "pre-preparation",
+        "interval",
+        "provider-allowance",
+    ] {
+        let mut authority = n7_execution_authority();
+        match mutation {
+            "schema" => authority.schema_version = "drifted".into(),
+            "identity" => authority.authority_id.clear(),
+            "prepared-run" => authority.prepared_run_digest = digest(ONE_DIGEST),
+            "input" => authority.preparation_input_digest = digest(ZERO_DIGEST),
+            "request" => authority.preparation_request_digest = digest(ONE_DIGEST),
+            "base" => authority.base_commit = "0".repeat(40),
+            "workspace-identity" => authority.workspace_identity_digest = digest(ZERO_DIGEST),
+            "workspace-digest" => authority.workspace_digest = digest(ONE_DIGEST),
+            "workspace-root" => authority.workspace_root = PathBuf::from("other"),
+            "requested-authority" => authority.requested_authority_digest = digest(ZERO_DIGEST),
+            "write-scope" => authority.write_scope_digest = digest(ONE_DIGEST),
+            "pre-preparation" => authority.issued_at = expectation.prepared_at,
+            "interval" => authority.expires_at = authority.issued_at,
+            "provider-allowance" => authority.provider_process_allowance = 2,
+            _ => unreachable!(),
+        }
+        assert!(
+            validate_n7_execution_authority_identity(&authority, &expectation).is_err(),
+            "accepted {mutation} drift"
+        );
+    }
+}
+
+#[test]
+fn n7_write_scope_digest_changes_with_requested_workspace_scope() {
+    let request = request();
+    let original = n7_requested_write_scope_digest(&request).expect("write scope");
+    let mut changed = request;
+    changed.authority.allowed_roots = vec![PathBuf::from("/tmp/other")];
+    assert_ne!(
+        n7_requested_write_scope_digest(&changed).expect("changed write scope"),
+        original
+    );
+}
+
 fn assert_round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq,
@@ -213,6 +398,7 @@ fn every_public_contract_round_trips_through_strict_json() {
     assert_round_trip(&verifier_report());
     assert_round_trip(&artifact_manifest());
     assert_round_trip(&terminal_readback());
+    assert_round_trip(&n7_execution_authority());
 }
 
 #[test]
@@ -269,6 +455,47 @@ fn stale_authority_is_rejected() {
 }
 
 #[test]
+fn intake_identity_accepts_expired_authority_for_read_only_inspection() {
+    let request = request();
+    let expectation = IntakeExpectation {
+        run_id: request.run_id.clone(),
+        source: request.source.clone(),
+        workspace: request.workspace.clone(),
+        now: request.authority.expires_at,
+    };
+
+    validate_intake_identity(&request, &expectation).expect("expired identity remains inspectable");
+    assert_eq!(
+        validate_authority_current(&request.authority, expectation.now),
+        Err(ao_next_core::contracts::IntakeError::AuthorityNotCurrent)
+    );
+}
+
+#[test]
+fn intake_identity_keeps_schema_root_and_interval_checks_after_expiry() {
+    let expectation = IntakeExpectation {
+        run_id: "run-01".into(),
+        source: source(),
+        workspace: workspace(),
+        now: timestamp("2026-08-07T00:00:00Z"),
+    };
+    for mutation in ["request-schema", "authority-schema", "root", "interval"] {
+        let mut request = request();
+        match mutation {
+            "request-schema" => request.schema_version = "drifted".into(),
+            "authority-schema" => request.authority.schema_version = "drifted".into(),
+            "root" => request.authority.allowed_roots.clear(),
+            "interval" => request.authority.issued_at = request.authority.expires_at,
+            _ => unreachable!(),
+        }
+        assert!(
+            validate_intake_identity(&request, &expectation).is_err(),
+            "identity accepted {mutation} drift"
+        );
+    }
+}
+
+#[test]
 fn source_and_workspace_identity_drift_are_rejected() {
     let request = request();
     let mut changed_source = source();
@@ -316,6 +543,10 @@ fn checked_in_contract_schemas_match_generated_types() {
     assert!(
         generated_contracts.contains_key("command-verifier-profile-v1.schema.json"),
         "live command verifier contract must be checked in"
+    );
+    assert!(
+        generated_contracts.contains_key("prepared-run-v1.schema.json"),
+        "prepared-run receipt contract must be checked in"
     );
     for (file_name, generated) in generated_contracts {
         let path = repository_root.join("docs/contracts").join(file_name);

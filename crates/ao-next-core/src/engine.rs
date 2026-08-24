@@ -1,6 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +9,9 @@ use crate::adapter::{
     AdapterAction, AdapterIdentity, ControlMutation, EffectObservation, RuntimeAdapter, TokenUsage,
     TurnContext,
 };
-use crate::contracts::{Digest, RunRequest, RunState};
+use crate::contracts::{
+    Digest, N7ExecutionAuthority, RunRequest, RunState, validate_n7_execution_authority_current,
+};
 use crate::effects::EffectBroker;
 use crate::recovery::{CheckpointJournal, JournalEffectState};
 use crate::strict_json::canonical_digest;
@@ -92,7 +95,7 @@ where
         A: RuntimeAdapter,
         V: EngineVerifier,
     {
-        self.run_inner(request, adapter, verifier, None)
+        self.run_inner(request, adapter, verifier, None, None)
     }
 
     /// Runs one worker through a request-bound append-only execution journal.
@@ -109,7 +112,30 @@ where
         A: RuntimeAdapter,
         V: EngineVerifier,
     {
-        self.run_inner(request, adapter, verifier, Some(journal))
+        self.run_inner(request, adapter, verifier, Some(journal), None)
+    }
+
+    /// Runs one durable N7 worker and rechecks its separately issued authority
+    /// immediately before every fresh effect intent.
+    pub fn run_durable_n7<A, V>(
+        &self,
+        request: &RunRequest,
+        adapter: &mut A,
+        verifier: &mut V,
+        journal: &CheckpointJournal,
+        execution_authority: &N7ExecutionAuthority,
+    ) -> RunOutcome
+    where
+        A: RuntimeAdapter,
+        V: EngineVerifier,
+    {
+        self.run_inner(
+            request,
+            adapter,
+            verifier,
+            Some(journal),
+            Some(execution_authority),
+        )
     }
 
     #[allow(
@@ -122,6 +148,7 @@ where
         adapter: &mut A,
         verifier: &mut V,
         journal: Option<&CheckpointJournal>,
+        execution_authority: Option<&N7ExecutionAuthority>,
     ) -> RunOutcome
     where
         A: RuntimeAdapter,
@@ -242,6 +269,27 @@ where
                     );
                 }
             };
+            if let Some(journal) = journal {
+                let provider_result = journal.provider_state(request).and_then(|state| {
+                    if state.prepared_run_digest.is_some() {
+                        journal.record_adapter_turn_normalized(request, &canonical_digest(&turn)?)
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(error) = provider_result {
+                    return transition_and_finish(
+                        lifecycle,
+                        identity,
+                        metrics,
+                        events,
+                        verifier_report_digest,
+                        RunState::Failed,
+                        "journal_failure",
+                        &error.to_string(),
+                    );
+                }
+            }
             metrics.turns = metrics.turns.saturating_add(1);
             if metrics.usage.checked_accumulate(&turn.usage).is_none() {
                 return transition_and_finish(
@@ -336,6 +384,39 @@ where
                 );
             }
 
+            let mut journal_effect_states = BTreeMap::new();
+            if let Some(journal) = journal {
+                let effects = turn
+                    .actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        AdapterAction::Effect(effect) => Some(effect.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let states = match journal.effect_states(request, &effects) {
+                    Ok(states) => states,
+                    Err(error) => {
+                        return transition_and_finish(
+                            lifecycle,
+                            identity,
+                            metrics,
+                            events,
+                            verifier_report_digest,
+                            RunState::Failed,
+                            "journal_failure",
+                            &error.to_string(),
+                        );
+                    }
+                };
+                journal_effect_states.extend(
+                    effects
+                        .into_iter()
+                        .zip(states)
+                        .map(|(effect, state)| (effect.effect_id, state)),
+                );
+            }
+
             for action in turn.actions {
                 match action {
                     AdapterAction::Effect(effect) => {
@@ -375,10 +456,10 @@ where
                                 "adapter repeated an effect identity",
                             );
                         }
-                        if let Some(journal) = journal {
-                            match journal.effect_state(request, &effect) {
-                                Ok(JournalEffectState::Fresh) => {}
-                                Ok(JournalEffectState::Unknown) => {
+                        if journal.is_some() {
+                            match journal_effect_states.remove(&effect.effect_id) {
+                                Some(JournalEffectState::Fresh) => {}
+                                Some(JournalEffectState::Unknown) => {
                                     return transition_and_finish(
                                         lifecycle,
                                         identity,
@@ -390,7 +471,7 @@ where
                                         "durable effect intent exists without durable completion; automatic retry is forbidden",
                                     );
                                 }
-                                Ok(JournalEffectState::Completed(observation)) => {
+                                Some(JournalEffectState::Completed(observation)) => {
                                     effect_observations.push(observation.clone());
                                     push_event(
                                         &mut events,
@@ -400,7 +481,7 @@ where
                                     );
                                     continue;
                                 }
-                                Err(error) => {
+                                None => {
                                     return transition_and_finish(
                                         lifecycle,
                                         identity,
@@ -409,13 +490,28 @@ where
                                         verifier_report_digest,
                                         RunState::Failed,
                                         "journal_failure",
-                                        &error.to_string(),
+                                        "journal effect set changed during execution",
                                     );
                                 }
                             }
                         }
                         match self.broker.authorize(&effect, &request.authority) {
                             Ok(authorized) => {
+                                if execution_authority.is_some_and(|authority| {
+                                    validate_n7_execution_authority_current(authority, Utc::now())
+                                        .is_err()
+                                }) {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Denied,
+                                        "execution_authority_not_current",
+                                        "N7 execution authority expired before durable effect intent",
+                                    );
+                                }
                                 if let Some(journal) = journal
                                     && let Err(error) =
                                         journal.record_effect_intent(request, &effect)

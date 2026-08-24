@@ -8,8 +8,8 @@ use ao_next_core::adapter::{
 };
 use ao_next_core::contracts::{
     AuthorityEnvelope, Capability, Digest, EffectKind, EffectRequest, ExternalEffectPolicy,
-    ModelProfile, NetworkPolicy, RunLimits, RunRequest, RunState, SourceIdentity, VerifierProfile,
-    WorkspaceIdentity,
+    ModelProfile, N7ExecutionAuthority, NetworkPolicy, RunLimits, RunRequest, RunState,
+    SourceIdentity, VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::effects::{
     AuthorizedEffect, EffectBroker, EffectBrokerError, EffectOutput, LocalEffectBroker,
@@ -87,6 +87,27 @@ fn request(root: &Path) -> RunRequest {
             max_output_bytes: 4_096,
             max_tokens: 1_000,
         },
+    }
+}
+
+fn expired_n7_execution_authority(root: &Path) -> N7ExecutionAuthority {
+    let now = Utc::now();
+    N7ExecutionAuthority {
+        schema_version: "ao.next.n7-execution-authority.v1".into(),
+        authority_id: "expired-authority".into(),
+        issued_by: "operator".into(),
+        prepared_run_digest: digest_bytes(b"prepared"),
+        preparation_input_digest: digest_bytes(b"input"),
+        preparation_request_digest: digest_bytes(b"request"),
+        base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        workspace_identity_digest: digest_bytes(b"workspace-identity"),
+        workspace_digest: digest_bytes(b"workspace"),
+        workspace_root: root.to_path_buf(),
+        requested_authority_digest: digest_bytes(b"requested-authority"),
+        write_scope_digest: digest_bytes(b"write-scope"),
+        issued_at: now - chrono::Duration::hours(2),
+        expires_at: now - chrono::Duration::hours(1),
+        provider_process_allowance: 1,
     }
 }
 
@@ -511,6 +532,67 @@ fn durable_intent_without_completion_is_unknown_and_never_retried() {
 }
 
 #[test]
+fn n7_rechecks_execution_authority_immediately_before_effect_intent() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let target = workspace.path().join("product.txt");
+    let mut request = request(workspace.path());
+    request.limits.max_turns = 1;
+    request
+        .authority
+        .capabilities
+        .insert(Capability::WriteWorkspace);
+    let effect = EffectRequest {
+        effect_id: "create-product".into(),
+        run_id: request.run_id.clone(),
+        kind: EffectKind::WriteFile,
+        program: None,
+        args: Vec::new(),
+        paths: vec!["product.txt".into()],
+        timeout_ms: 0,
+        input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+        content: Some("product\n".into()),
+    };
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+    let mut adapter =
+        ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Effect(effect)]))]);
+    let mut verifier = ScriptedVerifier::new([]);
+
+    let outcome = DirectEngine::new(&broker).run_durable_n7(
+        &request,
+        &mut adapter,
+        &mut verifier,
+        &journal,
+        &expired_n7_execution_authority(workspace.path()),
+    );
+
+    assert_eq!(outcome.terminal_state, RunState::Denied);
+    assert_eq!(
+        outcome.failure_code.as_deref(),
+        Some("execution_authority_not_current")
+    );
+    assert!(!target.exists());
+    assert!(matches!(
+        journal.effect_state(
+            &request,
+            &EffectRequest {
+                effect_id: "create-product".into(),
+                run_id: request.run_id.clone(),
+                kind: EffectKind::WriteFile,
+                program: None,
+                args: Vec::new(),
+                paths: vec!["product.txt".into()],
+                timeout_ms: 0,
+                input_digest: digest_bytes(b"ao.next.file-does-not-exist.v1"),
+                content: Some("product\n".into()),
+            }
+        ),
+        Ok(ao_next_core::recovery::JournalEffectState::Fresh)
+    ));
+}
+
+#[test]
 fn durable_completion_is_reused_without_executing_the_effect_again() {
     let workspace = TempDir::new().expect("workspace");
     let recovery = TempDir::new().expect("recovery");
@@ -555,6 +637,86 @@ fn durable_completion_is_reused_without_executing_the_effect_again() {
     }
 
     assert_eq!(std::fs::read(target).expect("product"), b"product\n");
+}
+
+#[test]
+fn durable_provider_turn_is_normalized_before_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(workspace.path());
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+    let prepared = digest_bytes(b"prepared run");
+    let invocation = digest_bytes(b"provider invocation");
+    let raw = digest_bytes(b"provider output");
+    let index = digest_bytes(b"capture index");
+    journal
+        .record_provider_request_intent(&request, &prepared, &digest_bytes(b"authority"))
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &invocation)
+        .expect("provider started");
+    journal
+        .record_provider_output_retained(&request, &raw)
+        .expect("provider output retained");
+    journal
+        .record_provider_capture_published(&request, &index)
+        .expect("capture published");
+    journal
+        .record_provider_capture_verified(&request, &index)
+        .expect("capture verified");
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Verify]))]);
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome =
+        DirectEngine::new(&broker).run_durable(&request, &mut adapter, &mut verifier, &journal);
+
+    assert_eq!(outcome.terminal_state, RunState::Passed);
+    let state = journal.provider_state(&request).expect("provider state");
+    assert!(state.adapter_turn_digest.is_some());
+}
+
+#[test]
+fn durable_provider_turn_journal_failure_stops_before_verification() {
+    let workspace = TempDir::new().expect("workspace");
+    let recovery = TempDir::new().expect("recovery");
+    let request = request(workspace.path());
+    let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
+    let index = digest_bytes(b"capture index");
+    journal
+        .record_provider_request_intent(
+            &request,
+            &digest_bytes(b"prepared run"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+    journal
+        .record_provider_process_started(&request, &digest_bytes(b"provider invocation"))
+        .expect("provider started");
+    journal
+        .record_provider_output_retained(&request, &digest_bytes(b"provider output"))
+        .expect("provider output retained");
+    journal
+        .record_provider_capture_published(&request, &index)
+        .expect("capture published");
+    journal
+        .record_provider_capture_verified(&request, &index)
+        .expect("capture verified");
+    std::fs::write(
+        recovery.path().join("execution-events/invalid.json"),
+        b"invalid",
+    )
+    .expect("invalid journal event");
+    let broker = LocalEffectBroker::new(1_000, 4_096, 4_096);
+    let mut adapter = ScriptedAdapter::new(identity(), [Ok(turn(vec![AdapterAction::Verify]))]);
+    let mut verifier = ScriptedVerifier::new([verification(true)]);
+
+    let outcome =
+        DirectEngine::new(&broker).run_durable(&request, &mut adapter, &mut verifier, &journal);
+
+    assert_eq!(outcome.terminal_state, RunState::Failed);
+    assert_eq!(outcome.failure_code.as_deref(), Some("journal_failure"));
+    assert_eq!(verifier.calls, 0);
 }
 
 #[test]

@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "base_commit": { "pattern": "^[0-9a-f]{40}$", "type": "string" },
+    "branch": { "type": "string" },
+    "common_directory": { "type": "string" },
+    "control_digest": { "type": "string" },
+    "expires_at": { "format": "date-time", "type": "string" },
+    "index_digest": { "type": "string" },
+    "input_digest": { "type": "string" },
+    "journal_identity_digest": { "type": "string" },
+    "prepared_at": { "format": "date-time", "type": "string" },
+    "provider_calls": { "const": 0, "format": "uint32", "minimum": 0.0, "type": "integer" },
+    "repository_root": { "type": "string" },
+    "request_digest": { "type": "string" },
+    "run_id": { "type": "string" },
+    "safe_to_execute": { "const": false, "type": "boolean" },
+    "schema_version": { "type": "string" },
+    "workspace_digest": { "type": "string" }
+  },
+  "required": ["base_commit", "branch", "common_directory", "control_digest", "expires_at", "index_digest", "input_digest", "journal_identity_digest", "prepared_at", "provider_calls", "repository_root", "request_digest", "run_id", "safe_to_execute", "schema_version", "workspace_digest"],
+  "title": "PreparedRunReceipt",
+  "type": "object"
+}

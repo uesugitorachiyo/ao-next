@@ -54,8 +54,22 @@ jobs:
         with:
           toolchain: 1.95.0
 
+      - name: Validate Windows PowerShell 5.1 recovery harness
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\cross-platform\qualify-recovery.ps1 -SelfTest
+
       - name: Test
         run: cargo test --locked --workspace
+
+      - name: Test capture store
+        run: cargo test -p ao-next-core --test capture_store -- --nocapture
+
+      - name: Test provider recovery evidence
+        run: cargo test -p ao-next-core --test evidence_recovery provider_ -- --nocapture
+
+      - name: Test recover-live
+        run: cargo test -p ao-next-cli --test cli recover_live -- --nocapture
 
       - name: Build release
         run: cargo build --locked --workspace --release

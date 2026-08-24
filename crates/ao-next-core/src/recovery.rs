@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1101,8 +1103,8 @@ impl CheckpointJournal {
             .strip_prefix("sha256:")
             .ok_or(RecoveryError::EventDigestMismatch)?;
         let path = directory.join(format!("{:020}-{digest_hex}.json", event.sequence));
-        durable_create_new(&path, &bytes)?;
-        self.register_event_path(&path)
+        let opened = self.create_event_path(&path, &bytes)?;
+        self.register_event_path(&path, opened)
     }
 
     fn load_execution_events(&self) -> Result<Vec<JournalEvent>, RecoveryError> {
@@ -1226,11 +1228,40 @@ impl CheckpointJournal {
         Ok(())
     }
 
-    fn register_event_path(&self, path: &Path) -> Result<(), RecoveryError> {
+    fn create_event_path(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<OpenedJournalPath, RecoveryError> {
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let events = binding
+                .lock()
+                .map_err(|error| RecoveryError::Io(error.to_string()))?
+                .events
+                .clone();
+            let name = path
+                .file_name()
+                .ok_or_else(|| RecoveryError::UnsafePath(path.to_path_buf()))?;
+            return create_existing_event_file(
+                &events,
+                path.parent()
+                    .ok_or_else(|| RecoveryError::UnsafePath(path.to_path_buf()))?,
+                name,
+                bytes,
+            );
+        }
+        durable_create_new(path, bytes)?;
+        open_journal_path(path, false)
+    }
+
+    fn register_event_path(
+        &self,
+        path: &Path,
+        opened: OpenedJournalPath,
+    ) -> Result<(), RecoveryError> {
         let JournalMode::ExistingOnly(binding) = &self.mode else {
             return Ok(());
         };
-        let opened = open_journal_path(path, false)?;
         let mut binding = binding
             .lock()
             .map_err(|error| RecoveryError::Io(error.to_string()))?;
@@ -1454,6 +1485,70 @@ fn read_journal_regular(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, Reco
     read_opened_regular(&open_journal_path(path, false)?, maximum_bytes)
 }
 
+#[cfg(all(test, unix))]
+std::thread_local! {
+    static BEFORE_EXISTING_APPEND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, unix))]
+fn set_existing_append_test_hook(hook: Box<dyn FnOnce()>) {
+    BEFORE_EXISTING_APPEND.with(|slot| {
+        assert!(slot.borrow_mut().replace(hook).is_none());
+    });
+}
+
+#[cfg(all(test, unix))]
+fn run_existing_append_test_hook() {
+    BEFORE_EXISTING_APPEND.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(all(not(test), unix))]
+const fn run_existing_append_test_hook() {}
+
+#[cfg(unix)]
+fn create_existing_event_file(
+    retained: &OpenedJournalPath,
+    public_directory: &Path,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<OpenedJournalPath, RecoveryError> {
+    require_same_journal_path(public_directory, true, retained)?;
+    run_existing_append_test_hook();
+    let mut file = rustix::fs::openat(
+        retained.anchor.as_ref(),
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    let opened = opened_unix_journal_path(file, &public_directory.join(name), false)?;
+    require_same_journal_path(public_directory, true, retained)?;
+    Ok(opened)
+}
+
+#[cfg(not(unix))]
+fn create_existing_event_file(
+    retained: &OpenedJournalPath,
+    public_directory: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<OpenedJournalPath, RecoveryError> {
+    require_same_journal_path(public_directory, true, retained)?;
+    let path = public_directory.join(name);
+    durable_create_new(&path, bytes)?;
+    let opened = open_journal_path(&path, false)?;
+    require_same_journal_path(public_directory, true, retained)?;
+    Ok(opened)
+}
+
 #[cfg(unix)]
 fn open_journal_path(path: &Path, directory: bool) -> Result<OpenedJournalPath, RecoveryError> {
     let mut flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
@@ -1463,6 +1558,15 @@ fn open_journal_path(path: &Path, directory: bool) -> Result<OpenedJournalPath, 
     let file = rustix::fs::open(path, flags, Mode::empty())
         .map(File::from)
         .map_err(std::io::Error::from)?;
+    opened_unix_journal_path(file, path, directory)
+}
+
+#[cfg(unix)]
+fn opened_unix_journal_path(
+    file: File,
+    path: &Path,
+    directory: bool,
+) -> Result<OpenedJournalPath, RecoveryError> {
     let metadata = file.metadata()?;
     if metadata.file_type().is_symlink()
         || (directory && !metadata.is_dir())
@@ -1554,5 +1658,74 @@ mod reparse_tests {
     fn windows_reparse_attribute_is_unsafe() {
         assert!(super::windows_reparse_point(0x400));
         assert!(!super::windows_reparse_point(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_only_append_uses_retained_directory_handle() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::TempDir::new().expect("root");
+        let events = root.path().join("execution-events");
+        std::fs::create_dir(&events).expect("events");
+        let retained = super::open_journal_path(&events, true).expect("retained events");
+        let name = OsStr::new(
+            "00000000000000000000-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+
+        let opened = super::create_existing_event_file(&retained, &events, name, b"event")
+            .expect("anchored append");
+
+        let path = events.join(name);
+        assert_eq!(std::fs::read(&path).expect("event bytes"), b"event");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("event metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            opened.fingerprint,
+            super::open_journal_path(&path, false)
+                .expect("event path")
+                .fingerprint
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_only_append_fails_when_public_directory_is_replaced_before_open() {
+        use std::ffi::OsStr;
+
+        let root = tempfile::TempDir::new().expect("root");
+        let events = root.path().join("execution-events");
+        let original = root.path().join("retained-events");
+        std::fs::create_dir(&events).expect("events");
+        let retained = super::open_journal_path(&events, true).expect("retained events");
+        let name = OsStr::new(
+            "00000000000000000000-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+        );
+        let hook_events = events.clone();
+        let hook_original = original.clone();
+        super::set_existing_append_test_hook(Box::new(move || {
+            std::fs::rename(&hook_events, &hook_original).expect("move retained directory");
+            std::fs::create_dir(&hook_events).expect("replacement directory");
+        }));
+
+        assert!(
+            super::create_existing_event_file(&retained, &events, name, b"event").is_err(),
+            "replaced public locator authorized append"
+        );
+        assert_eq!(
+            std::fs::read(original.join(name)).expect("retained event bytes"),
+            b"event"
+        );
+        assert!(
+            !events.join(name).exists(),
+            "event was written through substitute directory"
+        );
     }
 }

@@ -988,6 +988,13 @@ fn write_n7_execution_authority(
     path
 }
 
+fn n7_execution_authority_digest(path: &Path) -> Digest {
+    let authority: N7ExecutionAuthority =
+        serde_json::from_slice(&std::fs::read(path).expect("authority bytes"))
+            .expect("authority JSON");
+    canonical_digest(&authority).expect("authority digest")
+}
+
 #[cfg(unix)]
 fn fake_provider_bin(fixture: &PrepareLiveFixture) -> PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1526,6 +1533,7 @@ fn retained_recovery_fixture_for_path(expired: bool, effect_path: &str) -> Recov
         .record_provider_request_intent(
             &request,
             &canonical_digest(&receipt).expect("receipt digest"),
+            &n7_execution_authority_digest(&authority_path),
         )
         .expect("provider intent");
     journal
@@ -1601,6 +1609,12 @@ fn journal_event_kind_count(root: &Path, kind: &str) -> usize {
             serde_json::from_slice::<serde_json::Value>(&bytes).expect("event JSON")
         })
         .filter(|event| event["kind"]["kind"] == kind)
+        .count()
+}
+
+fn journal_event_count(root: &Path) -> usize {
+    std::fs::read_dir(root.join("execution-events"))
+        .expect("execution events")
         .count()
 }
 
@@ -1881,6 +1895,8 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     );
     let uninterrupted: serde_json::Value =
         serde_json::from_slice(&uninterrupted_output.stdout).expect("uninterrupted terminal");
+    let authority_path = receipt_path.with_extension("authority.json");
+    let execution_authority_digest = n7_execution_authority_digest(&authority_path);
     let capture_root = capture_root(&live);
     let journal_root = journal_root(&capture_root);
     let invocation_digest = journal_provider_invocation_digest(&journal_root);
@@ -1902,13 +1918,14 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     let request: RunRequest =
         serde_json::from_value(live.input["request"].clone()).expect("request");
     let receipt: PreparedRunReceipt =
-        serde_json::from_slice(&std::fs::read(&recovery_receipt).expect("receipt"))
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt"))
             .expect("receipt JSON");
     let journal = CheckpointJournal::new(&journal_root, 128 * 1024).expect("journal");
     journal
         .record_provider_request_intent(
             &request,
             &canonical_digest(&receipt).expect("receipt digest"),
+            &n7_execution_authority_digest(&authority_path),
         )
         .expect("provider intent");
     journal
@@ -1924,10 +1941,8 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     };
     write_retained_capture(&capture_root, &retained_output, &index_bytes, true);
     assert_eq!(normalized_turn, recovery_output(run_id).1);
-    let authority_path = write_n7_execution_authority(&live, &recovery_receipt, false);
-
     let fixture = RecoverLiveFixture {
-        receipt_path: recovery_receipt.clone(),
+        receipt_path: receipt_path.clone(),
         authority_path,
         index_digest: canonical_digest(
             &serde_json::from_slice::<serde_json::Value>(&index_bytes).expect("index JSON"),
@@ -1939,7 +1954,7 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
         live,
     };
     let setup_provider_process_count = journal_provider_start_count(&fixture.journal_root);
-    let recovered = run_recover_live(&fixture, &recovery_receipt, None);
+    let recovered = run_recover_live(&fixture, &receipt_path, None);
     assert_eq!(
         recovered.status.code(),
         Some(0),
@@ -1962,6 +1977,14 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     assert_eq!(terminal["terminal_state"], "passed");
     let final_provider_process_count = journal_provider_start_count(&fixture.journal_root);
     assert_eq!(final_provider_process_count, 1);
+    assert_eq!(
+        terminal["n7_execution_authority_digest"],
+        uninterrupted["n7_execution_authority_digest"]
+    );
+    assert_eq!(
+        terminal["n7_execution_authority_digest"],
+        execution_authority_digest.as_str()
+    );
     assert_eq!(terminal["record_digest"], uninterrupted["record_digest"]);
     if let Some(evidence_root) = std::env::var_os("AO_NEXT_RECOVERY_EVIDENCE_ROOT") {
         let source_head = Command::new("git")
@@ -2023,6 +2046,10 @@ fn recover_live_handles_crashes_after_retained_event_and_after_index_publish() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the orphan-terminal test covers both exact reuse and one-field mutation rejection"
+)]
 fn recover_live_reuses_orphan_terminal_bytes_and_appends_event() {
     let live = prepare_live_fixture();
     let receipt_path = live
@@ -2063,7 +2090,7 @@ fn recover_live_reuses_orphan_terminal_bytes_and_appends_event() {
         0
     );
 
-    let authority_path = write_n7_execution_authority(&live, &receipt_path, false);
+    let authority_path = receipt_path.with_extension("authority.json");
     let fixture = RecoverLiveFixture {
         live,
         receipt_path: receipt_path.clone(),
@@ -2108,6 +2135,85 @@ fn recover_live_reuses_orphan_terminal_bytes_and_appends_event() {
         std::fs::read(&fixture.live.provider_marker).expect("provider marker"),
         b"one"
     );
+
+    remove_journal_event(&fixture.journal_root, "terminal_published");
+    let mut mutated_terminal = original_terminal.clone();
+    assert!(
+        mutated_terminal["n7_execution_authority_digest"].is_string(),
+        "N7 terminal omitted the execution-authority digest"
+    );
+    mutated_terminal["n7_execution_authority_digest"] = serde_json::json!(ZERO_DIGEST);
+    let mutated_bytes = canonical_json_bytes(&mutated_terminal).expect("mutated terminal bytes");
+    let mutated_digest = digest_bytes(&mutated_bytes);
+    let mutated_hex = mutated_digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("terminal digest prefix");
+    std::fs::remove_file(&terminal_paths[0]).expect("remove original terminal");
+    std::fs::write(
+        fixture
+            .journal_root
+            .join(format!("terminal-{mutated_hex}.json")),
+        mutated_bytes,
+    )
+    .expect("write mutated orphan terminal");
+    let events_before = journal_event_count(&fixture.journal_root);
+
+    let rejected = run_recover_live(&fixture, &receipt_path, None);
+
+    assert_json_error(&rejected, 7, "evidence_failure");
+    assert_eq!(journal_event_count(&fixture.journal_root), events_before);
+    assert_eq!(
+        journal_event_kind_count(&fixture.journal_root, "terminal_published"),
+        0
+    );
+}
+
+#[test]
+fn recover_live_rejects_substituted_execution_authority_document() {
+    let mut fixture = retained_recovery_fixture(false);
+    let receipt: PreparedRunReceipt =
+        serde_json::from_slice(&std::fs::read(&fixture.receipt_path).expect("receipt bytes"))
+            .expect("receipt JSON");
+    let authority_a: N7ExecutionAuthority =
+        serde_json::from_slice(&std::fs::read(&fixture.authority_path).expect("authority A bytes"))
+            .expect("authority A JSON");
+    let mut authority_b = authority_a.clone();
+    authority_b.authority_id = "n7-test-authority-02".into();
+    authority_b.issued_by = "second-operator".into();
+    authority_b.issued_at = receipt.prepared_at + Duration::nanoseconds(1);
+    authority_b.expires_at = Utc::now() + Duration::hours(2);
+    assert_ne!(
+        canonical_digest(&authority_a).expect("authority A digest"),
+        canonical_digest(&authority_b).expect("authority B digest")
+    );
+    let substituted = fixture
+        .authority_path
+        .with_file_name("substituted-authority.json");
+    std::fs::write(
+        &substituted,
+        canonical_json_bytes(&authority_b).expect("authority B bytes"),
+    )
+    .expect("authority B write");
+    fixture.authority_path = substituted;
+    let events_before = journal_event_count(&fixture.journal_root);
+
+    let output = run_recover_live(&fixture, &fixture.receipt_path, None);
+
+    assert_json_error(&output, 3, "invalid_input");
+    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+    assert_eq!(
+        std::fs::read(&fixture.live.provider_marker).expect("marker"),
+        b"one"
+    );
+    assert_eq!(journal_event_count(&fixture.journal_root), events_before);
+    assert!(
+        fixture
+            .capture_root
+            .join("capture-index.json.incomplete")
+            .is_file(),
+        "capture repair happened before authority comparison"
+    );
 }
 
 #[test]
@@ -2147,18 +2253,19 @@ fn recover_live_rejects_unknown_provider_outcome() {
     let receipt: PreparedRunReceipt =
         serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt"))
             .expect("receipt JSON");
+    let authority_path = write_n7_execution_authority(&live, &receipt_path, false);
     let journal = CheckpointJournal::new(&journal_root, 128 * 1024).expect("journal");
     journal
         .record_provider_request_intent(
             &request,
             &canonical_digest(&receipt).expect("receipt digest"),
+            &n7_execution_authority_digest(&authority_path),
         )
         .expect("provider intent");
     journal
         .record_provider_process_started(&request, &digest(ONE_DIGEST))
         .expect("provider start");
     std::fs::write(&live.provider_marker, b"one").expect("provider marker");
-    let authority_path = write_n7_execution_authority(&live, &receipt_path, false);
     let fixture = RecoverLiveFixture {
         live,
         receipt_path: receipt_path.clone(),
@@ -2772,7 +2879,11 @@ fn prepare_live_rejects_any_preexisting_journal_event() {
         .max(64 * 1024);
     let journal = CheckpointJournal::new(journal_root, maximum_bytes).expect("journal");
     journal
-        .record_provider_request_intent(&request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("provider event");
     let receipt_path = fixture.input_path.with_file_name("eventful-journal.json");
 

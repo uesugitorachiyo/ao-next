@@ -650,7 +650,7 @@ fn durable_provider_turn_is_normalized_before_verification() {
     let raw = digest_bytes(b"provider output");
     let index = digest_bytes(b"capture index");
     journal
-        .record_provider_request_intent(&request, &prepared)
+        .record_provider_request_intent(&request, &prepared, &digest_bytes(b"authority"))
         .expect("provider intent");
     journal
         .record_provider_process_started(&request, &invocation)
@@ -684,7 +684,11 @@ fn durable_provider_turn_journal_failure_stops_before_verification() {
     let journal = CheckpointJournal::new(recovery.path(), 16 * 1024).expect("journal");
     let index = digest_bytes(b"capture index");
     journal
-        .record_provider_request_intent(&request, &digest_bytes(b"prepared run"))
+        .record_provider_request_intent(
+            &request,
+            &digest_bytes(b"prepared run"),
+            &digest_bytes(b"authority"),
+        )
         .expect("provider intent");
     journal
         .record_provider_process_started(&request, &digest_bytes(b"provider invocation"))

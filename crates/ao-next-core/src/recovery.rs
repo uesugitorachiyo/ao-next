@@ -50,6 +50,7 @@ impl CheckpointIdentity {
 pub enum JournalEventKind {
     ProviderRequestIntent {
         prepared_run_digest: Digest,
+        execution_authority_digest: Digest,
     },
     ProviderProcessStarted {
         invocation_digest: Digest,
@@ -123,6 +124,7 @@ pub enum JournalEffectState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderJournalState {
     pub prepared_run_digest: Option<Digest>,
+    pub execution_authority_digest: Option<Digest>,
     pub provider_process_started: bool,
     pub invocation_digest: Option<Digest>,
     pub raw_capture_digest: Option<Digest>,
@@ -206,6 +208,7 @@ impl JournalLifecycle {
 fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycle, RecoveryError> {
     let mut state = ProviderJournalState {
         prepared_run_digest: None,
+        execution_authority_digest: None,
         provider_process_started: false,
         invocation_digest: None,
         raw_capture_digest: None,
@@ -231,8 +234,10 @@ fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycl
         match &event.kind {
             JournalEventKind::ProviderRequestIntent {
                 prepared_run_digest,
+                execution_authority_digest,
             } if !effect_seen && !verification_seen && provider_step == 0 => {
                 state.prepared_run_digest = Some(prepared_run_digest.clone());
+                state.execution_authority_digest = Some(execution_authority_digest.clone());
                 provider_step = 1;
             }
             JournalEventKind::ProviderProcessStarted { invocation_digest }
@@ -495,10 +500,12 @@ impl CheckpointJournal {
         &self,
         request: &RunRequest,
         prepared: &Digest,
+        execution_authority: &Digest,
     ) -> Result<(), RecoveryError> {
         self.provider_may_start(request)?;
         self.append_execution_event(JournalEventKind::ProviderRequestIntent {
             prepared_run_digest: prepared.clone(),
+            execution_authority_digest: execution_authority.clone(),
         })
     }
 

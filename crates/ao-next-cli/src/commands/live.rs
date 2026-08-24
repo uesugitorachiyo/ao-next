@@ -207,6 +207,7 @@ struct LiveRunRecord {
     capture_digests: Vec<Digest>,
     raw_capture_index_digest: Digest,
     verifier_report_digest: Option<Digest>,
+    n7_execution_authority_digest: Option<Digest>,
     git_workspace: GitWorkspaceIdentity,
     ao2_control_diagnostics: Vec<serde_json::Value>,
     native_effect_observations: Vec<EffectObservation>,
@@ -221,6 +222,7 @@ fn live_record_digest(
     capture_digests: &[Digest],
     raw_capture_index_digest: &Digest,
     verifier_report_digest: Option<&Digest>,
+    n7_execution_authority_digest: Option<&Digest>,
     git_workspace: &GitWorkspaceIdentity,
     ao2_control_diagnostics: &[serde_json::Value],
     native_effect_observations: &[EffectObservation],
@@ -246,6 +248,7 @@ fn live_record_digest(
         capture_digests,
         raw_capture_index_digest,
         verifier_report_digest,
+        n7_execution_authority_digest,
         git_workspace,
         ao2_control_diagnostics,
         native_effect_observations,
@@ -784,6 +787,7 @@ struct CaptureFirstRunner<'a, R> {
     request: &'a RunRequest,
     prepared_run_digest: Digest,
     execution_authority: Option<&'a N7ExecutionAuthority>,
+    execution_authority_digest: Option<&'a Digest>,
 }
 
 pub(super) struct PreparedN7Context {
@@ -840,10 +844,17 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
             ));
         }
         if let Some(journal) = self.journal {
+            let execution_authority_digest = self.execution_authority_digest.ok_or_else(|| {
+                InvocationError::Io("N7 execution authority digest is missing".into())
+            })?;
             journal
                 .provider_may_start(self.request)
                 .and_then(|()| {
-                    journal.record_provider_request_intent(self.request, &self.prepared_run_digest)
+                    journal.record_provider_request_intent(
+                        self.request,
+                        &self.prepared_run_digest,
+                        execution_authority_digest,
+                    )
                 })
                 .and_then(|()| {
                     journal
@@ -1084,7 +1095,17 @@ fn validate_prepared_run(
 ) -> Result<PreparedN7Context, CommandFailure> {
     let (git_workspace, prepared_run_digest) =
         validate_prepared_run_with_mode(input_path, input_bytes, input, receipt, now, true)?;
-    validate_execution_authority(input, receipt, &prepared_run_digest, &authority, now, true)?;
+    let execution_authority_digest = canonical_digest(&authority)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    validate_execution_authority(
+        input,
+        receipt,
+        &prepared_run_digest,
+        &authority,
+        &execution_authority_digest,
+        now,
+        true,
+    )?;
     Ok(PreparedN7Context {
         git_workspace,
         prepared_run_digest,
@@ -1184,10 +1205,12 @@ pub(super) fn validate_execution_authority(
     receipt: &PreparedRunReceipt,
     prepared_run_digest: &Digest,
     authority: &N7ExecutionAuthority,
+    execution_authority_digest: &Digest,
     now: DateTime<Utc>,
     require_current: bool,
 ) -> Result<(), CommandFailure> {
     let expectation = N7ExecutionAuthorityExpectation {
+        execution_authority_digest: execution_authority_digest.clone(),
         prepared_run_digest: prepared_run_digest.clone(),
         preparation_input_digest: receipt.input_digest.clone(),
         preparation_request_digest: receipt.request_digest.clone(),
@@ -1588,6 +1611,7 @@ pub(super) fn recovered_terminal_output(
     git_workspace: &GitWorkspaceIdentity,
     index_digest: &Digest,
     capture: &RuntimeCapture,
+    execution_authority_digest: &Digest,
     bytes: &[u8],
 ) -> Result<CommandOutput, CommandFailure> {
     let record: LiveRunRecord = decode_strict_json(
@@ -1607,6 +1631,7 @@ pub(super) fn recovered_terminal_output(
         || record.raw_capture_index_digest != *index_digest
         || record.capture_digests != [capture.raw_capture_digest.clone()]
         || record.verifier_report_digest.is_none()
+        || record.n7_execution_authority_digest.as_ref() != Some(execution_authority_digest)
         || record.measurement.corpus_digest != input.corpus.corpus_digest
         || record.measurement.run_id != input.request.run_id
         || record.measurement.trial_id != input.trial_id
@@ -1621,6 +1646,7 @@ pub(super) fn recovered_terminal_output(
             &record.capture_digests,
             &record.raw_capture_index_digest,
             record.verifier_report_digest.as_ref(),
+            record.n7_execution_authority_digest.as_ref(),
             &record.git_workspace,
             &record.ao2_control_diagnostics,
             &record.native_effect_observations,
@@ -1707,6 +1733,16 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     } else {
         None
     };
+    let execution_authority_digest = execution_authority
+        .as_ref()
+        .map(canonical_digest)
+        .transpose()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let provider_intent_authority_digest = (variant == LiveVariant::N7).then(|| {
+        execution_authority_digest
+            .clone()
+            .unwrap_or_else(|| digest_bytes(b"ao.next.provider-free-no-execution-authority.v1"))
+    });
     let cancellation = CancellationToken::new();
     let invocation_limits = invocation_limits(&input.request)?;
     let mut verifier = CommandEngineVerifier::new(
@@ -1778,6 +1814,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
                         request: &input.request,
                         prepared_run_digest: prepared_run_digest.clone(),
                         execution_authority: execution_authority.as_ref(),
+                        execution_authority_digest: provider_intent_authority_digest.as_ref(),
                     },
                     &mut verifier,
                     cancellation.clone(),
@@ -1801,6 +1838,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
                 request: &input.request,
                 prepared_run_digest,
                 execution_authority: None,
+                execution_authority_digest: None,
             },
             &mut verifier,
             &cancellation,
@@ -2037,6 +2075,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
         hidden_test_exposure,
     };
     let verifier_report_digest = report.and_then(|report| canonical_digest(report).ok());
+    let n7_execution_authority_digest = execution_authority_digest;
     let native_effect_observations = outcome
         .as_ref()
         .map_or_else(Vec::new, |outcome| outcome.effect_observations.clone());
@@ -2047,6 +2086,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
         &capture_digests,
         &raw_capture_index_digest,
         verifier_report_digest.as_ref(),
+        n7_execution_authority_digest.as_ref(),
         &git_workspace,
         &ao2_control_diagnostics,
         &native_effect_observations,
@@ -2059,6 +2099,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
         capture_digests,
         raw_capture_index_digest,
         verifier_report_digest,
+        n7_execution_authority_digest,
         git_workspace,
         ao2_control_diagnostics,
         native_effect_observations,
@@ -7156,6 +7197,7 @@ else:
                 &record.capture_digests,
                 &record.raw_capture_index_digest,
                 record.verifier_report_digest.as_ref(),
+                record.n7_execution_authority_digest.as_ref(),
                 &record.git_workspace,
                 &record.ao2_control_diagnostics,
                 &record.native_effect_observations,
@@ -7174,6 +7216,7 @@ else:
                         &record.capture_digests,
                         &record.raw_capture_index_digest,
                         record.verifier_report_digest.as_ref(),
+                        record.n7_execution_authority_digest.as_ref(),
                         &record.git_workspace,
                         &record.ao2_control_diagnostics,
                         &record.native_effect_observations,
@@ -7298,6 +7341,7 @@ else:
         let retained_index = Arc::new(Mutex::new(None));
         let retained_failure = Arc::new(Mutex::new(None));
         let context = capture_context(&fixture.input, LiveVariant::N7);
+        let execution_authority_digest = digest_bytes(b"authority");
         let mut runner = CaptureFirstRunner {
             runner: CollidingJournalRunner { event_root },
             raw_capture_root: fixture.input.raw_capture_root.clone(),
@@ -7310,6 +7354,7 @@ else:
             request: &fixture.input.request,
             prepared_run_digest: digest_bytes(b"prepared"),
             execution_authority: None,
+            execution_authority_digest: Some(&execution_authority_digest),
         };
         let invocation = PreparedInvocation {
             program: "provider".into(),
@@ -7361,6 +7406,7 @@ else:
         )
         .expect("offline N0");
         assert_eq!(output.status, 0);
+        assert!(output.value["n7_execution_authority_digest"].is_null());
         assert_eq!(output.value["measurement"]["variant"], "N0");
         assert_eq!(output.value["measurement"]["tokens"]["input_tokens"], 11);
 
@@ -7378,6 +7424,7 @@ else:
         )
         .expect("offline N4");
         assert_eq!(output.status, 0);
+        assert!(output.value["n7_execution_authority_digest"].is_null());
         assert_eq!(output.value["terminal_state"], "passed");
         assert_eq!(output.value["measurement"]["variant"], "N4");
         assert_eq!(output.value["measurement"]["provider_usage_trusted"], true);
@@ -7428,6 +7475,7 @@ else:
         )
         .expect("offline N7");
         assert_eq!(output.status, 0);
+        assert!(output.value["n7_execution_authority_digest"].is_null());
         assert_eq!(output.value["terminal_state"], "passed");
         assert_eq!(output.value["measurement"]["variant"], "N7");
         assert_eq!(output.value["measurement"]["tokens"]["input_tokens"], 11);

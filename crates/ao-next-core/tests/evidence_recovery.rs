@@ -107,7 +107,7 @@ fn request(root: &Path) -> RunRequest {
 }
 
 struct Fixture {
-    _recovery: TempDir,
+    recovery: TempDir,
     request: RunRequest,
     journal: CheckpointJournal,
 }
@@ -118,7 +118,7 @@ fn fixture() -> Fixture {
     let journal = CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024)
         .expect("execution journal");
     Fixture {
-        _recovery: recovery,
+        recovery,
         request,
         journal,
     }
@@ -514,6 +514,7 @@ fn provider_lifecycle_events() -> Vec<JournalEvent> {
             0,
             JournalEventKind::ProviderRequestIntent {
                 prepared_run_digest: digest_bytes(b"prepared"),
+                execution_authority_digest: digest_bytes(b"authority"),
             },
         ),
         journal_event(
@@ -680,7 +681,7 @@ fn provider_capture_events_are_ordered_before_effect_intent() {
 
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &prepared)
+        .record_provider_request_intent(&fixture.request, &prepared, &digest_bytes(b"authority"))
         .expect("intent");
     fixture
         .journal
@@ -715,11 +716,73 @@ fn provider_capture_events_are_ordered_before_effect_intent() {
 }
 
 #[test]
+fn provider_intent_binds_execution_authority() {
+    let fixture = fixture();
+    let prepared_digest = digest_bytes(b"prepared");
+    let authority = serde_json::json!({"authority_id": "n7-authority-01"});
+    let authority_digest = canonical_digest(&authority).expect("authority digest");
+
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &prepared_digest, &authority_digest)
+        .expect("provider intent");
+
+    assert_eq!(
+        fixture
+            .journal
+            .provider_state(&fixture.request)
+            .expect("provider state")
+            .execution_authority_digest,
+        Some(authority_digest),
+    );
+}
+
+#[test]
+fn provider_intent_execution_authority_digest_mutation_fails_closed() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
+        .expect("provider intent");
+    let event_path = std::fs::read_dir(fixture.recovery.path().join("journal/execution-events"))
+        .expect("execution events")
+        .next()
+        .expect("provider event")
+        .expect("event entry")
+        .path();
+    let mut event: serde_json::Value = decode_strict_json(
+        &std::fs::read(&event_path).expect("provider event bytes"),
+        4_096,
+    )
+    .expect("provider event JSON");
+    event["kind"]["execution_authority_digest"] =
+        serde_json::json!(digest_bytes(b"substituted-authority"));
+    std::fs::write(
+        &event_path,
+        canonical_json_bytes(&event).expect("mutated provider event"),
+    )
+    .expect("mutated provider event write");
+
+    assert!(matches!(
+        fixture.journal.provider_state(&fixture.request),
+        Err(RecoveryError::EventDigestMismatch)
+    ));
+}
+
+#[test]
 fn provider_intent_without_capture_is_unknown_and_cannot_restart() {
     let fixture = fixture();
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("intent");
     let state = fixture
         .journal
@@ -739,7 +802,11 @@ fn pristine_request_binding_rejects_any_existing_event() {
     let fixture = fixture();
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("provider intent");
 
     assert!(matches!(
@@ -753,7 +820,11 @@ fn effect_intent_requires_normalized_adapter_turn() {
     let fixture = fixture();
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("provider intent");
 
     assert!(
@@ -770,7 +841,11 @@ fn exact_effect_set_rejects_journal_only_intent() {
     let index = digest_bytes(b"capture-index");
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("provider intent");
     fixture
         .journal
@@ -818,12 +893,20 @@ fn provider_event_reordering_digest_drift_and_duplicates_fail_closed() {
     );
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("intent");
     assert!(
         fixture
             .journal
-            .record_provider_request_intent(&fixture.request, &digest_bytes(b"other"))
+            .record_provider_request_intent(
+                &fixture.request,
+                &digest_bytes(b"other"),
+                &digest_bytes(b"other-authority"),
+            )
             .is_err()
     );
     fixture
@@ -851,7 +934,11 @@ fn provider_intent_blocks_verification_start() {
     let fixture = fixture();
     fixture
         .journal
-        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .record_provider_request_intent(
+            &fixture.request,
+            &digest_bytes(b"prepared"),
+            &digest_bytes(b"authority"),
+        )
         .expect("intent");
 
     assert!(
@@ -965,6 +1052,7 @@ fn provider_checkpoint_rejects_incomplete_lifecycle_with_terminal() {
             0,
             JournalEventKind::ProviderRequestIntent {
                 prepared_run_digest: digest_bytes(b"prepared"),
+                execution_authority_digest: digest_bytes(b"authority"),
             },
         ),
         journal_event(1, JournalEventKind::VerificationStarted { attempt: 0 }),

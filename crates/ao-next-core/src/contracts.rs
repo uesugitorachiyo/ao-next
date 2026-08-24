@@ -371,6 +371,7 @@ pub struct N7ExecutionAuthority {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct N7ExecutionAuthorityExpectation {
+    pub execution_authority_digest: Digest,
     pub prepared_run_digest: Digest,
     pub preparation_input_digest: Digest,
     pub preparation_request_digest: Digest,
@@ -604,7 +605,10 @@ pub fn validate_n7_execution_authority_identity(
     authority: &N7ExecutionAuthority,
     expectation: &N7ExecutionAuthorityExpectation,
 ) -> Result<(), IntakeError> {
-    if authority.schema_version != "ao.next.n7-execution-authority.v1"
+    if crate::strict_json::canonical_digest(authority)
+        .map_err(|_| IntakeError::N7ExecutionAuthorityMismatch)?
+        != expectation.execution_authority_digest
+        || authority.schema_version != "ao.next.n7-execution-authority.v1"
         || authority.authority_id.trim().is_empty()
         || authority.issued_by.trim().is_empty()
         || authority.prepared_run_digest != expectation.prepared_run_digest

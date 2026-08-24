@@ -245,6 +245,7 @@ fn n7_execution_authority() -> N7ExecutionAuthority {
 fn n7_execution_authority_expectation() -> N7ExecutionAuthorityExpectation {
     let authority = n7_execution_authority();
     N7ExecutionAuthorityExpectation {
+        execution_authority_digest: canonical_digest(&authority).expect("authority digest"),
         prepared_run_digest: authority.prepared_run_digest.clone(),
         preparation_input_digest: authority.preparation_input_digest.clone(),
         preparation_request_digest: authority.preparation_request_digest.clone(),
@@ -256,6 +257,28 @@ fn n7_execution_authority_expectation() -> N7ExecutionAuthorityExpectation {
         write_scope_digest: authority.write_scope_digest.clone(),
         prepared_at: timestamp("2026-08-23T00:00:00Z"),
     }
+}
+
+#[test]
+fn n7_execution_authority_digest_distinguishes_exact_documents() {
+    let authority_a = n7_execution_authority();
+    let mut authority_b = authority_a.clone();
+    authority_b.authority_id = "n7-authority-02".into();
+    authority_b.issued_by = "second-operator".into();
+    authority_b.issued_at = timestamp("2026-08-23T00:02:00Z");
+    authority_b.expires_at = timestamp("2026-08-23T02:02:00Z");
+
+    let now = timestamp("2026-08-23T00:30:00Z");
+    validate_n7_execution_authority_current(&authority_a, now).expect("authority A current");
+    validate_n7_execution_authority_current(&authority_b, now).expect("authority B current");
+    assert_ne!(
+        canonical_digest(&authority_a).expect("authority A digest"),
+        canonical_digest(&authority_b).expect("authority B digest"),
+    );
+    let mut expectation = n7_execution_authority_expectation();
+    expectation.execution_authority_digest =
+        canonical_digest(&authority_b).expect("authority B digest");
+    assert!(validate_n7_execution_authority_identity(&authority_a, &expectation).is_err());
 }
 
 #[test]

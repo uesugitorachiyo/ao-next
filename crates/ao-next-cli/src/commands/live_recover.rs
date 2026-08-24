@@ -44,15 +44,6 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
     let receipt: PreparedRunReceipt = decode_file(&args.prepared_run)?;
     let (git_workspace, prepared_run_digest) =
         validate_prepared_run_for_recovery(&args.input, &input, &receipt, now)?;
-    let authority: N7ExecutionAuthority = decode_file(&args.authority)?;
-    validate_execution_authority(
-        &input,
-        &receipt,
-        &prepared_run_digest,
-        &authority,
-        now,
-        false,
-    )?;
     let journal = CheckpointJournal::new(
         execution_journal_root(&input),
         execution_journal_maximum_bytes(&input.request),
@@ -71,6 +62,21 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
             "prepared-run digest contradicts the provider journal",
         ));
     }
+    let Some(execution_authority_digest) = provider_state.execution_authority_digest.clone() else {
+        return Err(CommandFailure::invalid_input(
+            "execution-authority digest is missing from provider intent",
+        ));
+    };
+    let authority: N7ExecutionAuthority = decode_file(&args.authority)?;
+    validate_execution_authority(
+        &input,
+        &receipt,
+        &prepared_run_digest,
+        &authority,
+        &execution_authority_digest,
+        now,
+        false,
+    )?;
     if provider_state.outcome_unknown() {
         return Err(CommandFailure::invalid_input(
             "provider outcome is unknown without retained capture",
@@ -142,8 +148,14 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
             .retained_terminal_record(&input.request)
             .map_err(|error| CommandFailure::evidence(error.to_string()))?
     {
-        let output =
-            recovered_terminal_output(&input, &git_workspace, &index_digest, &capture, &bytes)?;
+        let output = recovered_terminal_output(
+            &input,
+            &git_workspace,
+            &index_digest,
+            &capture,
+            &execution_authority_digest,
+            &bytes,
+        )?;
         journal
             .publish_terminal_record(&input.request, &bytes)
             .map_err(|error| CommandFailure::evidence(error.to_string()))?;

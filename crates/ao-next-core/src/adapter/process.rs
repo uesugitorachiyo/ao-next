@@ -103,7 +103,7 @@ impl ProviderVisibility {
 
 #[derive(Serialize)]
 struct VisibleFileIdentity {
-    path: PathBuf,
+    path: String,
     sha256: Digest,
     size_bytes: u64,
 }
@@ -662,12 +662,12 @@ fn visible_files(
     for captured in captured {
         let path = safe_relative_text(&captured.relative)?;
         files.push(ProviderVisibleFile {
-            path,
+            path: path.clone(),
             content: captured.text,
             digest: captured.digest.clone(),
         });
         identities.push(VisibleFileIdentity {
-            path: captured.relative,
+            path,
             sha256: captured.digest,
             size_bytes: u64::try_from(captured.bytes.len()).unwrap_or(u64::MAX),
         });
@@ -937,6 +937,25 @@ fn required_u64(value: &Value) -> Result<u64, AdapterError> {
 
 #[cfg(test)]
 mod reparse_tests {
+    #[test]
+    fn provider_visibility_identity_digest_uses_portable_nested_path() {
+        let root = tempfile::TempDir::new().expect("root");
+        std::fs::create_dir(root.path().join("nested")).expect("nested directory");
+        std::fs::write(root.path().join("nested/file.txt"), b"original\n").expect("nested file");
+        let (_, identities) =
+            super::visible_files(root.path(), 64 * 1024, false).expect("visible identities");
+
+        assert_eq!(
+            crate::strict_json::canonical_digest(&identities).expect("actual digest"),
+            crate::strict_json::canonical_digest(&serde_json::json!([{
+                "path": "nested/file.txt",
+                "sha256": crate::evidence::digest_bytes(b"original\n"),
+                "size_bytes": 9
+            }]))
+            .expect("portable literal digest")
+        );
+    }
+
     #[test]
     fn windows_reparse_attribute_is_unsafe() {
         assert!(super::windows_reparse_point(0x400));

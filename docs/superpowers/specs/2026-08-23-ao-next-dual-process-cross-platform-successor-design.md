@@ -1,11 +1,12 @@
 # AO Next Dual-Process Cross-Platform Successor Design
 
-- Status: proposed design; implementation waits for written-spec approval
+- Status: approved design; Stage-0 implementation plan ready for execution choice
 - Date: 2026-08-23
 - Product repository: AO Next
 - Lifecycle authority: AO Architecture
 - Supported fallback: AO2
 - Initial native platforms: Windows x86_64, macOS arm64, Ubuntu x86_64
+- Stage-0 plan: [AO Next Engine Recovery Repair](../plans/2026-08-23-ao-next-engine-recovery-repair.md)
 
 ## Summary
 

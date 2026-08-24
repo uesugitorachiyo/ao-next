@@ -43,6 +43,35 @@ The approved design's remaining subsystems require separate plans:
 
 None of those plans is implicitly authorized by this file.
 
+## Execution Model Profile
+
+Use explicit model and effort settings for every implementer and reviewer. Do
+not rely on inherited defaults or silently substitute another model.
+
+| Work | Implementer | Reviewer |
+| --- | --- | --- |
+| Plan controller and ordinary integration coordination | `gpt-5.6-sol`, `high` | not applicable |
+| Task 1 capture publication and Windows durability | `gpt-5.6-sol`, `high` | `gpt-5.6-sol`, `xhigh` |
+| Task 2 provider journal state and no-retry ordering | `gpt-5.6-sol`, `xhigh` | `gpt-5.6-sol`, `xhigh` |
+| Task 3 prepared Git identity and authority binding | `gpt-5.6-sol`, `xhigh` | `gpt-5.6-sol`, `xhigh` |
+| Task 4 fresh N7 integration | `gpt-5.6-sol`, `high` | `gpt-5.6-sol`, `xhigh` |
+| Task 5 retained-capture recovery and expired authority | `gpt-5.6-sol`, `xhigh` | `gpt-5.6-sol`, `xhigh` |
+| Task 6 mechanical docs and CI edits | `gpt-5.6-terra`, `medium` | `gpt-5.6-sol`, `high` |
+| Task 6 cross-platform evidence interpretation | `gpt-5.6-sol`, `high` | `gpt-5.6-sol`, `xhigh` |
+| Task 7 final whole-branch review and Stage-0 decision | no implementer unless review finds a defect | `gpt-5.6-sol`, `xhigh` |
+
+Use `gpt-5.6-terra` only after the relevant interface is frozen and the task is
+mechanical. Do not use a fast/low-cost model for capture durability, journal
+ordering, authority freshness, no-retry recovery, or final acceptance. If an
+explicit model/effort pair is unavailable, stop before mutation and request an
+operator decision.
+
+Stage 0 performs no live provider call. In the later real-journey plan, the AO
+Next provider profile should use `gpt-5.6-sol` with `high` effort, one turn, one
+worker, and one exact provider-process allowance. Architecture, recovery, and
+adoption review remain `gpt-5.6-sol` with `xhigh` effort outside the provider
+run.
+
 ---
 
 ## File Map

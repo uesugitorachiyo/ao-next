@@ -323,6 +323,30 @@ impl CheckpointJournal {
         durable_create_new(&path, &bytes)
     }
 
+    /// Binds one exact request only when its execution-event prefix is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for ordinary request-binding failures or when
+    /// any valid, malformed, or unsafe execution-event entry already exists.
+    pub fn bind_pristine_request(&self, request: &RunRequest) -> Result<(), RecoveryError> {
+        self.bind_request(request)?;
+        let directory = self.root.join("execution-events");
+        let metadata = match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(RecoveryError::UnsafePath(directory));
+        }
+        if std::fs::read_dir(&directory)?.next().transpose()?.is_none() {
+            return Ok(());
+        }
+        self.load_execution_events()?;
+        Err(RecoveryError::EventSequenceInvalid)
+    }
+
     /// Returns the durable provider-capture lifecycle for one exact request.
     ///
     /// # Errors

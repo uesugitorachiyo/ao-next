@@ -95,6 +95,11 @@ pub(super) struct LiveRunInput {
     current_ao: Option<CurrentAoBinding>,
 }
 
+pub(super) struct TrustedLiveInput {
+    pub(super) input: LiveRunInput,
+    pub(super) bytes: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CurrentAoBinding {
@@ -858,15 +863,17 @@ pub(super) fn load_trusted_live_input(
     trusted_corpus_digest: &str,
     trusted_verifier_profile_digest: &str,
     now: DateTime<Utc>,
-) -> Result<LiveRunInput, CommandFailure> {
-    let input: LiveRunInput = decode_file(path)?;
+) -> Result<TrustedLiveInput, CommandFailure> {
+    let bytes = read_bounded_regular(path)?;
+    let input: LiveRunInput = decode_strict_json(&bytes, 1024 * 1024)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let trusted = trusted_bindings(
         Some(trusted_corpus_digest),
         Some(trusted_verifier_profile_digest),
     )?;
     validate_trusted_bindings(&input, &trusted)?;
     validate_input(&input, variant, now)?;
-    Ok(input)
+    Ok(TrustedLiveInput { input, bytes })
 }
 
 fn required_live_token_envelope(
@@ -2006,12 +2013,7 @@ fn validate_input(
         }
         (_, None) => {}
     }
-    let objective = read_bounded_regular(&input.objective)?;
-    if objective != input.request.objective.as_bytes()
-        || digest_bytes(&objective) != task.objective_digest
-    {
-        return Err(CommandFailure::invalid_input("objective identity drifted"));
-    }
+    validate_objective_file(input, task)?;
     let initial_files = snapshot_tree(
         &input.request.workspace.root,
         input.request.limits.max_input_bytes,
@@ -2022,22 +2024,7 @@ fn validate_input(
     {
         return Err(CommandFailure::invalid_input("workspace seed drifted"));
     }
-    let source_bytes = read_bounded_regular(&input.source_snapshot)?;
-    let source: SourceSnapshot = decode_strict_json(
-        &source_bytes,
-        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
-    )
-    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if source.schema_version != "ao.next.source-snapshot.v1"
-        || source.task_id != input.task_id
-        || source.tree_digest != task.workspace_seed_digest
-        || source.files != initial_files
-        || canonical_digest(&source)
-            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-            != task.source_digest
-    {
-        return Err(CommandFailure::invalid_input("source snapshot drifted"));
-    }
+    validate_source_snapshot(input, task, &initial_files)?;
     let visible = snapshot_tree(
         &input.visible_fixtures,
         input.request.limits.max_input_bytes,
@@ -2077,6 +2064,43 @@ fn validate_input(
         hidden_file_digests: hidden.into_iter().map(|entry| entry.sha256).collect(),
         hidden_file_bytes,
     })
+}
+
+fn validate_objective_file(
+    input: &LiveRunInput,
+    task: &EvaluationTask,
+) -> Result<(), CommandFailure> {
+    let objective = read_bounded_regular(&input.objective)?;
+    if objective != input.request.objective.as_bytes()
+        || digest_bytes(&objective) != task.objective_digest
+    {
+        return Err(CommandFailure::invalid_input("objective identity drifted"));
+    }
+    Ok(())
+}
+
+fn validate_source_snapshot(
+    input: &LiveRunInput,
+    task: &EvaluationTask,
+    initial_files: &[SnapshotEntry],
+) -> Result<(), CommandFailure> {
+    let source_bytes = read_bounded_regular(&input.source_snapshot)?;
+    let source: SourceSnapshot = decode_strict_json(
+        &source_bytes,
+        usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
+    )
+    .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if source.schema_version != "ao.next.source-snapshot.v1"
+        || source.task_id != input.task_id
+        || source.tree_digest != task.workspace_seed_digest
+        || source.files != initial_files
+        || canonical_digest(&source)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
+            != task.source_digest
+    {
+        return Err(CommandFailure::invalid_input("source snapshot drifted"));
+    }
+    Ok(())
 }
 
 fn hidden_material_exposed(
@@ -2125,6 +2149,8 @@ fn revalidate_post_git_inputs(
         input.request.limits.max_input_bytes,
         Some(git_workspace),
     )?;
+    validate_objective_file(input, task)?;
+    validate_source_snapshot(input, task, &workspace)?;
     let visible = snapshot_tree(
         &input.visible_fixtures,
         input.request.limits.max_input_bytes,
@@ -2145,6 +2171,19 @@ fn revalidate_post_git_inputs(
         ));
     }
     ensure_checked_output_schema(&input.output_schema, input.request.limits.max_input_bytes)
+}
+
+pub(super) fn revalidate_prepared_live_input(
+    input: &LiveRunInput,
+    git_workspace: &GitWorkspaceIdentity,
+) -> Result<(), CommandFailure> {
+    let task = input
+        .corpus
+        .tasks
+        .iter()
+        .find(|task| task.task_id == input.task_id)
+        .ok_or_else(|| CommandFailure::invalid_input("task is not in the sealed corpus"))?;
+    revalidate_post_git_inputs(input, task, git_workspace)
 }
 
 fn ensure_private_capture_root(
@@ -4037,6 +4076,26 @@ mod tests {
     }
 
     #[test]
+    fn trusted_live_input_keeps_the_exact_bytes_it_decoded() {
+        let n7 = fixture(LiveVariant::N7);
+        let input_path = n7.root.path().join("trusted-live-input.json");
+        let bytes = serde_json::to_vec(&n7.input).expect("live input bytes");
+        std::fs::write(&input_path, &bytes).expect("live input");
+
+        let loaded = load_trusted_live_input(
+            &input_path,
+            LiveVariant::N7,
+            n7.input.corpus.corpus_digest.as_str(),
+            n7.input.command_verifier.profile_digest.as_str(),
+            Utc::now(),
+        )
+        .expect("trusted live input");
+
+        assert_eq!(loaded.bytes, bytes);
+        assert_eq!(loaded.input.request.run_id, n7.input.request.run_id);
+    }
+
+    #[test]
     fn provider_free_preflight_leaves_workspace_ready_for_exact_live_execution() {
         assert!(std::env::var_os("AO_NEXT_LIVE_PROVIDER_CALLS").is_none());
         let n7 = fixture(LiveVariant::N7);
@@ -5786,6 +5845,37 @@ else:
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn post_git_revalidation_rejects_source_snapshot_drift() {
+        let n7 = fixture(LiveVariant::N7);
+        let task = n7
+            .input
+            .corpus
+            .tasks
+            .iter()
+            .find(|task| task.task_id == n7.input.task_id)
+            .expect("selected task")
+            .clone();
+        let git = prepare_git_workspace(
+            &n7.input.request.workspace.root,
+            &n7.input.request.authority.allowed_roots,
+            &n7.input.request.workspace.seed_digest,
+        )
+        .expect("Git workspace");
+        let mut source: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&n7.input.source_snapshot).expect("source bytes"),
+        )
+        .expect("source snapshot");
+        source["task_id"] = serde_json::json!("drifted-source");
+        std::fs::write(
+            &n7.input.source_snapshot,
+            serde_json::to_vec(&source).expect("drifted source bytes"),
+        )
+        .expect("drifted source snapshot");
+
+        assert!(revalidate_post_git_inputs(&n7.input, &task, &git).is_err());
     }
 
     #[cfg(unix)]

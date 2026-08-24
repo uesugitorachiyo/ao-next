@@ -729,6 +729,20 @@ fn provider_intent_without_capture_is_unknown_and_cannot_restart() {
 }
 
 #[test]
+fn pristine_request_binding_rejects_any_existing_event() {
+    let fixture = fixture();
+    fixture
+        .journal
+        .record_provider_request_intent(&fixture.request, &digest_bytes(b"prepared"))
+        .expect("provider intent");
+
+    assert!(matches!(
+        fixture.journal.bind_pristine_request(&fixture.request),
+        Err(RecoveryError::EventSequenceInvalid)
+    ));
+}
+
+#[test]
 fn effect_intent_requires_normalized_adapter_turn() {
     let fixture = fixture();
     fixture

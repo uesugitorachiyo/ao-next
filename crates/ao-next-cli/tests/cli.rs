@@ -8,6 +8,7 @@ use ao_next_core::contracts::{
     StructuredCommand, TerminalReadback, VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::evidence::digest_bytes;
+use ao_next_core::recovery::CheckpointJournal;
 use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes};
 use ao_next_core::verifier::{CommandVerifierEntry, CommandVerifierProfile};
 use ao_next_eval::comparison::ComparisonRequest;
@@ -877,6 +878,7 @@ fn prepare_live_fixture() -> PrepareLiveFixture {
     });
     let input_path = protected.join("live-input.json");
     write_json(&input_path, &input);
+    let input_path = std::fs::canonicalize(input_path).expect("canonical live input path");
     let corpus_digest = Digest::new(
         input["corpus"]["corpus_digest"]
             .as_str()
@@ -1115,6 +1117,42 @@ fn prepare_live_rejects_provider_authorization_before_preparation() {
 }
 
 #[test]
+fn prepare_live_rejects_any_preexisting_journal_event() {
+    let fixture = prepare_live_fixture();
+    let request: RunRequest =
+        serde_json::from_value(fixture.input["request"].clone()).expect("request");
+    let journal_root = PathBuf::from(format!(
+        "{}.journal",
+        fixture.input["raw_capture_root"]
+            .as_str()
+            .expect("capture root")
+    ));
+    let maximum_bytes = request
+        .limits
+        .max_input_bytes
+        .saturating_add(request.limits.max_output_bytes)
+        .max(64 * 1024);
+    let journal = CheckpointJournal::new(journal_root, maximum_bytes).expect("journal");
+    journal
+        .record_provider_request_intent(&request, &digest_bytes(b"prepared"))
+        .expect("provider event");
+    let receipt_path = fixture.input_path.with_file_name("eventful-journal.json");
+
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &receipt_path,
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        7,
+        "evidence_failure",
+    );
+    assert!(!receipt_path.exists());
+    assert!(!fixture.provider_marker.exists());
+}
+
+#[test]
 fn prepare_live_rejects_a_symlinked_output() {
     let fixture = prepare_live_fixture();
     let target = fixture.input_path.with_file_name("receipt-target.json");
@@ -1144,6 +1182,43 @@ fn prepare_live_rejects_a_symlinked_output() {
         "invalid_input",
     );
     assert_eq!(std::fs::read(&target).expect("unchanged target"), b"target");
+    assert!(!fixture.workspace.join(".git").exists());
+}
+
+#[test]
+fn prepare_live_rejects_a_symlinked_output_ancestor() {
+    let fixture = prepare_live_fixture();
+    let protected = fixture.input_path.parent().expect("protected root");
+    let real_ancestor = protected.join("real-output-root");
+    let real_parent = real_ancestor.join("nested");
+    let linked_ancestor = protected.join("linked-output-root");
+    std::fs::create_dir_all(&real_parent).expect("real output parent");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_ancestor, &linked_ancestor).expect("symlink ancestor");
+    #[cfg(windows)]
+    match std::os::windows::fs::symlink_dir(&real_ancestor, &linked_ancestor) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314) =>
+        {
+            return;
+        }
+        Err(error) => panic!("symlink ancestor: {error}"),
+    }
+    let receipt_path = linked_ancestor.join("nested/prepared-run.json");
+
+    assert_json_error(
+        &run_prepare_live(
+            &fixture,
+            &receipt_path,
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        ),
+        3,
+        "invalid_input",
+    );
+    assert!(!real_parent.join("prepared-run.json").exists());
     assert!(!fixture.workspace.join(".git").exists());
 }
 

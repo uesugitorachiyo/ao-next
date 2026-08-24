@@ -328,6 +328,7 @@ pub struct PreparedRunReceipt {
     pub repository_root: PathBuf,
     pub common_directory: PathBuf,
     pub branch: String,
+    #[serde(deserialize_with = "deserialize_git_commit")]
     #[schemars(schema_with = "git_commit_schema")]
     pub base_commit: String,
     pub control_digest: Digest,
@@ -336,10 +337,54 @@ pub struct PreparedRunReceipt {
     pub journal_identity_digest: Digest,
     pub prepared_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    #[serde(deserialize_with = "deserialize_zero_provider_calls")]
     #[schemars(schema_with = "zero_provider_calls_schema")]
     pub provider_calls: u32,
+    #[serde(deserialize_with = "deserialize_unsafe_to_execute")]
     #[schemars(schema_with = "unsafe_to_execute_schema")]
     pub safe_to_execute: bool,
+}
+
+fn deserialize_git_commit<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(
+            "base_commit must be 40 lowercase hexadecimal characters",
+        ))
+    }
+}
+
+fn deserialize_zero_provider_calls<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("provider_calls must be zero"))
+    }
+}
+
+fn deserialize_unsafe_to_execute<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = bool::deserialize(deserializer)?;
+    if value {
+        Err(D::Error::custom("safe_to_execute must be false"))
+    } else {
+        Ok(value)
+    }
 }
 
 fn git_commit_schema(generator: &mut SchemaGenerator) -> Schema {

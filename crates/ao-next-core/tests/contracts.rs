@@ -198,9 +198,8 @@ fn terminal_readback() -> TerminalReadback {
     }
 }
 
-#[test]
-fn prepared_run_receipt_round_trips_with_exact_git_identity() {
-    let receipt = PreparedRunReceipt {
+fn prepared_run_receipt() -> PreparedRunReceipt {
+    PreparedRunReceipt {
         schema_version: "ao.next.prepared-run.v1".into(),
         run_id: "run-prepared-01".into(),
         input_digest: digest(ZERO_DIGEST),
@@ -217,11 +216,33 @@ fn prepared_run_receipt_round_trips_with_exact_git_identity() {
         expires_at: timestamp("2026-08-24T00:00:00Z"),
         provider_calls: 0,
         safe_to_execute: false,
-    };
+    }
+}
+
+#[test]
+fn prepared_run_receipt_round_trips_with_exact_git_identity() {
+    let receipt = prepared_run_receipt();
     let bytes = canonical_json_bytes(&receipt).expect("receipt bytes");
     let decoded: PreparedRunReceipt =
         decode_strict_json(&bytes, 64 * 1024).expect("receipt decode");
     assert_eq!(decoded, receipt);
+}
+
+#[test]
+fn prepared_run_receipt_rejects_unsafe_runtime_values() {
+    for (field, invalid) in [
+        ("base_commit", serde_json::json!("A".repeat(40))),
+        ("provider_calls", serde_json::json!(1)),
+        ("safe_to_execute", serde_json::json!(true)),
+    ] {
+        let mut receipt = serde_json::to_value(prepared_run_receipt()).expect("receipt value");
+        receipt[field] = invalid;
+        let bytes = serde_json::to_vec(&receipt).expect("invalid receipt bytes");
+        assert!(
+            decode_strict_json::<PreparedRunReceipt>(&bytes, 64 * 1024).is_err(),
+            "unsafe {field} decoded"
+        );
+    }
 }
 
 fn assert_round_trip<T>(value: &T)

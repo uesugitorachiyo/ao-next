@@ -1590,7 +1590,7 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
         serde_json::from_slice(&recovered.stdout).expect("recovered terminal");
     assert_eq!(terminal["terminal_state"], "passed");
     assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
-    assert_ne!(terminal["record_digest"], uninterrupted["record_digest"]);
+    assert_eq!(terminal["record_digest"], uninterrupted["record_digest"]);
 }
 
 #[cfg(unix)]

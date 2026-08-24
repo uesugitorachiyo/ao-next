@@ -168,10 +168,22 @@ fn live_record_digest(
     ao2_control_diagnostics: &[serde_json::Value],
     native_effect_observations: &[EffectObservation],
 ) -> Result<Digest, CommandFailure> {
+    let mut semantic_measurement = serde_json::to_value(measurement)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    let semantic_measurement = semantic_measurement
+        .as_object_mut()
+        .ok_or_else(|| CommandFailure::evidence("live measurement projection is not an object"))?;
+    if semantic_measurement.remove("wall_clock_ms").is_none()
+        || semantic_measurement.remove("model_wait_ms").is_none()
+    {
+        return Err(CommandFailure::evidence(
+            "live measurement timing projection is incomplete",
+        ));
+    }
     canonical_digest(&(
         variant,
         terminal_state,
-        measurement,
+        semantic_measurement,
         capture_digests,
         raw_capture_index_digest,
         verifier_report_digest,
@@ -1547,7 +1559,11 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
         input.command_verifier.clone(),
         verifier_runner,
         cancellation.clone(),
-        started_at,
+        if variant == LiveVariant::N7 {
+            input.request.authority.issued_at
+        } else {
+            started_at
+        },
     )
     .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     let retained_index = Arc::new(Mutex::new(

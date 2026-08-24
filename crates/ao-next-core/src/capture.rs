@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use rustix::fs::{FileType, Mode, OFlags};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 #[cfg(windows)]
 use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 use thiserror::Error;
@@ -72,6 +74,17 @@ impl CaptureIndexStore {
     /// Returns [`CaptureStoreError`] for unsafe paths, existing names, oversized bytes, or I/O
     /// failures.
     pub fn publish(&self, bytes: &[u8]) -> Result<CapturePublication, CaptureStoreError> {
+        let digest = self.stage_incomplete(bytes)?;
+        self.publish_staged(&digest)
+    }
+
+    /// Creates and synchronizes canonical incomplete index bytes without publishing the final name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CaptureStoreError`] for unsafe paths, existing names, oversized bytes, or I/O
+    /// failures.
+    pub fn stage_incomplete(&self, bytes: &[u8]) -> Result<Digest, CaptureStoreError> {
         self.validate_root()?;
         let actual = bytes.len() as u64;
         if actual > self.maximum_bytes {
@@ -84,15 +97,36 @@ impl CaptureIndexStore {
         require_absent(&final_path)?;
         require_absent(&incomplete)?;
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&incomplete)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&incomplete)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        drop(file);
+        Ok(digest_bytes(bytes))
+    }
+
+    /// Publishes previously synchronized incomplete bytes under the final create-new name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CaptureStoreError`] unless exactly one safe incomplete index matches `expected`
+    /// and the final name is absent.
+    pub fn publish_staged(
+        &self,
+        expected: &Digest,
+    ) -> Result<CapturePublication, CaptureStoreError> {
+        self.validate_root()?;
+        let (final_path, incomplete) = self.paths();
+        require_absent(&final_path)?;
+        if !safe_regular_exists(&incomplete)?
+            || digest_bytes(&read_bounded_regular(&incomplete, self.maximum_bytes)?) != *expected
+        {
+            return Err(CaptureStoreError::Contradictory);
+        }
         publish_final(&incomplete, &final_path)?;
-        Ok(CapturePublication::Published(digest_bytes(bytes)))
+        Ok(CapturePublication::Published(expected.clone()))
     }
 
     /// Repairs or verifies an interrupted capture-index publication.

@@ -553,6 +553,89 @@ fn live_visibility_omits_only_an_ordinary_root_git_directory() {
     }
 }
 
+#[cfg(windows)]
+fn create_junction(link: &Path, target: &Path) {
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .expect("create junction");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn live_visibility_rejects_workspace_and_fixture_junctions_at_roots_and_entries() {
+    let empty_digest = canonical_digest(&Vec::<serde_json::Value>::new()).expect("empty digest");
+    let source_digest = canonical_digest(&[serde_json::json!({
+        "path": "source.txt",
+        "sha256": digest_bytes(b"source\n"),
+        "size_bytes": 7
+    })])
+    .expect("source digest");
+    let ordinary_workspace = TempDir::new().expect("workspace");
+    std::fs::write(ordinary_workspace.path().join("source.txt"), b"source\n").expect("source");
+    let ordinary_fixtures = TempDir::new().expect("fixtures");
+
+    for boundary in [
+        "workspace-root",
+        "workspace-entry",
+        "fixture-root",
+        "fixture-entry",
+    ] {
+        let parent = TempDir::new().expect("junction parent");
+        let target = TempDir::new().expect("junction target");
+        if boundary == "workspace-root" {
+            std::fs::write(target.path().join("source.txt"), b"source\n").expect("junction source");
+        }
+        let link = parent.path().join("junction");
+        create_junction(&link, target.path());
+        let workspace_root = if boundary == "workspace-root" {
+            &link
+        } else {
+            if boundary == "workspace-entry" {
+                create_junction(&ordinary_workspace.path().join("nested"), target.path());
+            }
+            ordinary_workspace.path()
+        };
+        let fixture_root = if boundary == "fixture-root" {
+            &link
+        } else {
+            if boundary == "fixture-entry" {
+                create_junction(&ordinary_fixtures.path().join("nested"), target.path());
+            }
+            ordinary_fixtures.path()
+        };
+
+        assert!(
+            ProviderVisibility::from_live_roots(
+                workspace_root,
+                &source_digest,
+                fixture_root,
+                &empty_digest,
+                64 * 1024,
+            )
+            .is_err(),
+            "accepted {boundary} junction"
+        );
+
+        if boundary == "workspace-entry" {
+            std::fs::remove_dir(ordinary_workspace.path().join("nested"))
+                .expect("remove workspace junction");
+        }
+        if boundary == "fixture-entry" {
+            std::fs::remove_dir(ordinary_fixtures.path().join("nested"))
+                .expect("remove fixture junction");
+        }
+    }
+}
+
 #[test]
 fn claude_process_adapter_runs_through_engine_with_trusted_envelope_usage() {
     let workspace = TempDir::new().expect("workspace");

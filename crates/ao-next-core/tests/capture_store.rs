@@ -22,6 +22,45 @@ fn publish_creates_one_final_index_and_removes_incomplete_name() {
 }
 
 #[test]
+fn stage_persists_incomplete_bytes_before_final_publication() {
+    let (root, store) = store();
+    let bytes = br#"{"schema_version":"capture.test.v1"}"#;
+
+    let digest = store.stage_incomplete(bytes).expect("stage incomplete");
+
+    assert_eq!(digest, digest_bytes(bytes));
+    assert_eq!(
+        std::fs::read(root.path().join("capture-index.json.incomplete")).expect("incomplete index"),
+        bytes
+    );
+    assert!(!root.path().join("capture-index.json").exists());
+
+    assert_eq!(
+        store.publish_staged(&digest).expect("publish staged"),
+        CapturePublication::Published(digest)
+    );
+    assert!(root.path().join("capture-index.json").is_file());
+    assert!(!root.path().join("capture-index.json.incomplete").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_incomplete_index_is_owner_only_at_creation() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (root, store) = store();
+    store
+        .stage_incomplete(b"private")
+        .expect("stage incomplete");
+
+    let mode = std::fs::symlink_metadata(root.path().join("capture-index.json.incomplete"))
+        .expect("incomplete metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
 fn recover_removes_an_identical_incomplete_name_without_rewriting_final() {
     let (root, store) = store();
     let bytes = br#"{"schema_version":"capture.test.v1"}"#;

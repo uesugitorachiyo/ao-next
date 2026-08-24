@@ -1,14 +1,17 @@
 use ao_next_core::adapter::AdapterAction;
-use ao_next_core::contracts::{PreparedRunReceipt, validate_authority_current};
+use ao_next_core::contracts::{
+    N7ExecutionAuthority, PreparedRunReceipt, validate_n7_execution_authority_current,
+};
 use ao_next_core::recovery::{CheckpointJournal, JournalEffectState};
 use ao_next_core::strict_json::canonical_digest;
 use chrono::Utc;
 
 use super::live::{
-    LiveVariant, capture_context, execute_recovered_live, execution_journal_maximum_bytes,
-    execution_journal_root, gate_retained_capture, load_trusted_live_input_for_recovery,
-    load_verified_capture, normalize_retained_turn, recovered_terminal_output,
-    revalidate_recovery_before_mutation, validate_prepared_run_for_recovery,
+    LiveVariant, PreparedN7Context, capture_context, execute_recovered_live,
+    execution_journal_maximum_bytes, execution_journal_root, gate_retained_capture,
+    load_trusted_live_input_for_recovery, load_verified_capture, normalize_retained_turn,
+    recovered_terminal_output, revalidate_recovery_before_mutation, validate_execution_authority,
+    validate_prepared_run_for_recovery,
 };
 use super::{CommandFailure, CommandOutput, RecoverLiveArgs, decode_file};
 
@@ -41,6 +44,15 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
     let receipt: PreparedRunReceipt = decode_file(&args.prepared_run)?;
     let (git_workspace, prepared_run_digest) =
         validate_prepared_run_for_recovery(&args.input, &input, &receipt, now)?;
+    let authority: N7ExecutionAuthority = decode_file(&args.authority)?;
+    validate_execution_authority(
+        &input,
+        &receipt,
+        &prepared_run_digest,
+        &authority,
+        now,
+        false,
+    )?;
     let journal = CheckpointJournal::new(
         execution_journal_root(&input),
         execution_journal_maximum_bytes(&input.request),
@@ -116,14 +128,14 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
             JournalEffectState::Completed(_) => {}
         }
     }
-    if fresh_effect || unknown_effect {
-        validate_authority_current(&input.request.authority, Utc::now())
-            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    }
     if unknown_effect {
         return Err(CommandFailure::invalid_input(
             "effect completion is unknown; automatic retry is forbidden",
         ));
+    }
+    if fresh_effect {
+        validate_n7_execution_authority_current(&authority, Utc::now())
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     }
     if !fresh_effect
         && let Some(bytes) = journal
@@ -139,7 +151,7 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
     }
     if fresh_effect {
         revalidate_recovery_before_mutation(&input, &git_workspace)?;
-        validate_authority_current(&input.request.authority, Utc::now())
+        validate_n7_execution_authority_current(&authority, Utc::now())
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     }
 
@@ -148,7 +160,11 @@ pub fn execute(args: &RecoverLiveArgs) -> Result<CommandOutput, CommandFailure> 
         turn,
         capture,
         output,
-        (git_workspace, prepared_run_digest),
+        PreparedN7Context {
+            git_workspace,
+            prepared_run_digest,
+            execution_authority: authority,
+        },
         &index_digest,
     )
 }

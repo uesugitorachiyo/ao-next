@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use ao_next_core::contracts::{
     AdapterIdentity, ArtifactEntry, ArtifactManifest, AuthorityEnvelope, Capability, Digest,
     EffectDecision, EffectEvent, EffectKind, EffectRequest, ExternalEffectPolicy,
-    IntakeExpectation, ModelProfile, NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest,
-    RunState, SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport,
-    VerifierResult, WorkspaceIdentity, generated_contract_schemas, validate_authority_current,
-    validate_intake, validate_intake_identity,
+    IntakeExpectation, ModelProfile, N7ExecutionAuthority, N7ExecutionAuthorityExpectation,
+    NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest, RunState, SourceIdentity,
+    StructuredCommand, TerminalReadback, VerifierProfile, VerifierReport, VerifierResult,
+    WorkspaceIdentity, generated_contract_schemas, n7_requested_write_scope_digest,
+    validate_authority_current, validate_intake, validate_intake_identity,
+    validate_n7_execution_authority_current, validate_n7_execution_authority_identity,
 };
 use ao_next_core::strict_json::{
     StrictJsonError, canonical_digest, canonical_json_bytes, decode_strict_json,
@@ -220,6 +222,42 @@ fn prepared_run_receipt() -> PreparedRunReceipt {
     }
 }
 
+fn n7_execution_authority() -> N7ExecutionAuthority {
+    N7ExecutionAuthority {
+        schema_version: "ao.next.n7-execution-authority.v1".into(),
+        authority_id: "n7-authority-01".into(),
+        issued_by: "operator".into(),
+        prepared_run_digest: digest(ZERO_DIGEST),
+        preparation_input_digest: digest(ONE_DIGEST),
+        preparation_request_digest: digest(ZERO_DIGEST),
+        base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        workspace_identity_digest: digest(ONE_DIGEST),
+        workspace_digest: digest(ZERO_DIGEST),
+        workspace_root: PathBuf::from("workspace"),
+        requested_authority_digest: digest(ONE_DIGEST),
+        write_scope_digest: digest(ZERO_DIGEST),
+        issued_at: timestamp("2026-08-23T00:01:00Z"),
+        expires_at: timestamp("2026-08-23T01:01:00Z"),
+        provider_process_allowance: 1,
+    }
+}
+
+fn n7_execution_authority_expectation() -> N7ExecutionAuthorityExpectation {
+    let authority = n7_execution_authority();
+    N7ExecutionAuthorityExpectation {
+        prepared_run_digest: authority.prepared_run_digest.clone(),
+        preparation_input_digest: authority.preparation_input_digest.clone(),
+        preparation_request_digest: authority.preparation_request_digest.clone(),
+        base_commit: authority.base_commit.clone(),
+        workspace_identity_digest: authority.workspace_identity_digest.clone(),
+        workspace_digest: authority.workspace_digest.clone(),
+        workspace_root: authority.workspace_root.clone(),
+        requested_authority_digest: authority.requested_authority_digest.clone(),
+        write_scope_digest: authority.write_scope_digest.clone(),
+        prepared_at: timestamp("2026-08-23T00:00:00Z"),
+    }
+}
+
 #[test]
 fn prepared_run_receipt_round_trips_with_exact_git_identity() {
     let receipt = prepared_run_receipt();
@@ -246,6 +284,80 @@ fn prepared_run_receipt_rejects_unsafe_runtime_values() {
     }
 }
 
+#[test]
+fn n7_execution_authority_is_post_preparation_exact_and_current() {
+    let authority = n7_execution_authority();
+    let expectation = n7_execution_authority_expectation();
+    let bytes = canonical_json_bytes(&authority).expect("authority bytes");
+    let decoded: N7ExecutionAuthority =
+        decode_strict_json(&bytes, 64 * 1024).expect("authority decode");
+
+    validate_n7_execution_authority_identity(&decoded, &expectation)
+        .expect("exact post-preparation authority");
+    validate_n7_execution_authority_current(&decoded, timestamp("2026-08-23T00:30:00Z"))
+        .expect("current authority");
+    assert!(
+        validate_n7_execution_authority_current(&decoded, decoded.expires_at).is_err(),
+        "expiry is exclusive"
+    );
+}
+
+#[test]
+fn n7_execution_authority_rejects_every_binding_drift() {
+    let expectation = n7_execution_authority_expectation();
+    for mutation in [
+        "schema",
+        "identity",
+        "prepared-run",
+        "input",
+        "request",
+        "base",
+        "workspace-identity",
+        "workspace-digest",
+        "workspace-root",
+        "requested-authority",
+        "write-scope",
+        "pre-preparation",
+        "interval",
+        "provider-allowance",
+    ] {
+        let mut authority = n7_execution_authority();
+        match mutation {
+            "schema" => authority.schema_version = "drifted".into(),
+            "identity" => authority.authority_id.clear(),
+            "prepared-run" => authority.prepared_run_digest = digest(ONE_DIGEST),
+            "input" => authority.preparation_input_digest = digest(ZERO_DIGEST),
+            "request" => authority.preparation_request_digest = digest(ONE_DIGEST),
+            "base" => authority.base_commit = "0".repeat(40),
+            "workspace-identity" => authority.workspace_identity_digest = digest(ZERO_DIGEST),
+            "workspace-digest" => authority.workspace_digest = digest(ONE_DIGEST),
+            "workspace-root" => authority.workspace_root = PathBuf::from("other"),
+            "requested-authority" => authority.requested_authority_digest = digest(ZERO_DIGEST),
+            "write-scope" => authority.write_scope_digest = digest(ONE_DIGEST),
+            "pre-preparation" => authority.issued_at = expectation.prepared_at,
+            "interval" => authority.expires_at = authority.issued_at,
+            "provider-allowance" => authority.provider_process_allowance = 2,
+            _ => unreachable!(),
+        }
+        assert!(
+            validate_n7_execution_authority_identity(&authority, &expectation).is_err(),
+            "accepted {mutation} drift"
+        );
+    }
+}
+
+#[test]
+fn n7_write_scope_digest_changes_with_requested_workspace_scope() {
+    let request = request();
+    let original = n7_requested_write_scope_digest(&request).expect("write scope");
+    let mut changed = request;
+    changed.authority.allowed_roots = vec![PathBuf::from("/tmp/other")];
+    assert_ne!(
+        n7_requested_write_scope_digest(&changed).expect("changed write scope"),
+        original
+    );
+}
+
 fn assert_round_trip<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq,
@@ -263,6 +375,7 @@ fn every_public_contract_round_trips_through_strict_json() {
     assert_round_trip(&verifier_report());
     assert_round_trip(&artifact_manifest());
     assert_round_trip(&terminal_readback());
+    assert_round_trip(&n7_execution_authority());
 }
 
 #[test]

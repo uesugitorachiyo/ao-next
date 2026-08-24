@@ -181,6 +181,29 @@ impl From<EvidenceError> for RecoveryError {
 fn provider_state_from_events(
     events: &[JournalEvent],
 ) -> Result<ProviderJournalState, RecoveryError> {
+    Ok(validate_journal_lifecycle(events)?.provider)
+}
+
+struct JournalLifecycle {
+    provider: ProviderJournalState,
+    effects: BTreeMap<String, (Digest, Option<EffectObservation>)>,
+    legacy_committed_effects: BTreeSet<String>,
+    verifier_records: u32,
+    verification_open: bool,
+    terminal_digest: Option<Digest>,
+}
+
+impl JournalLifecycle {
+    const fn verification_seen(&self) -> bool {
+        self.verification_open || self.verifier_records > 0 || self.terminal_digest.is_some()
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the durable lifecycle stays linear so every legal prefix transition is visible"
+)]
+fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycle, RecoveryError> {
     let mut state = ProviderJournalState {
         prepared_run_digest: None,
         provider_process_started: false,
@@ -191,36 +214,49 @@ fn provider_state_from_events(
         adapter_turn_digest: None,
     };
     let mut effect_seen = false;
+    let mut verification_seen = false;
     let mut provider_step = 0_u8;
-    for event in events {
+    let mut effects = BTreeMap::<String, (Digest, Option<EffectObservation>)>::new();
+    let mut legacy_committed_effects = BTreeSet::new();
+    let mut verifier_records = 0_u32;
+    let mut verification_open = false;
+    let mut terminal_digest = None;
+    for (expected_sequence, event) in events.iter().enumerate() {
+        if event.schema_version != "ao.next.journal-event.v1"
+            || event.sequence != u64::try_from(expected_sequence).unwrap_or(u64::MAX)
+            || terminal_digest.is_some()
+        {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
         match &event.kind {
             JournalEventKind::ProviderRequestIntent {
                 prepared_run_digest,
-            } if !effect_seen && provider_step == 0 => {
+            } if !effect_seen && !verification_seen && provider_step == 0 => {
                 state.prepared_run_digest = Some(prepared_run_digest.clone());
                 provider_step = 1;
             }
             JournalEventKind::ProviderProcessStarted { invocation_digest }
-                if !effect_seen && provider_step == 1 =>
+                if !effect_seen && !verification_seen && provider_step == 1 =>
             {
                 state.provider_process_started = true;
                 state.invocation_digest = Some(invocation_digest.clone());
                 provider_step = 2;
             }
             JournalEventKind::ProviderOutputRetained { raw_capture_digest }
-                if !effect_seen && provider_step == 2 =>
+                if !effect_seen && !verification_seen && provider_step == 2 =>
             {
                 state.raw_capture_digest = Some(raw_capture_digest.clone());
                 provider_step = 3;
             }
             JournalEventKind::ProviderCaptureIndexPublished { index_digest }
-                if !effect_seen && provider_step == 3 =>
+                if !effect_seen && !verification_seen && provider_step == 3 =>
             {
                 state.capture_index_digest = Some(index_digest.clone());
                 provider_step = 4;
             }
             JournalEventKind::ProviderCaptureVerified { index_digest }
                 if !effect_seen
+                    && !verification_seen
                     && provider_step == 4
                     && state.capture_index_digest.as_ref() == Some(index_digest) =>
             {
@@ -228,37 +264,89 @@ fn provider_state_from_events(
                 provider_step = 5;
             }
             JournalEventKind::AdapterTurnNormalized { turn_digest }
-                if !effect_seen && provider_step == 5 =>
+                if !effect_seen && !verification_seen && provider_step == 5 =>
             {
                 state.adapter_turn_digest = Some(turn_digest.clone());
                 provider_step = 6;
             }
-            JournalEventKind::EffectIntent { .. }
-            | JournalEventKind::EffectCommitted { .. }
-            | JournalEventKind::EffectCompleted { .. } => {
-                if provider_step != 0 && provider_step != 6 {
+            JournalEventKind::EffectIntent {
+                effect_id,
+                effect_digest,
+            } => {
+                if verification_seen
+                    || (provider_step != 0 && provider_step != 6)
+                    || legacy_committed_effects.contains(effect_id)
+                    || effects
+                        .insert(effect_id.clone(), (effect_digest.clone(), None))
+                        .is_some()
+                {
                     return Err(RecoveryError::EventSequenceInvalid);
                 }
                 effect_seen = true;
             }
-            JournalEventKind::VerificationStarted { .. }
-            | JournalEventKind::VerifierRecorded { .. }
-            | JournalEventKind::TerminalPublished { .. }
-                if provider_step == 0 || provider_step == 6 => {}
+            JournalEventKind::EffectCommitted { effect_id } => {
+                if verification_seen
+                    || (provider_step != 0 && provider_step != 6)
+                    || effects.contains_key(effect_id)
+                    || !legacy_committed_effects.insert(effect_id.clone())
+                {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                effect_seen = true;
+            }
+            JournalEventKind::EffectCompleted { observation } => {
+                let Some((_, completion)) = effects.get_mut(&observation.effect_id) else {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                };
+                if verification_seen || completion.replace(observation.clone()).is_some() {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                effect_seen = true;
+            }
+            JournalEventKind::VerificationStarted { attempt } => {
+                if (provider_step != 0 && provider_step != 6)
+                    || verification_open
+                    || *attempt != verifier_records
+                    || effects.values().any(|(_, completion)| completion.is_none())
+                {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                verification_seen = true;
+                verification_open = true;
+            }
+            JournalEventKind::VerifierRecorded { .. } => {
+                if !verification_open {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                verification_open = false;
+                verifier_records = verifier_records
+                    .checked_add(1)
+                    .ok_or(RecoveryError::EventSequenceInvalid)?;
+            }
+            JournalEventKind::TerminalPublished { record_digest } => {
+                if verification_open || verifier_records == 0 {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
+                terminal_digest = Some(record_digest.clone());
+            }
             JournalEventKind::ProviderRequestIntent { .. }
             | JournalEventKind::ProviderProcessStarted { .. }
             | JournalEventKind::ProviderOutputRetained { .. }
             | JournalEventKind::ProviderCaptureIndexPublished { .. }
             | JournalEventKind::ProviderCaptureVerified { .. }
-            | JournalEventKind::AdapterTurnNormalized { .. }
-            | JournalEventKind::VerificationStarted { .. }
-            | JournalEventKind::VerifierRecorded { .. }
-            | JournalEventKind::TerminalPublished { .. } => {
+            | JournalEventKind::AdapterTurnNormalized { .. } => {
                 return Err(RecoveryError::EventSequenceInvalid);
             }
         }
     }
-    Ok(state)
+    Ok(JournalLifecycle {
+        provider: state,
+        effects,
+        legacy_committed_effects,
+        verifier_records,
+        verification_open,
+        terminal_digest,
+    })
 }
 
 fn require_provider_ready(state: &ProviderJournalState) -> Result<(), RecoveryError> {
@@ -268,68 +356,9 @@ fn require_provider_ready(state: &ProviderJournalState) -> Result<(), RecoveryEr
     Ok(())
 }
 
-fn effect_records(
-    events: &[JournalEvent],
-) -> Result<BTreeMap<String, (Digest, Option<EffectObservation>)>, RecoveryError> {
-    let mut effects = BTreeMap::new();
-    let mut terminal_published = false;
-    for event in events {
-        match &event.kind {
-            JournalEventKind::EffectIntent {
-                effect_id,
-                effect_digest,
-            } => {
-                if terminal_published
-                    || effects
-                        .insert(effect_id.clone(), (effect_digest.clone(), None))
-                        .is_some()
-                {
-                    return Err(RecoveryError::EffectIdentityMismatch);
-                }
-            }
-            JournalEventKind::EffectCompleted { observation } => {
-                if terminal_published {
-                    return Err(RecoveryError::EventSequenceInvalid);
-                }
-                let Some((_, completion)) = effects.get_mut(&observation.effect_id) else {
-                    return Err(RecoveryError::EventSequenceInvalid);
-                };
-                if completion.replace(observation.clone()).is_some() {
-                    return Err(RecoveryError::EventSequenceInvalid);
-                }
-            }
-            JournalEventKind::EffectCommitted { .. } => {
-                return Err(RecoveryError::EventSequenceInvalid);
-            }
-            JournalEventKind::TerminalPublished { .. } => {
-                if terminal_published {
-                    return Err(RecoveryError::EventSequenceInvalid);
-                }
-                terminal_published = true;
-            }
-            JournalEventKind::ProviderRequestIntent { .. }
-            | JournalEventKind::ProviderProcessStarted { .. }
-            | JournalEventKind::ProviderOutputRetained { .. }
-            | JournalEventKind::ProviderCaptureIndexPublished { .. }
-            | JournalEventKind::ProviderCaptureVerified { .. }
-            | JournalEventKind::AdapterTurnNormalized { .. }
-            | JournalEventKind::VerificationStarted { .. }
-            | JournalEventKind::VerifierRecorded { .. } => {}
-        }
-    }
-    Ok(effects)
-}
-
 fn require_verification_complete(events: &[JournalEvent]) -> Result<(), RecoveryError> {
-    let starts = events
-        .iter()
-        .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
-        .count();
-    let records = events
-        .iter()
-        .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
-        .count();
-    if starts == 0 || starts != records {
+    let lifecycle = validate_journal_lifecycle(events)?;
+    if lifecycle.verifier_records == 0 || lifecycle.verification_open {
         return Err(RecoveryError::VerifierEventMissing);
     }
     Ok(())
@@ -594,10 +623,12 @@ impl CheckpointJournal {
         self.bind_request(request)?;
         let effect_digest = canonical_digest(effect)?;
         let events = self.load_execution_events()?;
-        let provider_state = provider_state_from_events(&events)?;
-        require_provider_ready(&provider_state)?;
-        let effects = effect_records(&events)?;
-        let Some((recorded_digest, completion)) = effects.get(&effect.effect_id) else {
+        let lifecycle = validate_journal_lifecycle(&events)?;
+        require_provider_ready(&lifecycle.provider)?;
+        let Some((recorded_digest, completion)) = lifecycle.effects.get(&effect.effect_id) else {
+            if lifecycle.verification_seen() {
+                return Err(RecoveryError::EventSequenceInvalid);
+            }
             return Ok(JournalEffectState::Fresh);
         };
         if recorded_digest != &effect_digest {
@@ -623,8 +654,9 @@ impl CheckpointJournal {
     ) -> Result<Vec<JournalEffectState>, RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
-        require_provider_ready(&provider_state_from_events(&events)?)?;
-        let recorded = effect_records(&events)?;
+        let lifecycle = validate_journal_lifecycle(&events)?;
+        require_provider_ready(&lifecycle.provider)?;
+        let recorded = &lifecycle.effects;
         let mut expected = BTreeMap::new();
         for effect in effects {
             if effect.run_id != request.run_id
@@ -638,6 +670,10 @@ impl CheckpointJournal {
         if recorded
             .keys()
             .any(|effect_id| !expected.contains_key(effect_id))
+            || (lifecycle.verification_seen()
+                && expected
+                    .keys()
+                    .any(|effect_id| !recorded.contains_key(effect_id)))
         {
             return Err(RecoveryError::EffectIdentityMismatch);
         }
@@ -706,28 +742,17 @@ impl CheckpointJournal {
     pub fn begin_verification(&self, request: &RunRequest) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
-        require_provider_ready(&provider_state_from_events(&events)?)?;
-        let starts = events
-            .iter()
-            .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
-            .count();
-        let records = events
-            .iter()
-            .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
-            .count();
-        if events
-            .iter()
-            .any(|event| matches!(event.kind, JournalEventKind::TerminalPublished { .. }))
-            || starts < records
-            || starts > records.saturating_add(1)
-        {
+        let lifecycle = validate_journal_lifecycle(&events)?;
+        require_provider_ready(&lifecycle.provider)?;
+        if lifecycle.terminal_digest.is_some() {
             return Err(RecoveryError::EventSequenceInvalid);
         }
-        if starts == records.saturating_add(1) {
+        if lifecycle.verification_open {
             return Ok(());
         }
-        let attempt = u32::try_from(records).map_err(|_| RecoveryError::EventSequenceInvalid)?;
-        self.append_execution_event(JournalEventKind::VerificationStarted { attempt })
+        self.append_execution_event(JournalEventKind::VerificationStarted {
+            attempt: lifecycle.verifier_records,
+        })
     }
 
     /// Durably records the verifier report for one started attempt.
@@ -743,16 +768,9 @@ impl CheckpointJournal {
     ) -> Result<(), RecoveryError> {
         self.bind_request(request)?;
         let events = self.load_execution_events()?;
-        require_provider_ready(&provider_state_from_events(&events)?)?;
-        let starts = events
-            .iter()
-            .filter(|event| matches!(event.kind, JournalEventKind::VerificationStarted { .. }))
-            .count();
-        let records = events
-            .iter()
-            .filter(|event| matches!(event.kind, JournalEventKind::VerifierRecorded { .. }))
-            .count();
-        if starts != records.saturating_add(1) {
+        let lifecycle = validate_journal_lifecycle(&events)?;
+        require_provider_ready(&lifecycle.provider)?;
+        if !lifecycle.verification_open || lifecycle.terminal_digest.is_some() {
             return Err(RecoveryError::EventSequenceInvalid);
         }
         self.append_execution_event(JournalEventKind::VerifierRecorded {
@@ -909,12 +927,14 @@ impl CheckpointJournal {
     }
 
     fn append_execution_event(&self, kind: JournalEventKind) -> Result<(), RecoveryError> {
-        let events = self.load_execution_events()?;
+        let mut events = self.load_execution_events()?;
         let event = JournalEvent {
             schema_version: "ao.next.journal-event.v1".into(),
             sequence: events.len() as u64,
             kind,
         };
+        events.push(event.clone());
+        validate_journal_lifecycle(&events)?;
         let bytes = canonical_json_bytes(&event)?;
         if bytes.len() as u64 > self.maximum_bytes {
             return Err(RecoveryError::Oversized {
@@ -987,6 +1007,7 @@ impl CheckpointJournal {
             }
             events.push(event);
         }
+        validate_journal_lifecycle(&events)?;
         Ok(events)
     }
 
@@ -1015,32 +1036,22 @@ impl CheckpointJournal {
             return Err(RecoveryError::EventDigestMismatch);
         }
         let events = decode_event_log(&event_bytes, self.maximum_bytes)?;
-        require_provider_ready(&provider_state_from_events(&events)?)?;
-        let mut committed = BTreeSet::new();
-        let mut verifier_recorded = false;
+        let lifecycle = validate_journal_lifecycle(&events)?;
+        require_provider_ready(&lifecycle.provider)?;
+        let mut committed = lifecycle.legacy_committed_effects;
+        committed.extend(
+            lifecycle
+                .effects
+                .iter()
+                .filter_map(|(effect_id, (_, completion))| {
+                    completion.as_ref().map(|_| effect_id.clone())
+                }),
+        );
         for (expected_sequence, event) in events.iter().enumerate() {
             if event.sequence != expected_sequence as u64
                 || event.schema_version != "ao.next.journal-event.v1"
             {
                 return Err(RecoveryError::EventSequenceInvalid);
-            }
-            match &event.kind {
-                JournalEventKind::EffectCommitted { effect_id } => {
-                    committed.insert(effect_id.clone());
-                }
-                JournalEventKind::EffectCompleted { observation } => {
-                    committed.insert(observation.effect_id.clone());
-                }
-                JournalEventKind::EffectIntent { .. }
-                | JournalEventKind::ProviderRequestIntent { .. }
-                | JournalEventKind::ProviderProcessStarted { .. }
-                | JournalEventKind::ProviderOutputRetained { .. }
-                | JournalEventKind::ProviderCaptureIndexPublished { .. }
-                | JournalEventKind::ProviderCaptureVerified { .. }
-                | JournalEventKind::AdapterTurnNormalized { .. }
-                | JournalEventKind::VerificationStarted { .. }
-                | JournalEventKind::TerminalPublished { .. } => {}
-                JournalEventKind::VerifierRecorded { .. } => verifier_recorded = true,
             }
         }
         for effect_id in &checkpoint.committed_effects {
@@ -1048,7 +1059,7 @@ impl CheckpointJournal {
                 return Err(RecoveryError::CommittedEffectMissing(effect_id.clone()));
             }
         }
-        if !verifier_recorded {
+        if lifecycle.verifier_records == 0 || lifecycle.verification_open {
             return Err(RecoveryError::VerifierEventMissing);
         }
         if checkpoint.sequence != events.len() as u64 {

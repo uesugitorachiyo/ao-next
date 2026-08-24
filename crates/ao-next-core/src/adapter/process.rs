@@ -2,7 +2,11 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt as _;
+use std::fs::{File, OpenOptions};
+#[cfg(windows)]
+use std::io::{Read as _, Take};
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -21,7 +25,18 @@ use crate::evidence::digest_bytes;
 use crate::strict_json::{canonical_digest, decode_strict_json};
 
 #[cfg(windows)]
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+
+#[cfg(any(test, windows))]
+const fn windows_reparse_point(attributes: u32) -> bool {
+    attributes & 0x400 != 0
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderVisibleFile {
@@ -615,7 +630,11 @@ fn visible_files(
 ) -> Result<(Vec<ProviderVisibleFile>, Vec<VisibleFileIdentity>), AdapterError> {
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    #[cfg(windows)]
+    let reparse_point = windows_reparse_point(metadata.file_attributes());
+    #[cfg(not(windows))]
+    let reparse_point = false;
+    if metadata.file_type().is_symlink() || reparse_point || !metadata.is_dir() {
         return Err(AdapterError::Runtime(
             "provider-visible root is not a regular non-symlink directory".into(),
         ));
@@ -633,13 +652,16 @@ fn visible_files(
         let relative_text = safe_relative_text(relative)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        #[cfg(windows)]
+        let reparse_point = windows_reparse_point(metadata.file_attributes());
+        #[cfg(not(windows))]
+        let reparse_point = false;
+        if metadata.file_type().is_symlink() || reparse_point || !metadata.is_file() {
             return Err(AdapterError::Runtime(
                 "provider-visible inventory contains a non-regular file".into(),
             ));
         }
-        let bytes =
-            std::fs::read(&path).map_err(|error| AdapterError::Runtime(error.to_string()))?;
+        let bytes = read_visible_file(&path, maximum_bytes)?;
         total = total.checked_add(bytes.len()).ok_or_else(|| {
             AdapterError::Runtime("provider-visible byte count overflowed".into())
         })?;
@@ -672,6 +694,8 @@ fn collect_visible_paths(
     omit_root_git: bool,
     paths: &mut Vec<PathBuf>,
 ) -> Result<(), AdapterError> {
+    #[cfg(windows)]
+    let _directory_anchor = open_visible_directory(directory)?;
     let mut entries = std::fs::read_dir(directory)
         .map_err(|error| AdapterError::Runtime(error.to_string()))?
         .collect::<Result<Vec<_>, _>>()
@@ -681,21 +705,16 @@ fn collect_visible_paths(
         let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(AdapterError::Runtime(
-                "provider-visible inventory contains a symlink".into(),
-            ));
-        }
         #[cfg(windows)]
-        let reparse_point = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        let reparse_point = windows_reparse_point(metadata.file_attributes());
         #[cfg(not(windows))]
         let reparse_point = false;
-        if omit_root_git
-            && directory == root
-            && entry.file_name() == ".git"
-            && metadata.is_dir()
-            && !reparse_point
-        {
+        if metadata.file_type().is_symlink() || reparse_point {
+            return Err(AdapterError::Runtime(
+                "provider-visible inventory contains a symlink or reparse point".into(),
+            ));
+        }
+        if omit_root_git && directory == root && entry.file_name() == ".git" && metadata.is_dir() {
             continue;
         }
         let relative = path
@@ -713,6 +732,60 @@ fn collect_visible_paths(
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn read_visible_file(path: &Path, _: usize) -> Result<Vec<u8>, AdapterError> {
+    std::fs::read(path).map_err(|error| AdapterError::Runtime(error.to_string()))
+}
+
+#[cfg(windows)]
+fn open_visible_directory(path: &Path) -> Result<File, AdapterError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if !metadata.is_dir() || windows_reparse_point(metadata.file_attributes()) {
+        return Err(AdapterError::Runtime(
+            "provider-visible root or directory is a reparse point".into(),
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn read_visible_file(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, AdapterError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if !metadata.is_file() || windows_reparse_point(metadata.file_attributes()) {
+        return Err(AdapterError::Runtime(
+            "provider-visible file is a reparse point".into(),
+        ));
+    }
+    let limit = u64::try_from(maximum_bytes).unwrap_or(u64::MAX);
+    let mut bytes = Vec::new();
+    let mut bounded: Take<File> = file.take(limit.saturating_add(1));
+    bounded
+        .read_to_end(&mut bytes)
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    if bytes.len() > maximum_bytes {
+        return Err(AdapterError::Runtime(
+            "provider-visible inventory exceeded its byte bound".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn safe_relative_text(path: &Path) -> Result<String, AdapterError> {
@@ -825,4 +898,13 @@ fn required_u64(value: &Value) -> Result<u64, AdapterError> {
     value
         .as_u64()
         .ok_or_else(|| AdapterError::Runtime("trusted usage counter is not a u64".into()))
+}
+
+#[cfg(test)]
+mod reparse_tests {
+    #[test]
+    fn windows_reparse_attribute_is_unsafe() {
+        assert!(super::windows_reparse_point(0x400));
+        assert!(!super::windows_reparse_point(0));
+    }
 }

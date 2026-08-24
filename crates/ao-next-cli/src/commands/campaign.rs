@@ -805,6 +805,11 @@ fn run_security_matrix(evidence_root: &Path) -> Result<SecurityCoverageReceipt, 
         JournalEvent {
             schema_version: "ao.next.journal-event.v1".into(),
             sequence: 1,
+            kind: JournalEventKind::VerificationStarted { attempt: 0 },
+        },
+        JournalEvent {
+            schema_version: "ao.next.journal-event.v1".into(),
+            sequence: 2,
             kind: JournalEventKind::VerifierRecorded {
                 report_digest: digest_bytes(b"durable-verifier-event"),
             },
@@ -821,7 +826,7 @@ fn run_security_matrix(evidence_root: &Path) -> Result<SecurityCoverageReceipt, 
             &Checkpoint {
                 schema_version: "ao.next.checkpoint.v1".into(),
                 run_id: request.run_id,
-                sequence: 2,
+                sequence: 3,
                 identity: checkpoint_identity.clone(),
                 committed_effects: BTreeSet::from(["effect-committed-before-interrupt".into()]),
                 events_digest: events_digest.clone(),

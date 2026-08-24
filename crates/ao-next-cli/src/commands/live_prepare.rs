@@ -77,7 +77,7 @@ pub fn execute(args: &PrepareLiveArgs) -> Result<CommandOutput, CommandFailure> 
         journal_identity_digest: canonical_digest(&journal_identity)
             .map_err(|error| CommandFailure::evidence(error.to_string()))?,
         prepared_at,
-        expires_at: input.request.authority.expires_at,
+        expires_at: prepared_at + chrono::TimeDelta::hours(24),
         provider_calls: 0,
         safe_to_execute: false,
     };

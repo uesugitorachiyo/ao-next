@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +9,9 @@ use crate::adapter::{
     AdapterAction, AdapterIdentity, ControlMutation, EffectObservation, RuntimeAdapter, TokenUsage,
     TurnContext,
 };
-use crate::contracts::{Digest, RunRequest, RunState};
+use crate::contracts::{
+    Digest, N7ExecutionAuthority, RunRequest, RunState, validate_n7_execution_authority_current,
+};
 use crate::effects::EffectBroker;
 use crate::recovery::{CheckpointJournal, JournalEffectState};
 use crate::strict_json::canonical_digest;
@@ -92,7 +95,7 @@ where
         A: RuntimeAdapter,
         V: EngineVerifier,
     {
-        self.run_inner(request, adapter, verifier, None)
+        self.run_inner(request, adapter, verifier, None, None)
     }
 
     /// Runs one worker through a request-bound append-only execution journal.
@@ -109,7 +112,30 @@ where
         A: RuntimeAdapter,
         V: EngineVerifier,
     {
-        self.run_inner(request, adapter, verifier, Some(journal))
+        self.run_inner(request, adapter, verifier, Some(journal), None)
+    }
+
+    /// Runs one durable N7 worker and rechecks its separately issued authority
+    /// immediately before every fresh effect intent.
+    pub fn run_durable_n7<A, V>(
+        &self,
+        request: &RunRequest,
+        adapter: &mut A,
+        verifier: &mut V,
+        journal: &CheckpointJournal,
+        execution_authority: &N7ExecutionAuthority,
+    ) -> RunOutcome
+    where
+        A: RuntimeAdapter,
+        V: EngineVerifier,
+    {
+        self.run_inner(
+            request,
+            adapter,
+            verifier,
+            Some(journal),
+            Some(execution_authority),
+        )
     }
 
     #[allow(
@@ -122,6 +148,7 @@ where
         adapter: &mut A,
         verifier: &mut V,
         journal: Option<&CheckpointJournal>,
+        execution_authority: Option<&N7ExecutionAuthority>,
     ) -> RunOutcome
     where
         A: RuntimeAdapter,
@@ -470,6 +497,21 @@ where
                         }
                         match self.broker.authorize(&effect, &request.authority) {
                             Ok(authorized) => {
+                                if execution_authority.is_some_and(|authority| {
+                                    validate_n7_execution_authority_current(authority, Utc::now())
+                                        .is_err()
+                                }) {
+                                    return transition_and_finish(
+                                        lifecycle,
+                                        identity,
+                                        metrics,
+                                        events,
+                                        verifier_report_digest,
+                                        RunState::Denied,
+                                        "execution_authority_not_current",
+                                        "N7 execution authority expired before durable effect intent",
+                                    );
+                                }
                                 if let Some(journal) = journal
                                     && let Err(error) =
                                         journal.record_effect_intent(request, &effect)

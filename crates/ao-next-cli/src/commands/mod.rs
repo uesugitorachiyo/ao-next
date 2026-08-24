@@ -50,6 +50,8 @@ pub struct LiveRunArgs {
     #[arg(long)]
     pub prepared_run: Option<PathBuf>,
     #[arg(long)]
+    pub authority: Option<PathBuf>,
+    #[arg(long)]
     pub trusted_corpus_digest: Option<String>,
     #[arg(long)]
     pub trusted_verifier_profile_digest: Option<String>,
@@ -73,6 +75,8 @@ pub struct RecoverLiveArgs {
     pub input: PathBuf,
     #[arg(long)]
     pub prepared_run: PathBuf,
+    #[arg(long)]
+    pub authority: PathBuf,
     #[arg(long)]
     pub trusted_corpus_digest: String,
     #[arg(long)]

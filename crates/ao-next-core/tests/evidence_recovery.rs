@@ -488,6 +488,11 @@ fn recovery_events() -> Vec<JournalEvent> {
         JournalEvent {
             schema_version: "ao.next.journal-event.v1".into(),
             sequence: 1,
+            kind: JournalEventKind::VerificationStarted { attempt: 0 },
+        },
+        JournalEvent {
+            schema_version: "ao.next.journal-event.v1".into(),
+            sequence: 2,
             kind: JournalEventKind::VerifierRecorded {
                 report_digest: digest(ONE_DIGEST),
             },
@@ -572,7 +577,7 @@ fn interrupted_n7_resume_skips_committed_effect_and_requires_durable_verifier_ev
     let checkpoint = Checkpoint {
         schema_version: "ao.next.checkpoint.v1".into(),
         run_id: request.run_id.clone(),
-        sequence: 2,
+        sequence: 3,
         identity: identity.clone(),
         committed_effects: BTreeSet::from(["effect-01".into()]),
         events_digest,
@@ -614,7 +619,7 @@ fn recovery_rejects_every_changed_identity_and_checkpoint_digest() {
     let checkpoint = Checkpoint {
         schema_version: "ao.next.checkpoint.v1".into(),
         run_id: request.run_id.clone(),
-        sequence: 2,
+        sequence: 3,
         identity: identity.clone(),
         committed_effects: BTreeSet::from(["effect-01".into()]),
         events_digest,
@@ -855,6 +860,100 @@ fn provider_intent_blocks_verification_start() {
             .begin_verification(&fixture.request)
             .is_err()
     );
+}
+
+#[test]
+fn verification_rejects_unknown_effects_and_later_effect_intents() {
+    let unknown = fixture();
+    let pending = effect(&unknown.request);
+    unknown
+        .journal
+        .record_effect_intent(&unknown.request, &pending)
+        .expect("effect intent");
+    assert!(
+        unknown
+            .journal
+            .begin_verification(&unknown.request)
+            .is_err(),
+        "verification started with an unknown effect"
+    );
+
+    let verified = fixture();
+    verified
+        .journal
+        .begin_verification(&verified.request)
+        .expect("verification start");
+    assert!(
+        verified
+            .journal
+            .effect_state(&verified.request, &effect(&verified.request))
+            .is_err(),
+        "fresh effect remained eligible after verification"
+    );
+    assert!(
+        verified
+            .journal
+            .record_effect_intent(&verified.request, &effect(&verified.request))
+            .is_err(),
+        "effect intent followed verification"
+    );
+}
+
+#[test]
+fn checkpoint_rejects_wrong_attempt_and_non_terminal_last_sequences() {
+    for (name, events) in [
+        (
+            "wrong-attempt",
+            vec![
+                journal_event(0, JournalEventKind::VerificationStarted { attempt: 7 }),
+                journal_event(
+                    1,
+                    JournalEventKind::VerifierRecorded {
+                        report_digest: digest_bytes(b"report"),
+                    },
+                ),
+            ],
+        ),
+        (
+            "event-after-terminal",
+            vec![
+                journal_event(0, JournalEventKind::VerificationStarted { attempt: 0 }),
+                journal_event(
+                    1,
+                    JournalEventKind::VerifierRecorded {
+                        report_digest: digest_bytes(b"report"),
+                    },
+                ),
+                journal_event(
+                    2,
+                    JournalEventKind::TerminalPublished {
+                        record_digest: digest_bytes(b"terminal"),
+                    },
+                ),
+                journal_event(3, JournalEventKind::VerificationStarted { attempt: 1 }),
+                journal_event(
+                    4,
+                    JournalEventKind::VerifierRecorded {
+                        report_digest: digest_bytes(b"later-report"),
+                    },
+                ),
+            ],
+        ),
+    ] {
+        let recovery = TempDir::new().expect("recovery");
+        let request = request(recovery.path());
+        let event_path = recovery.path().join(format!("{name}.jsonl"));
+        let events_digest =
+            write_durable_event_log(&event_path, &events, 16 * 1024).expect("event log");
+        let checkpoint = checkpoint_for_events(&request, events.len() as u64, events_digest);
+        let journal =
+            CheckpointJournal::new(recovery.path().join("journal"), 16 * 1024).expect("journal");
+
+        assert!(
+            journal.commit(&checkpoint, &event_path).is_err(),
+            "accepted {name} lifecycle"
+        );
+    }
 }
 
 #[test]

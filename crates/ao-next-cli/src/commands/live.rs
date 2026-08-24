@@ -25,8 +25,10 @@ use ao_next_core::adapter::{
 };
 use ao_next_core::capture::{CaptureIndexStore, CapturePublication};
 use ao_next_core::contracts::{
-    Capability, Digest, ExternalEffectPolicy, NetworkPolicy, PreparedRunReceipt, RunRequest,
-    RunState,
+    Capability, Digest, ExternalEffectPolicy, N7ExecutionAuthority,
+    N7ExecutionAuthorityExpectation, NetworkPolicy, PreparedRunReceipt, RunRequest, RunState,
+    n7_requested_write_scope_digest, validate_n7_execution_authority_current,
+    validate_n7_execution_authority_identity,
 };
 use ao_next_core::effects::LocalEffectBroker;
 use ao_next_core::engine::{DirectEngine, EngineEventKind, EngineVerifier, RunOutcome};
@@ -59,7 +61,56 @@ const LIVE_TOKEN_ENVELOPE: u64 = 564_288;
 const ADAPTER_TURN_SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../../docs/contracts/adapter-turn-v1.schema.json");
 #[cfg(windows)]
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+#[cfg(any(test, windows))]
+const fn windows_reparse_point(attributes: u32) -> bool {
+    attributes & 0x400 != 0
+}
+
+fn unsafe_link_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        windows_reparse_point(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_non_reparse(path: &Path, directory: bool) -> Result<std::fs::File, CommandFailure> {
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | if directory {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if unsafe_link_metadata(&metadata) || metadata.is_dir() != directory {
+        return Err(CommandFailure::invalid_input(
+            "Windows path is a reparse point or has the wrong file type",
+        ));
+    }
+    Ok(file)
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -73,6 +124,12 @@ pub(super) enum LiveVariant {
 pub(super) enum CaptureRootMode {
     RequireEmpty,
     RequireRetained,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestAuthorityMode {
+    Current,
+    RequestedScope,
 }
 
 impl LiveVariant {
@@ -403,9 +460,7 @@ fn open_bound_fake_program(
     }
     let metadata = std::fs::symlink_metadata(program)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > 512 * 1024 * 1024
+    if unsafe_link_metadata(&metadata) || !metadata.is_file() || metadata.len() > 512 * 1024 * 1024
     {
         return Err(CommandFailure::invalid_input(
             "provider-free fake program is not a bounded regular non-symlink file",
@@ -728,6 +783,13 @@ struct CaptureFirstRunner<'a, R> {
     journal: Option<&'a CheckpointJournal>,
     request: &'a RunRequest,
     prepared_run_digest: Digest,
+    execution_authority: Option<&'a N7ExecutionAuthority>,
+}
+
+pub(super) struct PreparedN7Context {
+    pub(super) git_workspace: GitWorkspaceIdentity,
+    pub(super) prepared_run_digest: Digest,
+    pub(super) execution_authority: N7ExecutionAuthority,
 }
 
 struct RetainedN7Execution {
@@ -749,6 +811,10 @@ struct RetainedN7Adapter {
 }
 
 impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "capture and journal durability ordering remains visible at the process boundary"
+    )]
     fn run(
         &mut self,
         invocation: &PreparedInvocation,
@@ -766,6 +832,13 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
         }
         let provider_invocation_digest =
             invocation_digest(invocation).map_err(|error| InvocationError::Io(error.message))?;
+        if self.execution_authority.is_some_and(|authority| {
+            validate_n7_execution_authority_current(authority, Utc::now()).is_err()
+        }) {
+            return Err(InvocationError::Io(
+                "N7 execution authority is not current before provider intent".into(),
+            ));
+        }
         if let Some(journal) = self.journal {
             journal
                 .provider_may_start(self.request)
@@ -779,7 +852,7 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
                 .map_err(|error| InvocationError::Io(error.to_string()))?;
         }
         let output = self.runner.run(invocation, cancellation)?;
-        let (index, _) = retain_raw_capture_files(
+        let (index, index_digest) = retain_raw_capture_files(
             &self.raw_capture_root,
             &self.capture_context,
             &[],
@@ -787,6 +860,13 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
             Some(&provider_invocation_digest),
         )
         .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        let staged_digest = stage_raw_capture_index(&self.raw_capture_root, &index)
+            .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
+        if staged_digest != index_digest {
+            return Err(InvocationError::Io(
+                "capture failure: staged index digest drifted".into(),
+            ));
+        }
         let raw_digest = canonical_digest(&(output.status, &output.stdout, &output.stderr))
             .map_err(|error| InvocationError::Io(error.to_string()))?;
         if let Some(journal) = self.journal {
@@ -794,7 +874,7 @@ impl<R: ProcessRunner> ProcessRunner for CaptureFirstRunner<'_, R> {
                 .record_provider_output_retained(self.request, &raw_digest)
                 .map_err(|error| InvocationError::Io(error.to_string()))?;
         }
-        let publication = publish_raw_capture_index(&self.raw_capture_root, &index)
+        let publication = publish_staged_raw_capture_index(&self.raw_capture_root, &staged_digest)
             .map_err(|error| InvocationError::Io(format!("capture failure: {}", error.message)))?;
         let digest = publication.digest().clone();
         if let Some(journal) = self.journal {
@@ -934,32 +1014,45 @@ pub(super) fn execute(
             "live provider calls require separate operator authorization",
         ));
     }
-    let prepared_run = match (variant, args.prepared_run.as_ref()) {
-        (LiveVariant::N7, Some(path)) => Some(path),
-        (LiveVariant::N7, None) => {
+    let prepared_run = match (variant, args.prepared_run.as_ref(), args.authority.as_ref()) {
+        (LiveVariant::N7, Some(receipt), Some(authority)) => Some((receipt, authority)),
+        (LiveVariant::N7, None, _) => {
             return Err(CommandFailure::invalid_input(
                 "--prepared-run is required for N7 live execution",
             ));
         }
-        (LiveVariant::N0 | LiveVariant::N4, Some(_)) => {
+        (LiveVariant::N7, Some(_), None) => {
             return Err(CommandFailure::invalid_input(
-                "--prepared-run is forbidden for live baselines",
+                "--authority is required for N7 live execution",
             ));
         }
-        (LiveVariant::N0 | LiveVariant::N4, None) => None,
+        (LiveVariant::N0 | LiveVariant::N4, Some(_), _)
+        | (LiveVariant::N0 | LiveVariant::N4, _, Some(_)) => {
+            return Err(CommandFailure::invalid_input(
+                "--prepared-run and --authority are forbidden for live baselines",
+            ));
+        }
+        (LiveVariant::N0 | LiveVariant::N4, None, None) => None,
     };
     let trusted = trusted_bindings(
         args.trusted_corpus_digest.as_deref(),
         args.trusted_verifier_profile_digest.as_deref(),
     )?;
-    if let Some(prepared_run) = prepared_run {
+    if let Some((prepared_run, authority_path)) = prepared_run {
         let input_bytes = read_bounded_regular(&args.input)?;
         let input: LiveRunInput = decode_strict_json(&input_bytes, 1024 * 1024)
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
         validate_trusted_bindings(&input, &trusted)?;
         let receipt: PreparedRunReceipt = decode_file(prepared_run)?;
-        let prepared =
-            validate_prepared_run(&args.input, &input_bytes, &input, &receipt, Utc::now())?;
+        let authority: N7ExecutionAuthority = decode_file(authority_path)?;
+        let prepared = validate_prepared_run(
+            &args.input,
+            &input_bytes,
+            &input,
+            &receipt,
+            authority,
+            Utc::now(),
+        )?;
         execute_with_prepared_runners(
             &input,
             variant,
@@ -986,9 +1079,17 @@ fn validate_prepared_run(
     input_bytes: &[u8],
     input: &LiveRunInput,
     receipt: &PreparedRunReceipt,
+    authority: N7ExecutionAuthority,
     now: DateTime<Utc>,
-) -> Result<(GitWorkspaceIdentity, Digest), CommandFailure> {
-    validate_prepared_run_with_mode(input_path, input_bytes, input, receipt, now, true)
+) -> Result<PreparedN7Context, CommandFailure> {
+    let (git_workspace, prepared_run_digest) =
+        validate_prepared_run_with_mode(input_path, input_bytes, input, receipt, now, true)?;
+    validate_execution_authority(input, receipt, &prepared_run_digest, &authority, now, true)?;
+    Ok(PreparedN7Context {
+        git_workspace,
+        prepared_run_digest,
+        execution_authority: authority,
+    })
 }
 
 pub(super) fn validate_prepared_run_for_recovery(
@@ -1025,7 +1126,6 @@ fn validate_prepared_run_with_mode(
         || receipt.journal_identity_digest
             != canonical_digest(&journal_identity)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?
-        || receipt.expires_at != input.request.authority.expires_at
         || receipt.prepared_at >= receipt.expires_at
         || (require_current && receipt.expires_at <= now)
         || receipt.provider_calls != 0
@@ -1055,6 +1155,7 @@ fn validate_prepared_run_with_mode(
             now,
             Some(&git_workspace),
             CaptureRootMode::RequireRetained,
+            RequestAuthorityMode::RequestedScope,
         )?;
     }
     let journal = CheckpointJournal::new(
@@ -1076,6 +1177,38 @@ fn validate_prepared_run_with_mode(
     let prepared_run_digest = canonical_digest(receipt)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
     Ok((git_workspace, prepared_run_digest))
+}
+
+pub(super) fn validate_execution_authority(
+    input: &LiveRunInput,
+    receipt: &PreparedRunReceipt,
+    prepared_run_digest: &Digest,
+    authority: &N7ExecutionAuthority,
+    now: DateTime<Utc>,
+    require_current: bool,
+) -> Result<(), CommandFailure> {
+    let expectation = N7ExecutionAuthorityExpectation {
+        prepared_run_digest: prepared_run_digest.clone(),
+        preparation_input_digest: receipt.input_digest.clone(),
+        preparation_request_digest: receipt.request_digest.clone(),
+        base_commit: receipt.base_commit.clone(),
+        workspace_identity_digest: canonical_digest(&input.request.workspace)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        workspace_digest: receipt.workspace_digest.clone(),
+        workspace_root: receipt.repository_root.clone(),
+        requested_authority_digest: canonical_digest(&input.request.authority)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        write_scope_digest: n7_requested_write_scope_digest(&input.request)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?,
+        prepared_at: receipt.prepared_at,
+    };
+    validate_n7_execution_authority_identity(authority, &expectation)
+        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    if require_current {
+        validate_n7_execution_authority_current(authority, now)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    }
+    Ok(())
 }
 
 pub(super) fn revalidate_recovery_before_mutation(
@@ -1181,7 +1314,14 @@ pub(super) fn load_trusted_live_input(
         Some(trusted_verifier_profile_digest),
     )?;
     validate_trusted_bindings(&input, &trusted)?;
-    validate_input(&input, variant, now)?;
+    validate_input_with_capture_mode(
+        &input,
+        variant,
+        now,
+        None,
+        CaptureRootMode::RequireEmpty,
+        RequestAuthorityMode::RequestedScope,
+    )?;
     Ok(TrustedLiveInput { input, bytes })
 }
 
@@ -1200,7 +1340,14 @@ pub(super) fn load_trusted_live_input_for_recovery(
         Some(trusted_verifier_profile_digest),
     )?;
     validate_trusted_bindings(&input, &trusted)?;
-    validate_input_with_capture_mode(&input, variant, now, None, CaptureRootMode::RequireRetained)?;
+    validate_input_with_capture_mode(
+        &input,
+        variant,
+        now,
+        None,
+        CaptureRootMode::RequireRetained,
+        RequestAuthorityMode::RequestedScope,
+    )?;
     Ok(input)
 }
 
@@ -1399,7 +1546,7 @@ fn execute_with_prepared_runners<P: ProcessRunner, V: ProcessRunner>(
     measurement_origin: MeasurementOrigin,
     provider_runner: P,
     verifier_runner: V,
-    prepared: Option<(GitWorkspaceIdentity, Digest)>,
+    prepared: Option<PreparedN7Context>,
 ) -> Result<CommandOutput, CommandFailure> {
     execute_with_prepared_runner_mode(
         input,
@@ -1417,7 +1564,7 @@ pub(super) fn execute_recovered_live(
     turn: AdapterTurn,
     capture: RuntimeCapture,
     output: InvocationOutput,
-    prepared: (GitWorkspaceIdentity, Digest),
+    prepared: PreparedN7Context,
     retained_index: &Digest,
 ) -> Result<CommandOutput, CommandFailure> {
     execute_with_prepared_runner_mode(
@@ -1512,33 +1659,39 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
     measurement_origin: MeasurementOrigin,
     provider_runner: P,
     verifier_runner: V,
-    prepared: Option<(GitWorkspaceIdentity, Digest)>,
+    prepared: Option<PreparedN7Context>,
     recovery: Option<RetainedN7Execution>,
 ) -> Result<CommandOutput, CommandFailure> {
     let started_at = Utc::now();
     let started = Instant::now();
-    let validated = if let Some((git_workspace, _)) = &prepared {
+    let validated = if let Some(prepared) = &prepared {
         validate_input_with_capture_mode(
             input,
             variant,
             started_at,
-            Some(git_workspace),
+            Some(&prepared.git_workspace),
             if recovery.is_some() {
                 CaptureRootMode::RequireRetained
             } else {
                 CaptureRootMode::RequireEmpty
             },
+            RequestAuthorityMode::RequestedScope,
         )?
     } else {
         validate_input(input, variant, started_at)?
     };
-    let (git_workspace, prepared_run_digest) = if let Some(prepared) = prepared {
+    let (git_workspace, prepared_run_digest, execution_authority) = if let Some(prepared) = prepared
+    {
         if variant != LiveVariant::N7 {
             return Err(CommandFailure::invalid_input(
                 "prepared-run context is restricted to N7",
             ));
         }
-        prepared
+        (
+            prepared.git_workspace,
+            prepared.prepared_run_digest,
+            Some(prepared.execution_authority),
+        )
     } else {
         let git_workspace = prepare_git_workspace(
             &input.request.workspace.root,
@@ -1547,7 +1700,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
         )?;
         let digest = canonical_digest(&git_workspace)
             .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-        (git_workspace, digest)
+        (git_workspace, digest, None)
     };
     let provider_visibility = if variant == LiveVariant::N7 && recovery.is_none() {
         Some(n7_provider_visibility(input, validated.task)?)
@@ -1605,6 +1758,9 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
                     retained,
                     &mut verifier,
                     journal.as_ref().expect("N7 journal constructed"),
+                    execution_authority
+                        .as_ref()
+                        .expect("prepared N7 authority validated"),
                 )
             } else {
                 execute_n7(
@@ -1621,11 +1777,13 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
                         journal: journal.as_ref(),
                         request: &input.request,
                         prepared_run_digest: prepared_run_digest.clone(),
+                        execution_authority: execution_authority.as_ref(),
                     },
                     &mut verifier,
                     cancellation.clone(),
                     invocation_limits,
                     journal.as_ref().expect("N7 journal constructed"),
+                    execution_authority.as_ref(),
                 )
             }
         }
@@ -1642,6 +1800,7 @@ fn execute_with_prepared_runner_mode<P: ProcessRunner, V: ProcessRunner>(
                 journal: None,
                 request: &input.request,
                 prepared_run_digest,
+                execution_authority: None,
             },
             &mut verifier,
             &cancellation,
@@ -2142,7 +2301,7 @@ fn decode_current_ao_output(
     );
     let sandbox_metadata = std::fs::symlink_metadata(&sandbox_path)
         .map_err(|error| CommandFailure::runtime(error.to_string()))?;
-    if sandbox_metadata.file_type().is_symlink() || !sandbox_metadata.is_dir() {
+    if unsafe_link_metadata(&sandbox_metadata) || !sandbox_metadata.is_dir() {
         return Err(CommandFailure::runtime(
             "current-AO sandbox is not a regular directory",
         ));
@@ -2378,6 +2537,10 @@ pub(super) fn normalize_retained_turn(
     ))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "N7 keeps every validated runtime and authority boundary explicit"
+)]
 fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     input: &LiveRunInput,
     visibility: ProviderVisibility,
@@ -2386,6 +2549,7 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
     cancellation: CancellationToken,
     limits: InvocationLimits,
     journal: &CheckpointJournal,
+    execution_authority: Option<&N7ExecutionAuthority>,
 ) -> Result<LiveExecution, CommandFailure> {
     let config = ProcessAdapterConfig::from_request_with_visibility(
         &input.request,
@@ -2403,8 +2567,18 @@ fn execute_n7<P: ProcessRunner, V: ProcessRunner>(
         usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
         usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
     );
-    let outcome =
-        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, journal);
+    let engine = DirectEngine::new(&broker);
+    let outcome = if let Some(execution_authority) = execution_authority {
+        engine.run_durable_n7(
+            &input.request,
+            &mut adapter,
+            verifier,
+            journal,
+            execution_authority,
+        )
+    } else {
+        engine.run_durable(&input.request, &mut adapter, verifier, journal)
+    };
     let terminal_state = outcome.terminal_state.clone();
     Ok((
         terminal_state,
@@ -2421,6 +2595,7 @@ fn execute_n7_retained<V: ProcessRunner>(
     retained: RetainedN7Execution,
     verifier: &mut CommandEngineVerifier<V>,
     journal: &CheckpointJournal,
+    execution_authority: &N7ExecutionAuthority,
 ) -> Result<LiveExecution, CommandFailure> {
     let mut adapter = RetainedN7Adapter {
         identity: AdapterIdentity {
@@ -2443,8 +2618,13 @@ fn execute_n7_retained<V: ProcessRunner>(
         usize::try_from(input.request.limits.max_input_bytes).unwrap_or(usize::MAX),
         usize::try_from(input.request.limits.max_output_bytes).unwrap_or(usize::MAX),
     );
-    let outcome =
-        DirectEngine::new(&broker).run_durable(&input.request, &mut adapter, verifier, journal);
+    let outcome = DirectEngine::new(&broker).run_durable_n7(
+        &input.request,
+        &mut adapter,
+        verifier,
+        journal,
+        execution_authority,
+    );
     Ok((
         outcome.terminal_state.clone(),
         Some(outcome),
@@ -2540,7 +2720,14 @@ fn validate_prepared_input<'a>(
     now: chrono::DateTime<Utc>,
     git_workspace: &GitWorkspaceIdentity,
 ) -> Result<ValidatedInput<'a>, CommandFailure> {
-    validate_input_with_git(input, variant, now, Some(git_workspace))
+    validate_input_with_capture_mode(
+        input,
+        variant,
+        now,
+        Some(git_workspace),
+        CaptureRootMode::RequireEmpty,
+        RequestAuthorityMode::RequestedScope,
+    )
 }
 
 #[allow(
@@ -2559,6 +2746,7 @@ fn validate_input_with_git<'a>(
         now,
         git_workspace,
         CaptureRootMode::RequireEmpty,
+        RequestAuthorityMode::Current,
     )
 }
 
@@ -2572,6 +2760,7 @@ fn validate_input_with_capture_mode<'a>(
     now: chrono::DateTime<Utc>,
     git_workspace: Option<&GitWorkspaceIdentity>,
     capture_mode: CaptureRootMode,
+    authority_mode: RequestAuthorityMode,
 ) -> Result<ValidatedInput<'a>, CommandFailure> {
     if input.schema_version != "ao.next.live-run-input.v1"
         || input.task_id.trim().is_empty()
@@ -2624,11 +2813,11 @@ fn validate_input_with_capture_mode<'a>(
         workspace: input.request.workspace.clone(),
         now,
     };
-    match capture_mode {
-        CaptureRootMode::RequireEmpty => {
+    match authority_mode {
+        RequestAuthorityMode::Current => {
             ao_next_core::contracts::validate_intake(&input.request, &expectation)
         }
-        CaptureRootMode::RequireRetained => {
+        RequestAuthorityMode::RequestedScope => {
             ao_next_core::contracts::validate_intake_identity(&input.request, &expectation)
         }
     }
@@ -2863,11 +3052,7 @@ fn ensure_private_capture_root(
     ensure_outside_roots(path, worker_roots)?;
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    #[cfg(windows)]
-    let reparse_point = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    #[cfg(not(windows))]
-    let reparse_point = false;
-    if metadata.file_type().is_symlink() || reparse_point || !metadata.is_dir() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "raw capture root is not a regular non-symlink directory",
         ));
@@ -2907,18 +3092,13 @@ fn ensure_private_capture_root(
         }
         let metadata = std::fs::symlink_metadata(entry.path())
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-        #[cfg(windows)]
-        let reparse_point = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-        #[cfg(not(windows))]
-        let reparse_point = false;
         let capture = name.starts_with("capture-")
             && (name.ends_with(".stdout") || name.ends_with(".stderr"));
         let metadata_file = matches!(
             name.as_str(),
             "capture-index.json" | "capture-index.json.incomplete" | "capture-terminal.json"
         );
-        if metadata.file_type().is_symlink()
-            || reparse_point
+        if unsafe_link_metadata(&metadata)
             || !metadata.is_file()
             || (!capture && !metadata_file)
             || (metadata_file && metadata.len() > 1024 * 1024)
@@ -3086,19 +3266,28 @@ fn publish_raw_capture_index(
         canonical_json_bytes(index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let store = CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    let publication = store
+    store
         .publish(&bytes)
-        .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
 
-        let path = root.join("capture-index.json");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .and_then(|()| std::fs::File::open(path)?.sync_all())
-            .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    }
-    Ok(publication)
+fn stage_raw_capture_index(root: &Path, index: &RawCaptureIndex) -> Result<Digest, CommandFailure> {
+    let bytes =
+        canonical_json_bytes(index).map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        .stage_incomplete(&bytes)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
+}
+
+fn publish_staged_raw_capture_index(
+    root: &Path,
+    expected: &Digest,
+) -> Result<CapturePublication, CommandFailure> {
+    CaptureIndexStore::open(root.to_path_buf(), 1024 * 1024)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))?
+        .publish_staged(expected)
+        .map_err(|error| CommandFailure::evidence(error.to_string()))
 }
 
 fn verify_raw_capture_index(
@@ -3341,7 +3530,7 @@ fn checked_capture_path(root: &Path, relative: &str) -> Result<PathBuf, CommandF
     let path = root.join(path);
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_file() {
         return Err(CommandFailure::evidence(
             "raw capture is not a regular non-symlink file",
         ));
@@ -3426,7 +3615,7 @@ fn validate_current_ao_binding(
         }
         let metadata = std::fs::symlink_metadata(program)
             .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-        if metadata.file_type().is_symlink()
+        if unsafe_link_metadata(&metadata)
             || !metadata.is_file()
             || metadata.len() > 512 * 1024 * 1024
         {
@@ -3529,23 +3718,29 @@ pub(super) fn prepare_git_workspace(
 ) -> Result<GitWorkspaceIdentity, CommandFailure> {
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "workspace is not a regular non-symlink directory",
         ));
     }
+    #[cfg(windows)]
+    let _workspace_anchor = open_windows_non_reparse(root, true)?;
     let repository_root = std::fs::canonicalize(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    #[cfg(windows)]
+    let mut allowed_anchors = Vec::with_capacity(allowed_roots.len());
     let allowed = allowed_roots
         .iter()
         .try_fold(false, |matched, allowed_root| {
             let metadata = std::fs::symlink_metadata(allowed_root)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
                 return Err(CommandFailure::invalid_input(
                     "authority root is not a regular non-symlink directory",
                 ));
             }
+            #[cfg(windows)]
+            allowed_anchors.push(open_windows_non_reparse(allowed_root, true)?);
             let allowed_root = std::fs::canonicalize(allowed_root)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
             Ok(matched || repository_root.starts_with(allowed_root))
@@ -3669,6 +3864,8 @@ pub(super) fn prepare_git_workspace(
 }
 
 fn reject_git_metadata(root: &Path) -> Result<(), CommandFailure> {
+    #[cfg(windows)]
+    let mut directory_anchors = vec![open_windows_non_reparse(root, true)?];
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory)
@@ -3687,14 +3884,19 @@ fn reject_git_metadata(root: &Path) -> Result<(), CommandFailure> {
             }
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-            if metadata.file_type().is_symlink() {
+            if unsafe_link_metadata(&metadata) {
                 return Err(CommandFailure::invalid_input(
                     "workspace contains a symlink",
                 ));
             }
             if metadata.is_dir() {
+                #[cfg(windows)]
+                directory_anchors.push(open_windows_non_reparse(&path, true)?);
                 pending.push(path);
-            } else if !metadata.is_file() {
+            } else if metadata.is_file() {
+                #[cfg(windows)]
+                drop(open_windows_non_reparse(&path, false)?);
+            } else {
                 return Err(CommandFailure::invalid_input(
                     "workspace contains a non-regular entry",
                 ));
@@ -3761,7 +3963,7 @@ fn git_program() -> Result<PathBuf, CommandFailure> {
         let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
             continue;
         };
-        if !metadata.file_type().is_symlink() && metadata.is_file() {
+        if !unsafe_link_metadata(&metadata) && metadata.is_file() {
             return std::fs::canonicalize(candidate)
                 .map_err(|error| CommandFailure::runtime(error.to_string()));
         }
@@ -3840,7 +4042,7 @@ fn verify_git_workspace(
 ) -> Result<(), CommandFailure> {
     let git_metadata = std::fs::symlink_metadata(identity.repository_root.join(".git"))
         .map_err(|error| CommandFailure::runtime(error.to_string()))?;
-    if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
+    if unsafe_link_metadata(&git_metadata) || !git_metadata.is_dir() {
         return Err(CommandFailure::runtime(
             "prepared root Git metadata is not an ordinary directory",
         ));
@@ -3940,13 +4142,15 @@ fn snapshot_product_tree(
     }
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if unsafe_link_metadata(&metadata) || !metadata.is_dir() {
         return Err(CommandFailure::invalid_input(
             "snapshot root is not a regular non-symlink directory",
         ));
     }
     let canonical_root = std::fs::canonicalize(root)
         .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+    #[cfg(windows)]
+    let mut directory_anchors = vec![open_windows_non_reparse(&canonical_root, true)?];
     let mut pending = vec![canonical_root.clone()];
     let mut paths = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -3969,14 +4173,18 @@ fn snapshot_product_tree(
             }
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-            if metadata.file_type().is_symlink() {
+            if unsafe_link_metadata(&metadata) {
                 return Err(CommandFailure::invalid_input(
                     "snapshot tree contains a symlink",
                 ));
             }
             if metadata.is_dir() {
+                #[cfg(windows)]
+                directory_anchors.push(open_windows_non_reparse(&path, true)?);
                 pending.push(path);
             } else if metadata.is_file() {
+                #[cfg(windows)]
+                drop(open_windows_non_reparse(&path, false)?);
                 paths.push(path);
             } else {
                 return Err(CommandFailure::invalid_input(
@@ -4018,14 +4226,40 @@ fn snapshot_product_tree(
 }
 
 fn read_bounded_path(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, CommandFailure> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > maximum_bytes {
-        return Err(CommandFailure::invalid_input(
-            "file is not a bounded regular non-symlink file",
-        ));
+    #[cfg(windows)]
+    {
+        let file = open_windows_non_reparse(path, false)?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if metadata.len() > maximum_bytes {
+            return Err(CommandFailure::invalid_input(
+                "file is not a bounded regular non-reparse file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
+            return Err(CommandFailure::invalid_input(
+                "file is not a bounded regular non-reparse file",
+            ));
+        }
+        Ok(bytes)
     }
-    std::fs::read(path).map_err(|error| CommandFailure::invalid_input(error.to_string()))
+    #[cfg(not(windows))]
+    {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| CommandFailure::invalid_input(error.to_string()))?;
+        if unsafe_link_metadata(&metadata) || !metadata.is_file() || metadata.len() > maximum_bytes
+        {
+            return Err(CommandFailure::invalid_input(
+                "file is not a bounded regular non-symlink file",
+            ));
+        }
+        std::fs::read(path).map_err(|error| CommandFailure::invalid_input(error.to_string()))
+    }
 }
 
 fn count_changed_files(before: &[SnapshotEntry], after: &[SnapshotEntry]) -> u32 {
@@ -4089,6 +4323,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn windows_reparse_attribute_is_unsafe() {
+        assert!(windows_reparse_point(0x400));
+        assert!(!windows_reparse_point(0));
+    }
 
     struct FakeProvider {
         outputs: VecDeque<InvocationOutput>,
@@ -4165,6 +4405,26 @@ mod tests {
         result: Option<Result<InvocationOutput, InvocationError>>,
     }
 
+    struct CollidingJournalRunner {
+        event_root: PathBuf,
+    }
+
+    impl ProcessRunner for CollidingJournalRunner {
+        fn run(
+            &mut self,
+            _: &PreparedInvocation,
+            _: &CancellationToken,
+        ) -> Result<InvocationOutput, InvocationError> {
+            std::fs::write(self.event_root.join("invalid-event"), b"collision")
+                .expect("journal collision");
+            Ok(InvocationOutput {
+                status: 0,
+                stdout: b"retained".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
     impl ProcessRunner for FixedProcessResult {
         fn run(
             &mut self,
@@ -4224,7 +4484,7 @@ mod tests {
             }
             let metadata =
                 std::fs::symlink_metadata(&program).map_err(|error| error.to_string())?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+            if unsafe_link_metadata(&metadata) || !metadata.is_file() {
                 return Err("provider-free program is not a regular non-symlink file".into());
             }
             let expected = Digest::new(
@@ -7024,6 +7284,58 @@ else:
             .expect("unsafe permissions");
             assert!(validate_input(&unsafe_root.input, LiveVariant::N4, Utc::now()).is_err());
         }
+    }
+
+    #[test]
+    fn capture_index_is_staged_before_output_retained_event_can_fail() {
+        let fixture = fixture(LiveVariant::N7);
+        let journal = CheckpointJournal::new(
+            execution_journal_root(&fixture.input),
+            execution_journal_maximum_bytes(&fixture.input.request),
+        )
+        .expect("journal");
+        let event_root = execution_journal_root(&fixture.input).join("execution-events");
+        let retained_index = Arc::new(Mutex::new(None));
+        let retained_failure = Arc::new(Mutex::new(None));
+        let context = capture_context(&fixture.input, LiveVariant::N7);
+        let mut runner = CaptureFirstRunner {
+            runner: CollidingJournalRunner { event_root },
+            raw_capture_root: fixture.input.raw_capture_root.clone(),
+            capture_context: context,
+            retained_index,
+            retained_failure,
+            runtime: "codex".into(),
+            max_tokens: fixture.input.request.limits.max_tokens,
+            journal: Some(&journal),
+            request: &fixture.input.request,
+            prepared_run_digest: digest_bytes(b"prepared"),
+            execution_authority: None,
+        };
+        let invocation = PreparedInvocation {
+            program: "provider".into(),
+            args: Vec::new(),
+            stdin: Vec::new(),
+            cwd: fixture.input.request.workspace.root.clone(),
+            environment: None,
+            limits: invocation_limits(&fixture.input.request).expect("limits"),
+        };
+
+        assert!(runner.run(&invocation, &CancellationToken::new()).is_err());
+        assert!(
+            fixture
+                .input
+                .raw_capture_root
+                .join("capture-index.json.incomplete")
+                .is_file(),
+            "canonical incomplete index must precede provider_output_retained"
+        );
+        assert!(
+            !fixture
+                .input
+                .raw_capture_root
+                .join("capture-index.json")
+                .exists()
+        );
     }
 
     #[test]

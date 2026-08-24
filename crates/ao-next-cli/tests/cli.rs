@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -7,12 +8,12 @@ use ao_next_core::adapter::{
 };
 use ao_next_core::contracts::{
     AdapterIdentity, AuthorityEnvelope, Capability, Digest, EffectKind, EffectRequest,
-    ExternalEffectPolicy, ModelProfile, NetworkPolicy, PreparedRunReceipt, RunLimits, RunRequest,
-    RunState, SourceIdentity, StructuredCommand, TerminalReadback, VerifierProfile,
-    WorkspaceIdentity,
+    ExternalEffectPolicy, ModelProfile, N7ExecutionAuthority, NetworkPolicy, PreparedRunReceipt,
+    RunLimits, RunRequest, RunState, SourceIdentity, StructuredCommand, TerminalReadback,
+    VerifierProfile, WorkspaceIdentity, n7_requested_write_scope_digest,
 };
 use ao_next_core::evidence::digest_bytes;
-use ao_next_core::recovery::{CheckpointIdentity, CheckpointJournal};
+use ao_next_core::recovery::CheckpointJournal;
 use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes};
 use ao_next_core::verifier::{CommandVerifierEntry, CommandVerifierProfile};
 use ao_next_eval::comparison::ComparisonRequest;
@@ -605,6 +606,8 @@ fn live_commands_require_operator_owned_corpus_and_verifier_anchors() {
             missing_input.to_str().expect("path"),
             "--prepared-run",
             missing_input.to_str().expect("path"),
+            "--authority",
+            missing_input.to_str().expect("path"),
         ],
         temporary.path(),
         Some("operator-authorized"),
@@ -938,6 +941,53 @@ fn run_prepare_live(
     ])
 }
 
+fn write_n7_execution_authority(
+    fixture: &PrepareLiveFixture,
+    receipt_path: &Path,
+    expired: bool,
+) -> PathBuf {
+    let receipt: PreparedRunReceipt =
+        serde_json::from_slice(&std::fs::read(receipt_path).expect("receipt bytes"))
+            .expect("receipt");
+    let request: RunRequest =
+        serde_json::from_value(fixture.input["request"].clone()).expect("request");
+    let issued_at = if expired {
+        receipt.prepared_at + Duration::nanoseconds(1)
+    } else {
+        Utc::now()
+    };
+    let authority = N7ExecutionAuthority {
+        schema_version: "ao.next.n7-execution-authority.v1".into(),
+        authority_id: "n7-test-authority-01".into(),
+        issued_by: "operator".into(),
+        prepared_run_digest: canonical_digest(&receipt).expect("receipt digest"),
+        preparation_input_digest: receipt.input_digest.clone(),
+        preparation_request_digest: receipt.request_digest.clone(),
+        base_commit: receipt.base_commit.clone(),
+        workspace_identity_digest: canonical_digest(&request.workspace)
+            .expect("workspace identity"),
+        workspace_digest: receipt.workspace_digest.clone(),
+        workspace_root: receipt.repository_root.clone(),
+        requested_authority_digest: canonical_digest(&request.authority)
+            .expect("requested authority"),
+        write_scope_digest: n7_requested_write_scope_digest(&request).expect("write scope"),
+        issued_at,
+        expires_at: if expired {
+            issued_at + Duration::nanoseconds(1)
+        } else {
+            issued_at + Duration::hours(1)
+        },
+        provider_process_allowance: 1,
+    };
+    let path = receipt_path.with_extension("authority.json");
+    std::fs::write(
+        &path,
+        canonical_json_bytes(&authority).expect("authority bytes"),
+    )
+    .expect("authority write");
+    path
+}
+
 #[cfg(unix)]
 fn fake_provider_bin(fixture: &PrepareLiveFixture) -> PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
@@ -962,7 +1012,12 @@ fn fake_provider_bin(fixture: &PrepareLiveFixture) -> PathBuf {
     bin
 }
 
-fn run_prepared_live(fixture: &PrepareLiveFixture, receipt_path: &Path, bin_path: &Path) -> Output {
+#[cfg(unix)]
+fn run_prepared_live_without_authority(
+    fixture: &PrepareLiveFixture,
+    receipt_path: &Path,
+    bin_path: &Path,
+) -> Output {
     #[cfg(unix)]
     let search_path = bin_path.to_path_buf();
     #[cfg(windows)]
@@ -988,6 +1043,195 @@ fn run_prepared_live(fixture: &PrepareLiveFixture, receipt_path: &Path, bin_path
         &search_path,
         Some("operator-authorized"),
     )
+}
+
+fn run_prepared_live(fixture: &PrepareLiveFixture, receipt_path: &Path, bin_path: &Path) -> Output {
+    let authority_path = write_n7_execution_authority(fixture, receipt_path, false);
+    run_prepared_live_with_authority(fixture, receipt_path, &authority_path, bin_path)
+}
+
+fn run_prepared_live_with_authority(
+    fixture: &PrepareLiveFixture,
+    receipt_path: &Path,
+    authority_path: &Path,
+    bin_path: &Path,
+) -> Output {
+    #[cfg(unix)]
+    let search_path = bin_path.to_path_buf();
+    #[cfg(windows)]
+    let search_path =
+        PathBuf::from(
+            std::env::join_paths(std::iter::once(bin_path.to_path_buf()).chain(
+                std::env::split_paths(&std::env::var_os("PATH").expect("Windows PATH")),
+            ))
+            .expect("provider PATH"),
+        );
+    run_with_live_environment(
+        &[
+            "run-live",
+            "--input",
+            fixture.input_path.to_str().expect("input"),
+            "--prepared-run",
+            receipt_path.to_str().expect("prepared run"),
+            "--authority",
+            authority_path.to_str().expect("authority"),
+            "--trusted-corpus-digest",
+            fixture.corpus_digest.as_str(),
+            "--trusted-verifier-profile-digest",
+            fixture.verifier_digest.as_str(),
+        ],
+        &search_path,
+        Some("operator-authorized"),
+    )
+}
+
+#[test]
+fn prepare_live_accepts_expired_requested_scope_without_execution_freshness() {
+    let mut fixture = prepare_live_fixture();
+    let mut request: RunRequest =
+        serde_json::from_value(fixture.input["request"].clone()).expect("request");
+    request.authority.expires_at = Utc::now() - Duration::hours(1);
+    request.authority.issued_at = request.authority.expires_at - Duration::hours(1);
+    fixture.input["request"] = serde_json::to_value(request).expect("expired requested scope");
+    write_json(&fixture.input_path, &fixture.input);
+    let receipt_path = fixture
+        .input_path
+        .with_file_name("prepared-expired-scope.json");
+
+    let prepared = run_prepare_live(
+        &fixture,
+        &receipt_path,
+        fixture.corpus_digest.as_str(),
+        fixture.verifier_digest.as_str(),
+    );
+
+    assert_eq!(
+        prepared.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&prepared.stdout),
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    assert!(!fixture.provider_marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn n7_run_requires_a_current_post_preparation_execution_authority() {
+    let fixture = prepare_live_fixture();
+    let receipt_path = fixture.input_path.with_file_name("prepared-authority.json");
+    assert_eq!(
+        run_prepare_live(
+            &fixture,
+            &receipt_path,
+            fixture.corpus_digest.as_str(),
+            fixture.verifier_digest.as_str(),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let bin_path = fake_provider_bin(&fixture);
+
+    let missing = run_prepared_live_without_authority(&fixture, &receipt_path, &bin_path);
+    assert_json_error(&missing, 3, "invalid_input");
+    assert!(!fixture.provider_marker.exists());
+
+    let authority_path = write_n7_execution_authority(&fixture, &receipt_path, false);
+    let admitted =
+        run_prepared_live_with_authority(&fixture, &receipt_path, &authority_path, &bin_path);
+    assert_json_error(&admitted, 4, "runtime_failure");
+    assert_eq!(
+        std::fs::read(&fixture.provider_marker).expect("provider marker"),
+        b"x"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn n7_execution_authority_rejects_binding_and_schema_drift_before_provider_spawn() {
+    for drift in [
+        "receipt",
+        "input",
+        "request",
+        "base",
+        "workspace-identity",
+        "workspace-digest",
+        "workspace-root",
+        "requested-authority",
+        "write-scope",
+        "issued-before-preparation",
+        "expired",
+        "provider-allowance",
+        "unknown-field",
+    ] {
+        let fixture = prepare_live_fixture();
+        let receipt_path = fixture
+            .input_path
+            .with_file_name("prepared-authority-drift.json");
+        assert_eq!(
+            run_prepare_live(
+                &fixture,
+                &receipt_path,
+                fixture.corpus_digest.as_str(),
+                fixture.verifier_digest.as_str(),
+            )
+            .status
+            .code(),
+            Some(0)
+        );
+        let authority_path = write_n7_execution_authority(&fixture, &receipt_path, false);
+        let receipt: PreparedRunReceipt =
+            serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt"))
+                .expect("receipt JSON");
+        let mut authority: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&authority_path).expect("authority"))
+                .expect("authority JSON");
+        match drift {
+            "receipt" => authority["prepared_run_digest"] = serde_json::json!(ZERO_DIGEST),
+            "input" => authority["preparation_input_digest"] = serde_json::json!(ZERO_DIGEST),
+            "request" => authority["preparation_request_digest"] = serde_json::json!(ZERO_DIGEST),
+            "base" => authority["base_commit"] = serde_json::json!("0".repeat(40)),
+            "workspace-identity" => {
+                authority["workspace_identity_digest"] = serde_json::json!(ZERO_DIGEST);
+            }
+            "workspace-digest" => authority["workspace_digest"] = serde_json::json!(ZERO_DIGEST),
+            "workspace-root" => authority["workspace_root"] = serde_json::json!("other"),
+            "requested-authority" => {
+                authority["requested_authority_digest"] = serde_json::json!(ZERO_DIGEST);
+            }
+            "write-scope" => authority["write_scope_digest"] = serde_json::json!(ZERO_DIGEST),
+            "issued-before-preparation" => {
+                authority["issued_at"] = serde_json::json!(receipt.prepared_at);
+            }
+            "expired" => {
+                let issued = receipt.prepared_at + Duration::nanoseconds(1);
+                authority["issued_at"] = serde_json::json!(issued);
+                authority["expires_at"] = serde_json::json!(issued + Duration::nanoseconds(1));
+            }
+            "provider-allowance" => authority["provider_process_allowance"] = serde_json::json!(2),
+            "unknown-field" => authority["unexpected"] = serde_json::json!(true),
+            _ => unreachable!(),
+        }
+        std::fs::write(
+            &authority_path,
+            canonical_json_bytes(&authority).expect("drifted authority"),
+        )
+        .expect("authority drift write");
+
+        let output = run_prepared_live_with_authority(
+            &fixture,
+            &receipt_path,
+            &authority_path,
+            &fake_provider_bin(&fixture),
+        );
+
+        assert_json_error(&output, 3, "invalid_input");
+        assert!(
+            !fixture.provider_marker.exists(),
+            "provider spawned for {drift}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1114,6 +1358,7 @@ fn prepared_run_rejects_identity_drift_before_provider_spawn() {
 struct RecoverLiveFixture {
     live: PrepareLiveFixture,
     receipt_path: PathBuf,
+    authority_path: PathBuf,
     capture_root: PathBuf,
     journal_root: PathBuf,
     normalized_turn: AdapterTurn,
@@ -1246,43 +1491,12 @@ fn write_retained_capture(root: &Path, output: &InvocationOutput, index_bytes: &
     }
 }
 
-fn expire_recovery_authority(fixture: &mut PrepareLiveFixture, receipt_path: &Path) {
-    let mut request: RunRequest =
-        serde_json::from_value(fixture.input["request"].clone()).expect("request");
-    request.authority.expires_at = Utc::now() - Duration::minutes(1);
-    request.authority.issued_at = request.authority.expires_at - Duration::hours(1);
-    fixture.input["request"] = serde_json::to_value(&request).expect("expired request");
-    let input_bytes = serde_json::to_vec(&fixture.input).expect("expired input");
-    std::fs::write(&fixture.input_path, &input_bytes).expect("expired input write");
-
-    let capture = capture_root(fixture);
-    let journal = journal_root(&capture);
-    if journal.exists() {
-        std::fs::remove_dir_all(&journal).expect("remove current journal identity");
-    }
-    let mut receipt: PreparedRunReceipt =
-        serde_json::from_slice(&std::fs::read(receipt_path).expect("receipt bytes"))
-            .expect("receipt");
-    receipt.input_digest = digest_bytes(&input_bytes);
-    receipt.request_digest = canonical_digest(&request).expect("request digest");
-    receipt.journal_identity_digest =
-        canonical_digest(&CheckpointIdentity::from_request(&request).expect("journal identity"))
-            .expect("journal identity digest");
-    receipt.prepared_at = request.authority.issued_at;
-    receipt.expires_at = request.authority.expires_at;
-    std::fs::write(
-        receipt_path,
-        canonical_json_bytes(&receipt).expect("expired receipt"),
-    )
-    .expect("expired receipt write");
-}
-
 fn retained_recovery_fixture(expired: bool) -> RecoverLiveFixture {
     retained_recovery_fixture_for_path(expired, "product.txt")
 }
 
 fn retained_recovery_fixture_for_path(expired: bool, effect_path: &str) -> RecoverLiveFixture {
-    let mut live = prepare_live_fixture();
+    let live = prepare_live_fixture();
     let receipt_path = live.input_path.with_file_name("prepared-recovery.json");
     let prepared = run_prepare_live(
         &live,
@@ -1291,9 +1505,7 @@ fn retained_recovery_fixture_for_path(expired: bool, effect_path: &str) -> Recov
         live.verifier_digest.as_str(),
     );
     assert_eq!(prepared.status.code(), Some(0));
-    if expired {
-        expire_recovery_authority(&mut live, &receipt_path);
-    }
+    let authority_path = write_n7_execution_authority(&live, &receipt_path, expired);
     let capture_root = capture_root(&live);
     let journal_root = journal_root(&capture_root);
     let run_id = live.input["request"]["run_id"].as_str().expect("run id");
@@ -1326,6 +1538,7 @@ fn retained_recovery_fixture_for_path(expired: bool, effect_path: &str) -> Recov
     RecoverLiveFixture {
         live,
         receipt_path,
+        authority_path,
         capture_root,
         journal_root,
         normalized_turn,
@@ -1345,6 +1558,8 @@ fn run_recover_live(
         fixture.live.input_path.to_str().expect("input"),
         "--prepared-run",
         receipt_path.to_str().expect("receipt"),
+        "--authority",
+        fixture.authority_path.to_str().expect("authority"),
         "--trusted-corpus-digest",
         fixture.live.corpus_digest.as_str(),
         "--trusted-verifier-profile-digest",
@@ -1405,6 +1620,134 @@ fn journal_terminal_paths(root: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+#[derive(serde::Serialize)]
+struct RetainedFixtureEntry {
+    name: &'static str,
+    digest: Digest,
+    size_bytes: u64,
+}
+
+fn persist_recovery_evidence(
+    evidence_root: &Path,
+    capture_root: &Path,
+    source_head: &str,
+    terminal_record_digest: &str,
+    setup_provider_process_count: usize,
+    recovery_provider_process_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = std::fs::symlink_metadata(evidence_root)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || std::fs::read_dir(evidence_root)?
+            .next()
+            .transpose()?
+            .is_some()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "persistent recovery evidence root must be an empty ordinary directory",
+        )
+        .into());
+    }
+    let private_root = evidence_root.join("private-retained-capture");
+    std::fs::create_dir(&private_root)?;
+    let mut entries = Vec::new();
+    for name in [
+        "capture-000.stdout",
+        "capture-000.stderr",
+        "capture-index.json",
+    ] {
+        let bytes = std::fs::read(capture_root.join(name))?;
+        write_private_evidence_new(&private_root.join(name), &bytes)?;
+        entries.push(RetainedFixtureEntry {
+            name,
+            digest: digest_bytes(&bytes),
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        });
+    }
+    let fixture_digest = canonical_digest(&entries)?;
+    let manifest = serde_json::json!({
+        "schema_version": "ao.next.private-retained-recovery-fixture.v1",
+        "fixture_digest": fixture_digest,
+        "files": entries,
+    });
+    write_private_evidence_new(
+        &private_root.join("fixture-manifest.json"),
+        &canonical_json_bytes(&manifest)?,
+    )?;
+    let result = serde_json::json!({
+        "schema_version": "ao.next.physical-recovery-result.v1",
+        "source_head": source_head,
+        "terminal_state": "passed",
+        "terminal_record_digest": terminal_record_digest,
+        "setup_provider_process_count": setup_provider_process_count,
+        "recovery_provider_process_count": recovery_provider_process_count,
+        "private_retained_fixture_digest": fixture_digest,
+        "incomplete_index_removed": true,
+    });
+    write_private_evidence_new(
+        &evidence_root.join("recovery-result.json"),
+        &canonical_json_bytes(&result)?,
+    )?;
+    Ok(())
+}
+
+fn write_private_evidence_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+#[test]
+fn persistent_recovery_evidence_retains_hashed_private_fixture_and_public_result() {
+    let capture = TempDir::new().expect("capture");
+    std::fs::write(capture.path().join("capture-000.stdout"), b"private stdout").expect("stdout");
+    std::fs::write(capture.path().join("capture-000.stderr"), b"private stderr").expect("stderr");
+    std::fs::write(capture.path().join("capture-index.json"), b"private index").expect("index");
+    let retained = TempDir::new().expect("retained evidence");
+    let capture_path_text = capture.path().display().to_string();
+
+    persist_recovery_evidence(
+        retained.path(),
+        capture.path(),
+        "source-head",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        1,
+        0,
+    )
+    .expect("persist evidence");
+    drop(capture);
+
+    let result_bytes = std::fs::read(retained.path().join("recovery-result.json")).expect("result");
+    let result: serde_json::Value = serde_json::from_slice(&result_bytes).expect("result JSON");
+    assert_eq!(result["setup_provider_process_count"], 1);
+    assert_eq!(result["recovery_provider_process_count"], 0);
+    assert_eq!(result["terminal_state"], "passed");
+    assert!(result["private_retained_fixture_digest"].is_string());
+    assert!(!String::from_utf8_lossy(&result_bytes).contains(&capture_path_text));
+    for name in [
+        "capture-000.stdout",
+        "capture-000.stderr",
+        "capture-index.json",
+        "fixture-manifest.json",
+    ] {
+        assert!(
+            retained
+                .path()
+                .join("private-retained-capture")
+                .join(name)
+                .is_file()
+        );
+    }
 }
 
 fn remove_journal_event(root: &Path, kind: &str) {
@@ -1511,6 +1854,10 @@ fn reset_reference_run(fixture: &PrepareLiveFixture, capture_root: &Path, journa
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the real recovery fixture keeps setup, interruption, and retained evidence in one path"
+)]
 fn recover_live_reuses_retained_capture_without_a_second_provider() {
     let live = prepare_live_fixture();
     let receipt_path = live.input_path.with_file_name("prepared-reference.json");
@@ -1577,9 +1924,11 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     };
     write_retained_capture(&capture_root, &retained_output, &index_bytes, true);
     assert_eq!(normalized_turn, recovery_output(run_id).1);
+    let authority_path = write_n7_execution_authority(&live, &recovery_receipt, false);
 
     let fixture = RecoverLiveFixture {
         receipt_path: recovery_receipt.clone(),
+        authority_path,
         index_digest: canonical_digest(
             &serde_json::from_slice::<serde_json::Value>(&index_bytes).expect("index JSON"),
         )
@@ -1589,6 +1938,7 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
         journal_root,
         live,
     };
+    let setup_provider_process_count = journal_provider_start_count(&fixture.journal_root);
     let recovered = run_recover_live(&fixture, &recovery_receipt, None);
     assert_eq!(
         recovered.status.code(),
@@ -1610,8 +1960,66 @@ fn recover_live_reuses_retained_capture_without_a_second_provider() {
     let terminal: serde_json::Value =
         serde_json::from_slice(&recovered.stdout).expect("recovered terminal");
     assert_eq!(terminal["terminal_state"], "passed");
-    assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+    let final_provider_process_count = journal_provider_start_count(&fixture.journal_root);
+    assert_eq!(final_provider_process_count, 1);
     assert_eq!(terminal["record_digest"], uninterrupted["record_digest"]);
+    if let Some(evidence_root) = std::env::var_os("AO_NEXT_RECOVERY_EVIDENCE_ROOT") {
+        let source_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("source head");
+        assert!(source_head.status.success());
+        persist_recovery_evidence(
+            Path::new(&evidence_root),
+            &fixture.capture_root,
+            std::str::from_utf8(&source_head.stdout)
+                .expect("source head UTF-8")
+                .trim(),
+            terminal["record_digest"]
+                .as_str()
+                .expect("terminal record digest"),
+            setup_provider_process_count,
+            final_provider_process_count.saturating_sub(setup_provider_process_count),
+        )
+        .expect("persistent recovery evidence");
+    }
+}
+
+#[test]
+fn recover_live_handles_crashes_after_retained_event_and_after_index_publish() {
+    for crash in ["retained-event", "index-publish"] {
+        let fixture = retained_recovery_fixture(false);
+        match crash {
+            "retained-event" => {
+                std::fs::remove_file(fixture.capture_root.join("capture-index.json"))
+                    .expect("remove final index");
+            }
+            "index-publish" => {
+                std::fs::remove_file(fixture.capture_root.join("capture-index.json.incomplete"))
+                    .expect("remove incomplete index");
+            }
+            _ => unreachable!(),
+        }
+
+        let recovered = run_recover_live(&fixture, &fixture.receipt_path, None);
+
+        assert_eq!(
+            recovered.status.code(),
+            Some(0),
+            "{crash}: stdout={} stderr={}",
+            String::from_utf8_lossy(&recovered.stdout),
+            String::from_utf8_lossy(&recovered.stderr)
+        );
+        assert!(fixture.capture_root.join("capture-index.json").is_file());
+        assert!(
+            !fixture
+                .capture_root
+                .join("capture-index.json.incomplete")
+                .exists()
+        );
+        assert_eq!(journal_provider_start_count(&fixture.journal_root), 1);
+    }
 }
 
 #[test]
@@ -1655,9 +2063,11 @@ fn recover_live_reuses_orphan_terminal_bytes_and_appends_event() {
         0
     );
 
+    let authority_path = write_n7_execution_authority(&live, &receipt_path, false);
     let fixture = RecoverLiveFixture {
         live,
         receipt_path: receipt_path.clone(),
+        authority_path,
         capture_root,
         journal_root,
         normalized_turn,
@@ -1748,9 +2158,11 @@ fn recover_live_rejects_unknown_provider_outcome() {
         .record_provider_process_started(&request, &digest(ONE_DIGEST))
         .expect("provider start");
     std::fs::write(&live.provider_marker, b"one").expect("provider marker");
+    let authority_path = write_n7_execution_authority(&live, &receipt_path, false);
     let fixture = RecoverLiveFixture {
         live,
         receipt_path: receipt_path.clone(),
+        authority_path,
         capture_root,
         journal_root,
         normalized_turn: recovery_turn("prepare-live-run-01"),
@@ -1984,6 +2396,49 @@ fn recover_live_rejects_unexpired_matching_unknown_effect() {
     assert_eq!(
         journal_event_kind_count(&fixture.journal_root, "verification_started"),
         0
+    );
+}
+
+#[test]
+fn recover_live_reports_unknown_effect_before_expired_authority() {
+    let fixture = retained_recovery_fixture(true);
+    let request: RunRequest =
+        serde_json::from_value(fixture.live.input["request"].clone()).expect("request");
+    let journal = CheckpointJournal::new(&fixture.journal_root, 128 * 1024).expect("journal");
+    journal
+        .record_provider_capture_published(&request, &fixture.index_digest)
+        .expect("capture published");
+    journal
+        .record_provider_capture_verified(&request, &fixture.index_digest)
+        .expect("capture verified");
+    journal
+        .record_adapter_turn_normalized(
+            &request,
+            &canonical_digest(&fixture.normalized_turn).expect("turn digest"),
+        )
+        .expect("turn normalized");
+    let effect = fixture
+        .normalized_turn
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            AdapterAction::Effect(effect) => Some(effect),
+            _ => None,
+        })
+        .expect("effect");
+    journal
+        .record_effect_intent(&request, effect)
+        .expect("effect intent");
+
+    let recovered = run_recover_live(&fixture, &fixture.receipt_path, None);
+
+    assert_json_error(&recovered, 3, "invalid_input");
+    let error: serde_json::Value = serde_json::from_slice(&recovered.stdout).expect("error JSON");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("message")
+            .contains("effect completion is unknown")
     );
 }
 
@@ -2403,6 +2858,58 @@ fn prepare_live_rejects_a_symlinked_output_ancestor() {
     );
     assert!(!real_parent.join("prepared-run.json").exists());
     assert!(!fixture.workspace.join(".git").exists());
+}
+
+#[cfg(windows)]
+fn create_junction(link: &Path, target: &Path) {
+    let output = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .expect("create junction");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_live_rejects_workspace_root_and_nested_junctions() {
+    for boundary in ["root", "nested"] {
+        let fixture = prepare_live_fixture();
+        let target = fixture
+            .input_path
+            .parent()
+            .expect("protected root")
+            .join(format!("junction-target-{boundary}"));
+        std::fs::create_dir(&target).expect("junction target");
+        if boundary == "root" {
+            std::fs::remove_dir(&fixture.workspace).expect("remove workspace");
+            create_junction(&fixture.workspace, &target);
+        } else {
+            create_junction(&fixture.workspace.join("nested"), &target);
+        }
+        let receipt = fixture
+            .input_path
+            .with_file_name(format!("junction-{boundary}.json"));
+
+        assert_json_error(
+            &run_prepare_live(
+                &fixture,
+                &receipt,
+                fixture.corpus_digest.as_str(),
+                fixture.verifier_digest.as_str(),
+            ),
+            3,
+            "invalid_input",
+        );
+        assert!(!receipt.exists());
+        assert!(!fixture.provider_marker.exists());
+    }
 }
 
 fn qualify_campaign(path: &Path) -> Output {

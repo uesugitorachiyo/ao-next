@@ -1,0 +1,47 @@
+{
+  "schema": "ao.foundry.terminal-state-binding.v0.1",
+  "mission_id": "ao-mission-atlas-wave-import-v01",
+  "status": "ready",
+  "states": [
+    {
+      "status": "completed",
+      "completed_nodes": 2,
+      "total_nodes": 2,
+      "expected_mission_status": "done",
+      "expected_route": "complete",
+      "expected_phase": "complete"
+    },
+    {
+      "status": "promoted",
+      "completed_nodes": 2,
+      "total_nodes": 2,
+      "expected_mission_status": "done",
+      "expected_route": "complete",
+      "expected_phase": "complete"
+    },
+    {
+      "status": "denied",
+      "completed_nodes": 1,
+      "total_nodes": 2,
+      "expected_mission_status": "blocked",
+      "expected_route": "ao-atlas",
+      "expected_phase": "foundry_rollup_denied",
+      "exact_blocker": "foundry final rollup status denied"
+    },
+    {
+      "status": "blocked",
+      "completed_nodes": 1,
+      "total_nodes": 2,
+      "expected_mission_status": "blocked",
+      "expected_route": "ao-atlas",
+      "expected_phase": "foundry_rollup_blocked",
+      "exact_blocker": "foundry final rollup status blocked"
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "use this fixture to verify Foundry terminal rollup import behavior before final response"
+}

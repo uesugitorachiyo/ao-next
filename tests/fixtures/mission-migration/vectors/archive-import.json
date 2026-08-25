@@ -1,0 +1,24 @@
+{
+  "schema": "ao.mission.artifact-manifest.v0.1",
+  "mission_id": "mission-demo",
+  "artifact_refs": [
+    {
+      "schema": "ao.mission.artifact-ref.v0.1",
+      "ref": "scheduler-recovery-readback.json",
+      "digest": "sha256:2d6b93fd712978a18a6c1dc21f19c4d5be690c27499e1a35b3f698822a68c4a9",
+      "kind": "scheduler_recovery_readback"
+    },
+    {
+      "schema": "ao.mission.artifact-ref.v0.1",
+      "ref": "ledger-compaction-readback.json",
+      "digest": "sha256:15a4d3ecfc0eef8944502dee9f86c5a4b2e0d05ed5969d8c91b0ece840443b4b",
+      "kind": "ledger_compaction_readback"
+    }
+  ],
+  "manifest_digest": "sha256:f31da672d3fc08069a159ac9e7b3c7a37e98812bc1ff4d5501c89990772a3efa",
+  "signature": "ao-mission-local-digest:sha256:f31da672d3fc08069a159ac9e7b3c7a37e98812bc1ff4d5501c89990772a3efa",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "generated_at_utc": "2026-07-04T00:00:00Z"
+}

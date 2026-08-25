@@ -1,0 +1,85 @@
+{
+  "schema_version": "ao.compatibility.mission-status-timeline-vector.v1",
+  "vector_id": "ao-mission-run-status-timeline-to-ao-command-operator-timeline-v1",
+  "edge": "ao-mission.run_status_timeline -> ao-command.operator_timeline",
+  "producer": {
+    "repository": "ao-mission",
+    "source": "public_safe_fixture"
+  },
+  "consumer": {
+    "repository": "ao-command",
+    "command": "ao-command mission timeline --readback PATH"
+  },
+  "run_status": {
+    "schema": "ao.mission.run-status-timeline.v0.1",
+    "mission_id": "ao-stack-month2-compatibility-workgraph",
+    "status": "ready",
+    "mission_status": "active",
+    "current_route": "ao-atlas",
+    "current_phase": "wave3_compatibility",
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false,
+    "mutates_repositories": false,
+    "exact_next_action": "continue Wave 3 through Command operator timeline consumer test"
+  },
+  "timeline": {
+    "schema": "ao.mission.compact-timeline.v0.1",
+    "status": "ready",
+    "mission_id": "ao-stack-month2-compatibility-workgraph",
+    "compact": true,
+    "events": [
+      {
+        "schema": "ao.mission.event.v0.1",
+        "mission_id": "ao-stack-month2-compatibility-workgraph",
+        "kind": "workgraph_created",
+        "sequence": 1,
+        "status": "completed",
+        "route": "ao-atlas",
+        "phase": "workgraph",
+        "summary": "AO Atlas workgraph created for three Month 2 compatibility waves",
+        "generated_at_utc": "2026-07-15T20:29:00Z"
+      },
+      {
+        "schema": "ao.mission.event.v0.1",
+        "mission_id": "ao-stack-month2-compatibility-workgraph",
+        "kind": "compatibility_wave",
+        "sequence": 2,
+        "status": "completed",
+        "route": "ao-atlas",
+        "phase": "wave2",
+        "summary": "Wave 2 Control Plane readback to Command operator status proof merged",
+        "generated_at_utc": "2026-07-15T21:32:00Z"
+      },
+      {
+        "schema": "ao.mission.event.v0.1",
+        "mission_id": "ao-stack-month2-compatibility-workgraph",
+        "kind": "operator_timeline",
+        "sequence": 3,
+        "status": "ready",
+        "route": "ao-command",
+        "phase": "wave3",
+        "summary": "Command operator timeline consumes Mission status timeline without execution authority",
+        "generated_at_utc": "2026-07-15T21:40:00Z"
+      }
+    ],
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false,
+    "mutates_repositories": false
+  },
+  "compatibility": {
+    "matrix_status": "proposed",
+    "tested_edge_count": 2,
+    "full_stack_compatibility_complete": false
+  },
+  "expected_command_operator_timeline": {
+    "schema": "ao-command.operator-timeline.v1",
+    "status": "ready",
+    "source_run_status_schema": "ao.mission.run-status-timeline.v0.1",
+    "source_timeline_schema": "ao.mission.compact-timeline.v0.1",
+    "timeline_event_count": 3,
+    "latest_event": "operator_timeline",
+    "full_stack_compatibility_complete": false
+  }
+}

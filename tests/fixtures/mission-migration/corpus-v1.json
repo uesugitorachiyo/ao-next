@@ -1,0 +1,2174 @@
+{
+  "schema_version": "ao.next.mission-equivalence-corpus.v1",
+  "source_repository": "ao-mission",
+  "source_head": "05567fdd7c3fc64814ca4122b3f431d4ed9aaded",
+  "status_domains": {
+    "mission_durable_source": "durable_ao_mission_source_status",
+    "engine_projection": "future_read_only_engine_projection",
+    "conflated": false
+  },
+  "source_files": [
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "bytes": 190,
+      "digest": "sha256:801a53ea7a0484ef130eb4c36166b2e9ade71e16a226308d03ee577a140d157b"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "bytes": 3165,
+      "digest": "sha256:0ca7a5c8a8a51d2b764a4fe723f5ab52a6d5510a88ed9c5a318d843da8b90af4"
+    },
+    {
+      "path": ".github/workflows/native-artifacts.yml",
+      "mode": "100644",
+      "bytes": 5239,
+      "digest": "sha256:b8d5b793cfb18f5150eb7a11b5d0a43ac572c037fed76427316f77e6280dc225"
+    },
+    {
+      "path": ".github/workflows/release-finalize.yml",
+      "mode": "100644",
+      "bytes": 19658,
+      "digest": "sha256:bd6a8d86af39a3e355802ecf4d52d1bb7846f9cdd836f624edb0cba5b43ab416"
+    },
+    {
+      "path": ".github/workflows/release-rehearsal.yml",
+      "mode": "100644",
+      "bytes": 71491,
+      "digest": "sha256:f8e5d09b9c8756e1f1a432ce8b4f34b8370edf239cc8b39aef3d670983f939a1"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "bytes": 113,
+      "digest": "sha256:efb7ff3ffa42a20faac111a000752f47cc4a7af1db9a6162083b0ec3858a5f2f"
+    },
+    {
+      "path": "AGENTS.md",
+      "mode": "100644",
+      "bytes": 7373,
+      "digest": "sha256:f47c1faee2c09e4f9fdb2b79ee24a53d9b72e12e1a71097e13b852b9762e5264"
+    },
+    {
+      "path": "CLAUDE.md",
+      "mode": "100644",
+      "bytes": 11,
+      "digest": "sha256:336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    },
+    {
+      "path": "LICENSE",
+      "mode": "100644",
+      "bytes": 109,
+      "digest": "sha256:52b612fb64434fb8a64f9f8cd32fe6f66e581fb395d5df173638cab4b26eba3c"
+    },
+    {
+      "path": "NOTICE",
+      "mode": "100644",
+      "bytes": 29,
+      "digest": "sha256:03d83ce72e36382edeeafd81ed87de3215c3c46a57fa66d91d4ab2f608a457ed"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "bytes": 19436,
+      "digest": "sha256:03831eb8437808afa14757bda20517ba7f6191c8daf41fc81e03792ce3f18435"
+    },
+    {
+      "path": "cmd/ao-mission/main.go",
+      "mode": "100644",
+      "bytes": 163,
+      "digest": "sha256:89dc5fd9cdda55d4e2e922f961d6529608daaf2841396803d7dcae70e7cafc94"
+    },
+    {
+      "path": "docs/ao-next-dual-process-stage1-5-handoff-prompt.md",
+      "mode": "100644",
+      "bytes": 17658,
+      "digest": "sha256:fb8b648c3926c440f780ef1d5120e18470b458ae3bfc9d9ba63ed3dd1e098f8d"
+    },
+    {
+      "path": "docs/ao-next-integration-six-month-handoff-prompt.md",
+      "mode": "100644",
+      "bytes": 9722,
+      "digest": "sha256:b24eca65defbafdd6943a5f5aaf332d50e8e516870fa935aeddf2793fcc0b3a5"
+    },
+    {
+      "path": "docs/ao-stack-six-month-roadmap-handoff-prompt.md",
+      "mode": "100644",
+      "bytes": 18068,
+      "digest": "sha256:fb6a5b6649a7e66255ec6c0299dba42e9cb82e22382d71392e3294ed5c129b2f"
+    },
+    {
+      "path": "docs/contracts/a2a-agent-card-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1571,
+      "digest": "sha256:7b7b36be8246996b72419eaf4007c237329ae3f4802fc00bd648aaa4f4eef19e"
+    },
+    {
+      "path": "docs/contracts/a2a-jsonrpc-response-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 295,
+      "digest": "sha256:e96f84d1ab1b5143b467497c26b58d940aa332c26e5ff0b40136c782fd73f348"
+    },
+    {
+      "path": "docs/contracts/a2a-task-lifecycle-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 921,
+      "digest": "sha256:08ac18f1f61fe15d9471021fbf9bc9e53dacb7eb13c48859f07affb6b1ef7b72"
+    },
+    {
+      "path": "docs/contracts/a2a-task-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 799,
+      "digest": "sha256:31336646b69b6ee0a4c0c753fdd0bbab50da264fbddd46426759dbcb0dd671e8"
+    },
+    {
+      "path": "docs/contracts/ao-next-candidate-terminal-import.md",
+      "mode": "100644",
+      "bytes": 1417,
+      "digest": "sha256:6fbbe7dc47e1c3aae8c32259a9d8b0aad6ef79125b22ca9f0bf34063eee6df73"
+    },
+    {
+      "path": "docs/contracts/artifact-manifest-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 760,
+      "digest": "sha256:63c390acd280b9385f4dc5967a5dfe0121f26cbe151d4670cb0efe7e6c343eae"
+    },
+    {
+      "path": "docs/contracts/artifact-manifest-v0.2.schema.json",
+      "mode": "100644",
+      "bytes": 1408,
+      "digest": "sha256:557feb7478135f043ed006fec522d4726d758bd0b6b540c12025a6133655600b"
+    },
+    {
+      "path": "docs/contracts/artifact-manifest-validation-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 711,
+      "digest": "sha256:020bc4ae65803418eee9aa9cb1498c92433bc2a518af14b71c7a7a6580c39db7"
+    },
+    {
+      "path": "docs/contracts/artifact-ref-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 388,
+      "digest": "sha256:c3dfe57fb7cdc966bbdad780cf99150edb2461e394596fef9fdfc712a4a86846"
+    },
+    {
+      "path": "docs/contracts/canonical-terminal-index-consumer.md",
+      "mode": "100644",
+      "bytes": 4274,
+      "digest": "sha256:db904448a1498248bdde26ed055582faf96156eddc16b6b98d9734750e2615fc"
+    },
+    {
+      "path": "docs/contracts/checkpoint-resume-bundle-v0.3.schema.json",
+      "mode": "100644",
+      "bytes": 963,
+      "digest": "sha256:09acd94c842fae14adfe395c180eb4d9d17b304a2f98a91b0da344dc8b482673"
+    },
+    {
+      "path": "docs/contracts/checkpoint-v0.3.schema.json",
+      "mode": "100644",
+      "bytes": 780,
+      "digest": "sha256:6d79b0b39d58506489c5fcd378308854f3ae6bfc755ea4aa9d9f5387720bb965"
+    },
+    {
+      "path": "docs/contracts/command-status-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1234,
+      "digest": "sha256:40fc5c0a7eea836551c304fa0b316bc99402fe00127966aafe93d4cc9b570edf"
+    },
+    {
+      "path": "docs/contracts/correlation-chain-reference-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 5664,
+      "digest": "sha256:513757262ad882dfbffb06df1119d6426bff56bbbd3c03d79f012b787e9dd954"
+    },
+    {
+      "path": "docs/contracts/correlation-chain-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 5041,
+      "digest": "sha256:e06d435ee8cce3da0d433ae4690b9de9394905e75430583da1e41cb153affa0d"
+    },
+    {
+      "path": "docs/contracts/correlation-chain-validation-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1324,
+      "digest": "sha256:2c7c5a9aa81e23c2e72d627ede88b366e988e935d65307d13c8dbc1eb5167f6e"
+    },
+    {
+      "path": "docs/contracts/dashboard-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1548,
+      "digest": "sha256:230128e513f18a8700cf6fa2fa98fe52ae1912ca6e8ab9ca69030c24337148ae"
+    },
+    {
+      "path": "docs/contracts/event-index-v0.2.schema.json",
+      "mode": "100644",
+      "bytes": 1082,
+      "digest": "sha256:abaecb77cec912bcb60b72d316d7fd5fbd10232caf3c83534ca6d657c4afcaca"
+    },
+    {
+      "path": "docs/contracts/event-loop-decision-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 882,
+      "digest": "sha256:2e3b2f35113e700976f0199f373be917fcd9d68b20df9afbb9117dbc8a410435"
+    },
+    {
+      "path": "docs/contracts/final-rollup-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1238,
+      "digest": "sha256:b1b321ae6ab3a8df9742550a196011325dc57b42ec9d41dfe1edb381340e4111"
+    },
+    {
+      "path": "docs/contracts/gateway-intent-ledger-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 870,
+      "digest": "sha256:a7eca64d4acfcc4aa7d0e0da61049a3a93acb051165af5f67b1c7f074b6a2d4b"
+    },
+    {
+      "path": "docs/contracts/gateway-replay-bundle-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1190,
+      "digest": "sha256:84f922a7c32245445a23541a304e31d1d4eedd9beb243ac5186d29c91475fa5f"
+    },
+    {
+      "path": "docs/contracts/goal-lease-v0.3.schema.json",
+      "mode": "100644",
+      "bytes": 742,
+      "digest": "sha256:9f6ba4c5635dc4cb1bdbadc048a4fc1d9716d930d2b55194f4e7fea75b0be1a9"
+    },
+    {
+      "path": "docs/contracts/governance-snapshot-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 747,
+      "digest": "sha256:6974133b7c4fcce2f73603f18f31b89addcee703f7244f5c80e22b3d95682bbc"
+    },
+    {
+      "path": "docs/contracts/import-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 864,
+      "digest": "sha256:95bbd1d49043d50e340ddd60e0bd30ceceef942f02037ba43b81a12d53755946"
+    },
+    {
+      "path": "docs/contracts/ledger-compaction-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1135,
+      "digest": "sha256:722b70792c2565bee763e6ee0ae9e6ccec6a8f37c29ea425b875972bf27d8e5c"
+    },
+    {
+      "path": "docs/contracts/lifecycle-metrics-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1965,
+      "digest": "sha256:f9128c9f06778d5c129bd4a33a1d5b9444a0421a310ef697a1cb53cfa09ed111"
+    },
+    {
+      "path": "docs/contracts/lifecycle-projection-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1730,
+      "digest": "sha256:c1a9fca7f9f0c6acd25086b41676794d46cfce77be801acd2a2f19e1640813d1"
+    },
+    {
+      "path": "docs/contracts/mission-record-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 12580,
+      "digest": "sha256:25bc2b027e43f9bb72805c6c80e67d50e663c7e3c2153b7f92d4887f562579e1"
+    },
+    {
+      "path": "docs/contracts/objective-workflow-contract-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 3057,
+      "digest": "sha256:51588d76b0fe169e19c4545acf7b6a6fe544f11df4b5faed530cb171927acb7b"
+    },
+    {
+      "path": "docs/contracts/operator-intent-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 424,
+      "digest": "sha256:3c099250c947ada92d8d70bfa363f7dd5e34a110ad07ef520389c4111a81c645"
+    },
+    {
+      "path": "docs/contracts/python-repair-product-gate.md",
+      "mode": "100644",
+      "bytes": 2853,
+      "digest": "sha256:62532ca70eb38865d310223ac48a4d57bba0518532df5c200e1d573a5bba662a"
+    },
+    {
+      "path": "docs/contracts/qualification-soak-canary.md",
+      "mode": "100644",
+      "bytes": 8035,
+      "digest": "sha256:146595356a8c77fe846b31c934510fceb3f761ee577fd6a4fec440877c0c275b"
+    },
+    {
+      "path": "docs/contracts/qualification-soak-planning.md",
+      "mode": "100644",
+      "bytes": 4604,
+      "digest": "sha256:8071b5bdc639be60f3810879e84a05dc9f0344da3e696c08d1060f6c511e1f4f"
+    },
+    {
+      "path": "docs/contracts/readiness-bundle-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1000,
+      "digest": "sha256:4f7a3643fbdc4ee4f094c23b8a75d734cb143d360358141d3578c67f23962980"
+    },
+    {
+      "path": "docs/contracts/return-gate-v0.3.schema.json",
+      "mode": "100644",
+      "bytes": 900,
+      "digest": "sha256:56eaf6984dc0ca70c3fbffcc65357ba8e76daa669917256b20ff07e794589d6c"
+    },
+    {
+      "path": "docs/contracts/route-decision-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 628,
+      "digest": "sha256:2e5614e27b2c59dc0f4834b73d90c18aff9c16a0806c8abb0c63fd5a68efe132"
+    },
+    {
+      "path": "docs/contracts/route-reconciliation-v0.3.schema.json",
+      "mode": "100644",
+      "bytes": 946,
+      "digest": "sha256:039888cdc88b760e9760d849eab06b977ccca6658eb9af2db89821511c1b26da"
+    },
+    {
+      "path": "docs/contracts/scheduler-alert-summary-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 720,
+      "digest": "sha256:90a59ec6be5a0f9404757cb07c8cd6778e54e80858def4bb740631d5eb841738"
+    },
+    {
+      "path": "docs/contracts/scheduler-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 577,
+      "digest": "sha256:85a533a2230ff8a3fd1840e3ef46e520d385a694e87202180b0c8136615d4e6b"
+    },
+    {
+      "path": "docs/contracts/scheduler-recovery-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 943,
+      "digest": "sha256:26a1bbd6e8a8a4e24cf15f5e08bd9f36d0aabf73ddb7fe81b2ae524be244fa5b"
+    },
+    {
+      "path": "docs/contracts/scheduler-replay-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 806,
+      "digest": "sha256:ffe6f1c5008137f715b499fffcc14118cec66174bc5d9dc0bee27070a71182fd"
+    },
+    {
+      "path": "docs/contracts/telegram-command-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 418,
+      "digest": "sha256:51c9fb74081bdeac7198fbc65d68e670e70f4a98bab89622158b80cf09bf778d"
+    },
+    {
+      "path": "docs/contracts/telegram-config-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 370,
+      "digest": "sha256:6e88bcc202baf11f5bb866fc5a68f132006e21329af9be4a056643cde79fcd32"
+    },
+    {
+      "path": "docs/contracts/timeline-compaction-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1243,
+      "digest": "sha256:547c904e351530b70273f2b105fea6fb22a5629653fddf26695888417dac8e14"
+    },
+    {
+      "path": "docs/contracts/verification-bundle-readback-v0.1.schema.json",
+      "mode": "100644",
+      "bytes": 1066,
+      "digest": "sha256:2f477d9c1b065d92cc2bf6865fd7b2b5c862880731f50f041da45a4a0d59c49f"
+    },
+    {
+      "path": "docs/correlation-chains.md",
+      "mode": "100644",
+      "bytes": 7413,
+      "digest": "sha256:c66050b646207010931eaae10014226a0bdb0a0f194e49dac6c8e40f0b1f3f27"
+    },
+    {
+      "path": "docs/gateway-readback-runbook.md",
+      "mode": "100644",
+      "bytes": 7379,
+      "digest": "sha256:61db92445a40df24ad264ff92e447c13b4a46fc4f384e27ab5aafb99340631bf"
+    },
+    {
+      "path": "docs/local-private-pilot-workflow.md",
+      "mode": "100644",
+      "bytes": 6771,
+      "digest": "sha256:1f8790895ac7dea0c8826582e291d019296f2dd7bcac0b7fc463f4d9c0241f62"
+    },
+    {
+      "path": "docs/long-run-operator-runbook.md",
+      "mode": "100644",
+      "bytes": 8401,
+      "digest": "sha256:eba140707e2d98bde4a6f866b5ebf568270c7eb9deea164e6cc7efecd3620150"
+    },
+    {
+      "path": "docs/operator-next-actions.md",
+      "mode": "100644",
+      "bytes": 13787,
+      "digest": "sha256:01971c22006d85145abcec492846e5f43912db3ac050342c09cc720d5b8fe272"
+    },
+    {
+      "path": "docs/release/V0.1.0-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 2598,
+      "digest": "sha256:05094bda31a21bd68bfe78010b083e92036c15ac7f7595e163f2f44119ae1dfb"
+    },
+    {
+      "path": "docs/release/V0.1.1-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 2108,
+      "digest": "sha256:6afa8d3b6c05a4c937caf93d7d31d00ba3acf9b549fa3551075ccae699d1253c"
+    },
+    {
+      "path": "docs/release/V0.1.2-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 1908,
+      "digest": "sha256:7bf8ae4f2e9eb89c316af21ba37848aa5b68ee89b42ff8017195ac1706719aef"
+    },
+    {
+      "path": "docs/release/V0.1.3-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 1868,
+      "digest": "sha256:3287778494ff91bec693b5d46ee5edb61492c8ee37231a6f8c77ebed222be21b"
+    },
+    {
+      "path": "docs/release/V0.1.4-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 1874,
+      "digest": "sha256:9a84817e6d75b197c72a3219f7f851cb31935da679688bb14e8560eea0bf1022"
+    },
+    {
+      "path": "docs/release/V0.1.5-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 422,
+      "digest": "sha256:4394c2a02a8774d8a536c248a334740a4e7fc94061a10978926fd38cfd597134"
+    },
+    {
+      "path": "docs/release/V0.1.6-RELEASE-NOTES.md",
+      "mode": "100644",
+      "bytes": 2099,
+      "digest": "sha256:61a7d0d3b1efee6f3a76f3b1ddb8a701df0c313ca9173e9b17cc6e91aee09e19"
+    },
+    {
+      "path": "docs/roadmap/ao-next-integration-six-month-roadmap.md",
+      "mode": "100644",
+      "bytes": 14751,
+      "digest": "sha256:adfe9dced615a7d71d36bd79eb2af230a8d1d1b1e10e2ca228ba4ad822f92fbd"
+    },
+    {
+      "path": "docs/roadmap/ao-next-windows-successor-slice-month1-decision.md",
+      "mode": "100644",
+      "bytes": 8206,
+      "digest": "sha256:77c05aad52d9396e206b5828d448c8a9794548edc6120c87035cb260f5b2b1e0"
+    },
+    {
+      "path": "docs/roadmap/handoffs/README.md",
+      "mode": "100644",
+      "bytes": 598,
+      "digest": "sha256:97a06be35c9ef8ca01f0573437eb79040b69d356a4fe12b0877aefb17274ebf0"
+    },
+    {
+      "path": "docs/roadmap/handoffs/active/ao-next-dual-process-stage1-5-handoff-prompt.md",
+      "mode": "100644",
+      "bytes": 349,
+      "digest": "sha256:552a22182bada51f9475625b28a7d1eaba655fddb2e1601ebd3d900624925767"
+    },
+    {
+      "path": "docs/sdd/AO-MISSION-V0.1.md",
+      "mode": "100644",
+      "bytes": 1602,
+      "digest": "sha256:65931317fa7f9c37f3fd48b08a5001175dae66048370781527bd9206b8665c35"
+    },
+    {
+      "path": "docs/templates/ios-xcode-app-smoke-checklist.md",
+      "mode": "100644",
+      "bytes": 4358,
+      "digest": "sha256:618dfe9a41d2fe4611b45dea70f291aa8537bd39f2bcc4810b678de7a68e999b"
+    },
+    {
+      "path": "docs/templates/local-private-pilot-evidence-template.md",
+      "mode": "100644",
+      "bytes": 3717,
+      "digest": "sha256:985b9beec668f5569e2372716bd07500d71b44462cd2ba6cf0825b6c4218849d"
+    },
+    {
+      "path": "examples/invalid/a2a-agent-card-streaming-sse.json",
+      "mode": "100644",
+      "bytes": 774,
+      "digest": "sha256:ee546047de465f515b945f707fa064fc488af0c444f6dc3bd4577e637a5de994"
+    },
+    {
+      "path": "examples/invalid/a2a-agent-card-streaming.json",
+      "mode": "100644",
+      "bytes": 741,
+      "digest": "sha256:19259376af530e5908a53da051dfe83cd3af5f7fcbad500d3c67d5ddaf8232ad"
+    },
+    {
+      "path": "examples/invalid/a2a-jsonrpc-missing-mission-id.json",
+      "mode": "100644",
+      "bytes": 109,
+      "digest": "sha256:4950e623312539bcacf809cf23710234ad769296c610c295be4b01bc789fef1e"
+    },
+    {
+      "path": "examples/invalid/a2a-jsonrpc-missing-objective.json",
+      "mode": "100644",
+      "bytes": 105,
+      "digest": "sha256:00b4915ee78fb84767ed58ced573d37e66bd783d608d065e96597eebbd4b440d"
+    },
+    {
+      "path": "examples/invalid/a2a-jsonrpc-unknown-method.json",
+      "mode": "100644",
+      "bytes": 139,
+      "digest": "sha256:0a6ce07f11dde871ade1399402ffbc389b8e1a7550ea4bb12fa11af09da2d52a"
+    },
+    {
+      "path": "examples/invalid/gateway-replay-bundle-authority.json",
+      "mode": "100644",
+      "bytes": 438,
+      "digest": "sha256:b4f36ab36ffb3f32bea8318693f07094fde08363ad429e7e1bc950a02a38fce1"
+    },
+    {
+      "path": "examples/invalid/mission-dashboard-authority.json",
+      "mode": "100644",
+      "bytes": 591,
+      "digest": "sha256:425c6577629dad75788d31ce239bcbae39ee2675b3cc7e7944a5b7e9948b523c"
+    },
+    {
+      "path": "examples/invalid/mission-readiness-bundle-authority.json",
+      "mode": "100644",
+      "bytes": 392,
+      "digest": "sha256:2c7778b29a38822d78f4953736743321faa7a7d6a1857627a9525093ce6ebd1c"
+    },
+    {
+      "path": "examples/invalid/mission-verification-bundle-authority.json",
+      "mode": "100644",
+      "bytes": 504,
+      "digest": "sha256:27f9bc5c7cf0431c9d36fa1051e2a5d538532261bf1ef4cbbfa3d3f310a233bc"
+    },
+    {
+      "path": "examples/invalid/soak-canary-activation-digest-mismatch.json",
+      "mode": "100644",
+      "bytes": 1960,
+      "digest": "sha256:002ebf5b95ac9fdcec6c7bebe72e4730666078fdbd6ac7ae75c1e8e4a8a760ef"
+    },
+    {
+      "path": "examples/invalid/soak-canary-validation-matrix.json",
+      "mode": "100644",
+      "bytes": 2469,
+      "digest": "sha256:7f2e56b18134861bf286370d2a8994586b6f25d51a154e703838e088c36201ad"
+    },
+    {
+      "path": "examples/invalid/soak-plan-scale-amplification.json",
+      "mode": "100644",
+      "bytes": 3138,
+      "digest": "sha256:dea7b6a2bd7b8395db80f260f12d9cc57b07c87f52b9fec22bea79d2713a9e63"
+    },
+    {
+      "path": "examples/invalid/soak-plan-timeout-below-estimate.json",
+      "mode": "100644",
+      "bytes": 2710,
+      "digest": "sha256:46ef049be575484151d913d214b2c027c694c82845e2bd485c0ad23613329427"
+    },
+    {
+      "path": "examples/invalid/soak-plan-unsafe-authority.json",
+      "mode": "100644",
+      "bytes": 2620,
+      "digest": "sha256:43fbe0767d62f79242d59d5927c314c648ab2bbf9bd1183b56c20fe3d00d8986"
+    },
+    {
+      "path": "examples/invalid/telegram-command-matrix-denied.json",
+      "mode": "100644",
+      "bytes": 490,
+      "digest": "sha256:6f3c4c4eb62c2e41d6c1c7c265ad7a6435f288c0148e1e9a21b7ccafdaebedd2"
+    },
+    {
+      "path": "examples/invalid/telegram-command-real-token.json",
+      "mode": "100644",
+      "bytes": 164,
+      "digest": "sha256:1efc3cce0c3c3ff2b23a05afb4c9eebe18e8ad1d646b7b317fe7bcf11f2f5a4d"
+    },
+    {
+      "path": "examples/valid/a2a-agent-card.json",
+      "mode": "100644",
+      "bytes": 1495,
+      "digest": "sha256:334180484a4665f3374299106846d0a5476b64eb629f30e65ff746fcbc45b753"
+    },
+    {
+      "path": "examples/valid/a2a-http-integration.json",
+      "mode": "100644",
+      "bytes": 692,
+      "digest": "sha256:79ab3f7b43e0dfa59ad674f6c4778fd7c7f208133bfdfd43cff16c70d797ec09"
+    },
+    {
+      "path": "examples/valid/a2a-jsonrpc-request.json",
+      "mode": "100644",
+      "bytes": 122,
+      "digest": "sha256:8cf138c87173d75e3014cba209a6ec70faf93863f07bd2b9a59ad9aa95764813"
+    },
+    {
+      "path": "examples/valid/a2a-jsonrpc-response.json",
+      "mode": "100644",
+      "bytes": 236,
+      "digest": "sha256:7b602079b8961c1b3e86f9c354d00e14be429dd8f1ca920bd9c08d11926722af"
+    },
+    {
+      "path": "examples/valid/a2a-task-lifecycle-artifacts.json",
+      "mode": "100644",
+      "bytes": 1098,
+      "digest": "sha256:b0a9cc6ee81d115be07f57dcc316dce318de0a4baf10de2196fa765c129cdef8"
+    },
+    {
+      "path": "examples/valid/a2a-task-lifecycle-edges.json",
+      "mode": "100644",
+      "bytes": 1046,
+      "digest": "sha256:20142bca3b9dc279325c5ddeacd303024f153a93f681feb206ef13888ce35769"
+    },
+    {
+      "path": "examples/valid/a2a-task-lifecycle.json",
+      "mode": "100644",
+      "bytes": 659,
+      "digest": "sha256:90e6e1ee4f7f2a4a5bcc586bc3067eeaa1f21d4a51e704e9ebbf24c30576d796"
+    },
+    {
+      "path": "examples/valid/architecture-route-context-compatibility-vector.json",
+      "mode": "100644",
+      "bytes": 2206,
+      "digest": "sha256:771555e615e6ebe6317804c68cb1419aa46723dc3849812fa921851218c9b2ce"
+    },
+    {
+      "path": "examples/valid/artifact-manifest-recovery-compaction.json",
+      "mode": "100644",
+      "bytes": 933,
+      "digest": "sha256:5b6ba96ab0cc9624524d3d642f3e7fc06ddc077d51a24cb133c556c2b3e1cf4b"
+    },
+    {
+      "path": "examples/valid/artifact-manifest.json",
+      "mode": "100644",
+      "bytes": 443,
+      "digest": "sha256:1a2feaac560e53a8678ffe0a401e1643b80d2165ddbac3fce4b56822d8435ebb"
+    },
+    {
+      "path": "examples/valid/atlas-final-synthesis-readback.json",
+      "mode": "100644",
+      "bytes": 2839,
+      "digest": "sha256:16b32e9a0eb78447760c58bb1543d6b22fa9d2dbdbd8c2836c72e8fd2c5775f3"
+    },
+    {
+      "path": "examples/valid/atlas-recommendation-readback.json",
+      "mode": "100644",
+      "bytes": 767,
+      "digest": "sha256:62858aace07e9cb70870d53146756559edd1da6787378e84977836841c189b55"
+    },
+    {
+      "path": "examples/valid/beta-incident-stop-rule-readback.json",
+      "mode": "100644",
+      "bytes": 975,
+      "digest": "sha256:f43cd4bbf29b42fa2e24d980a5d30ba2d0ab1efdfbd25595e70ba97f9adc9199"
+    },
+    {
+      "path": "examples/valid/bounded-autonomy-month3-recovery-readback.json",
+      "mode": "100644",
+      "bytes": 3073,
+      "digest": "sha256:e45a6ddfe6ffc97e9049cae75ccc402f72d556906fbefa07b78f33e7b283d6e1"
+    },
+    {
+      "path": "examples/valid/bounded-autonomy-month4-controlled-improvement-readback.json",
+      "mode": "100644",
+      "bytes": 5019,
+      "digest": "sha256:15d5c5aa829a9497accb32734ab96a9a9282e0e68b53bfe4a544fcc34fb16630"
+    },
+    {
+      "path": "examples/valid/bounded-autonomy-month5-dogfood-readback.json",
+      "mode": "100644",
+      "bytes": 5265,
+      "digest": "sha256:41b54bb0f9ccf1a23964b516eeacb3f2c2bff40db824192cdcea864d22a21f64"
+    },
+    {
+      "path": "examples/valid/bounded-autonomy-month6-qualification-readback.json",
+      "mode": "100644",
+      "bytes": 3107,
+      "digest": "sha256:f752356ae1f48c4e04cb8e898bc684f17090f8e5657119994cbc27b7f8819fb3"
+    },
+    {
+      "path": "examples/valid/bounded-autonomy-repair-from-month3-readback.json",
+      "mode": "100644",
+      "bytes": 1667,
+      "digest": "sha256:364413bf070f63833dcf75fddcc9e61ca5272f6cb31d2e2588b6a393888b0e75"
+    },
+    {
+      "path": "examples/valid/command-compact-timeline-readback.json",
+      "mode": "100644",
+      "bytes": 1637,
+      "digest": "sha256:421b7c18fcec34c539be9a695f022b1f32040e940d5626e330a48c3a558445d8"
+    },
+    {
+      "path": "examples/valid/command-status-lease-checkpoint-readback.json",
+      "mode": "100644",
+      "bytes": 998,
+      "digest": "sha256:eb9f08a52a2c2c9f59ccfa4a9452d515e0967f4ec23dfde02ce401723dc8fd52"
+    },
+    {
+      "path": "examples/valid/command-status.json",
+      "mode": "100644",
+      "bytes": 423,
+      "digest": "sha256:8f8c173d251530ff525433b7eaf014a31e8e9be5516306459135af147319a11e"
+    },
+    {
+      "path": "examples/valid/correlation-chain-reference.json",
+      "mode": "100644",
+      "bytes": 1120,
+      "digest": "sha256:6600d18d3ae68f0b149baebbfee65cb28fcd60e0903ca18b78e4300c95552874"
+    },
+    {
+      "path": "examples/valid/doctor-command-compact-early-return-risk.json",
+      "mode": "100644",
+      "bytes": 3832,
+      "digest": "sha256:73609770ea48aea41d5b9995ec8ad86748fd50268b461ad2f99c27e054e6a6e3"
+    },
+    {
+      "path": "examples/valid/event-evidence-alias-search-readbacks.json",
+      "mode": "100644",
+      "bytes": 1961,
+      "digest": "sha256:42577c3183996f0e6e282f846aa2e9a61586c398036bd422aa41744e8005239e"
+    },
+    {
+      "path": "examples/valid/event-loop-decision.json",
+      "mode": "100644",
+      "bytes": 363,
+      "digest": "sha256:a76ac02512689e2dad133bc03659d47a070a4a259bda5f2c58ae638ebcd6a9b9"
+    },
+    {
+      "path": "examples/valid/final-reconciliation-event-search-readback.json",
+      "mode": "100644",
+      "bytes": 826,
+      "digest": "sha256:7bb6139ed9a96417564ea960cf3f402b920d452fc11c40ff2785496c97cd7273"
+    },
+    {
+      "path": "examples/valid/final-reconciliation-mismatch-packet.json",
+      "mode": "100644",
+      "bytes": 813,
+      "digest": "sha256:72d04f645300523a1763e5c5880e2e6b1beaa60b284e241c80e1eb267f66578d"
+    },
+    {
+      "path": "examples/valid/final-reconciliation-packet.json",
+      "mode": "100644",
+      "bytes": 707,
+      "digest": "sha256:e52cb2f9c85d4888f577f37b6051f43caa23c953617b68a5a0daa407a41faff0"
+    },
+    {
+      "path": "examples/valid/final-rollup-ready-node-denial.json",
+      "mode": "100644",
+      "bytes": 7856,
+      "digest": "sha256:15955f41f1d2ac69989d5ce23f6c5f9e3f36c5215c84fb54476b6d79deaf596f"
+    },
+    {
+      "path": "examples/valid/final-rollup.json",
+      "mode": "100644",
+      "bytes": 3889,
+      "digest": "sha256:5e2786447c7040a4867a8a5164bb5466d8d5d734c1de582314de8c143663bda2"
+    },
+    {
+      "path": "examples/valid/foundry-terminal-state-binding.json",
+      "mode": "100644",
+      "bytes": 1384,
+      "digest": "sha256:bf79465bc10507640099436cbf421d22e38e0a018278d46321a4753597eca4a8"
+    },
+    {
+      "path": "examples/valid/gateway-replay-bundle-readback.json",
+      "mode": "100644",
+      "bytes": 681,
+      "digest": "sha256:853f126ac935a574aa3307e1d1e860d66a040e28f32d229d07a159a4ba8c6098"
+    },
+    {
+      "path": "examples/valid/github-issue-month1-supervision-readback.json",
+      "mode": "100644",
+      "bytes": 1725,
+      "digest": "sha256:bf0b65a6930fc06e111fcd7452083a23133b9c75ceef6410560be228d1c600e0"
+    },
+    {
+      "path": "examples/valid/github-issue-month2-supervision-readback.json",
+      "mode": "100644",
+      "bytes": 1461,
+      "digest": "sha256:b61180dfbf7539d3c4d412aab2ff070348c4cfb546828b1fab913a9c556e119e"
+    },
+    {
+      "path": "examples/valid/github-issue-month3-supervision-readback.json",
+      "mode": "100644",
+      "bytes": 1410,
+      "digest": "sha256:aa08f9f83aee00370df0c6cf52d0859cd2623a7287e20a5a95b039e32ff49369"
+    },
+    {
+      "path": "examples/valid/governance-snapshot.json",
+      "mode": "100644",
+      "bytes": 1238,
+      "digest": "sha256:ddf3dc2a3769ffe5ccc089102e37c3c370ae2f04fa9a5938be1b2526a3ff6bc5"
+    },
+    {
+      "path": "examples/valid/ledger-compaction-readback.json",
+      "mode": "100644",
+      "bytes": 456,
+      "digest": "sha256:15a4d3ecfc0eef8944502dee9f86c5a4b2e0d05ed5969d8c91b0ece840443b4b"
+    },
+    {
+      "path": "examples/valid/lifecycle-metrics-readback.json",
+      "mode": "100644",
+      "bytes": 735,
+      "digest": "sha256:65be688e6bad5a57df86e70fa87a7439af9dce16c210525cc10a93f481dd98aa"
+    },
+    {
+      "path": "examples/valid/lifecycle-projection-readback.json",
+      "mode": "100644",
+      "bytes": 1553,
+      "digest": "sha256:9ddfd41604dfbbab78997e1e7f88ee03bd9c93c6698f66efed0c83ebc6029a9a"
+    },
+    {
+      "path": "examples/valid/mission-dashboard-readback.json",
+      "mode": "100644",
+      "bytes": 923,
+      "digest": "sha256:277cdcd834c4beee82f100d941edbe07701a2cf516b4ce9da7874a8bb235e94a"
+    },
+    {
+      "path": "examples/valid/mission-event-index-v0.2.json",
+      "mode": "100644",
+      "bytes": 867,
+      "digest": "sha256:512a7aa177231ba38faa4042a4a3fc3002bbdba81074a4bf94b9aff1dee2061a"
+    },
+    {
+      "path": "examples/valid/mission-readiness-bundle-readback.json",
+      "mode": "100644",
+      "bytes": 879,
+      "digest": "sha256:319d5f86f758a8315edfa30062710b225ad3c5ecd82bc6aff69d90a409207cab"
+    },
+    {
+      "path": "examples/valid/mission-record.json",
+      "mode": "100644",
+      "bytes": 371,
+      "digest": "sha256:a0c4452d31541ec22ef38f0dc0b705e1ae5bdf24eeee9b25d8a37af3ae111bcc"
+    },
+    {
+      "path": "examples/valid/mission-sqlite-migration-dry-run.json",
+      "mode": "100644",
+      "bytes": 1666,
+      "digest": "sha256:ad6192f0a88b0766fd8cbe9d87394aa1f423a5da6f5ab68e6ebb4a515535f34b"
+    },
+    {
+      "path": "examples/valid/mission-status-timeline-compatibility-vector.json",
+      "mode": "100644",
+      "bytes": 3005,
+      "digest": "sha256:f6019cd70d26b359f1b7923431e16cc83dd786bde58bd4c9e56787afa8f62394"
+    },
+    {
+      "path": "examples/valid/mission-verification-bundle-readback.json",
+      "mode": "100644",
+      "bytes": 1724,
+      "digest": "sha256:6b95b21a68f774bbe25733d29aa2f729170a844d0973f25cade74b8a1576e8f2"
+    },
+    {
+      "path": "examples/valid/objective-workflow-contract.json",
+      "mode": "100644",
+      "bytes": 2572,
+      "digest": "sha256:ce77374849821110bf8bdeae43b2373d0098c32342e99c7c82851fefda1423dc"
+    },
+    {
+      "path": "examples/valid/pilot-feedback-capture-packet.json",
+      "mode": "100644",
+      "bytes": 1080,
+      "digest": "sha256:1c24cf3c7108b496948b05407149961a5c2aa384368def8374cf15a0a0512532"
+    },
+    {
+      "path": "examples/valid/scheduler-readback-replay.json",
+      "mode": "100644",
+      "bytes": 1146,
+      "digest": "sha256:2ed0aed0157868078eebba92e55078b52a3b9eb93c6cfbbbb668667bb6ec8e9c"
+    },
+    {
+      "path": "examples/valid/scheduler-readback.json",
+      "mode": "100644",
+      "bytes": 266,
+      "digest": "sha256:d128f322b4648db73a835c74734de0e2aee698e7428a3cf25e2697943b821117"
+    },
+    {
+      "path": "examples/valid/scheduler-recovery-readback.json",
+      "mode": "100644",
+      "bytes": 447,
+      "digest": "sha256:2d6b93fd712978a18a6c1dc21f19c4d5be690c27499e1a35b3f698822a68c4a9"
+    },
+    {
+      "path": "examples/valid/soak-canary-activation.json",
+      "mode": "100644",
+      "bytes": 6306,
+      "digest": "sha256:117a85c9e2f7c35f28381e1e5ec72c758c795759ad81901313eb43af840a7433"
+    },
+    {
+      "path": "examples/valid/soak-plan-mixed.json",
+      "mode": "100644",
+      "bytes": 3873,
+      "digest": "sha256:1427c77f50e44bb6c3452161a42ae79693d01f9229fb7284e93836869734c695"
+    },
+    {
+      "path": "examples/valid/stack-qualification-orchestration.json",
+      "mode": "100644",
+      "bytes": 2622,
+      "digest": "sha256:7d003578430d3ff9c70540d038f7192d75879740d2273aba18e7e4fef0fd0384"
+    },
+    {
+      "path": "examples/valid/telegram-command-matrix.json",
+      "mode": "100644",
+      "bytes": 1098,
+      "digest": "sha256:566c433a718b084b09d197b08df4ac236087e821de899b39382c25a3e47f3b68"
+    },
+    {
+      "path": "examples/valid/telegram-config.json",
+      "mode": "100644",
+      "bytes": 163,
+      "digest": "sha256:6d323b224541412ba9df3273736a30e16b8d7117af6c27723b7b8e04c5e52429"
+    },
+    {
+      "path": "examples/valid/telegram-update-replay.json",
+      "mode": "100644",
+      "bytes": 621,
+      "digest": "sha256:1839b8f6770567b6e93d5cc785210f5d86e16019500ee46b932437ffd6231fe2"
+    },
+    {
+      "path": "examples/valid/telegram-webhook-duplicate-replay.json",
+      "mode": "100644",
+      "bytes": 471,
+      "digest": "sha256:fa0aa50db447d314022f5da2a98df4ec22ff30ebb0c6f3ec960d8322a53ef56a"
+    },
+    {
+      "path": "examples/valid/telegram-webhook-replay.json",
+      "mode": "100644",
+      "bytes": 706,
+      "digest": "sha256:25d3cf087594639cf3da8cb5d0f7488a88ab4a702a5b7293ecf30a5d7d2b3441"
+    },
+    {
+      "path": "examples/valid/timeline-compaction-readback.json",
+      "mode": "100644",
+      "bytes": 547,
+      "digest": "sha256:b938cc3dd0fbd115275665af4c4d47951484315b04189b38eb146cef6b17e074"
+    },
+    {
+      "path": "go.mod",
+      "mode": "100644",
+      "bytes": 74,
+      "digest": "sha256:c3dc3d51d16ff744669947ba992e13e32e575c1aa8becd0de12de8a4a437795f"
+    },
+    {
+      "path": "internal/mission/ao_next_candidate_import.go",
+      "mode": "100644",
+      "bytes": 7350,
+      "digest": "sha256:a603f7cb5c74591cd0b3762103b227bf28c9c1a1fffefaef58363423ae9d6d4a"
+    },
+    {
+      "path": "internal/mission/ao_next_candidate_import_test.go",
+      "mode": "100644",
+      "bytes": 10466,
+      "digest": "sha256:d31b687ac6e5c15f6c5442489eedcf169200bd7ab820370a4b10126a80516675"
+    },
+    {
+      "path": "internal/mission/artifact_store.go",
+      "mode": "100644",
+      "bytes": 6418,
+      "digest": "sha256:8b1399b4a7f5f918d15114a1653bd753551ae0898001a4dda7d746f268f51557"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_darwin.go",
+      "mode": "100644",
+      "bytes": 1718,
+      "digest": "sha256:8b7ea4566b8f8ac4817fb1a916e5686586f115fdcc20e9425ef505a16f846432"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_linux.go",
+      "mode": "100644",
+      "bytes": 1136,
+      "digest": "sha256:8e7bbf8a597eef19b98c360780d1c481ed84daa35bbbe1fdcd80a355759a8f03"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_other.go",
+      "mode": "100644",
+      "bytes": 1847,
+      "digest": "sha256:447ba4f39c8086ea2d2d229d99eac604a8da877d9a0478708fc279ecba122dd3"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_unix.go",
+      "mode": "100644",
+      "bytes": 5367,
+      "digest": "sha256:c0958b07871a583515b177d2da30026e09382845a4f5c552603169501b07d2cb"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_unix_test.go",
+      "mode": "100644",
+      "bytes": 1646,
+      "digest": "sha256:6a0a97f2e51fe9e550d5ef5e828f9934fc6d5280fc518a346df4837b28cee900"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_windows.go",
+      "mode": "100644",
+      "bytes": 6988,
+      "digest": "sha256:66940b38cfa3bf1f7537f9ea35cc5b6680698efac01283e8331cb127b5ba2725"
+    },
+    {
+      "path": "internal/mission/artifact_store_open_windows_test.go",
+      "mode": "100644",
+      "bytes": 5110,
+      "digest": "sha256:5803a0c5feecee023805ed67137595acc1ef449454341057f83ec892d549f7be"
+    },
+    {
+      "path": "internal/mission/artifact_store_test.go",
+      "mode": "100644",
+      "bytes": 10797,
+      "digest": "sha256:c4ce848e36bb61015612c4f85d2afb668c156574924881ce73cc82ff8d675fa5"
+    },
+    {
+      "path": "internal/mission/atlas_workgraph_identity_test.go",
+      "mode": "100644",
+      "bytes": 9137,
+      "digest": "sha256:95b8577894e9fee2dad483cf0f1bdaf7925e3933ab0df9b9417e725949e3e6c3"
+    },
+    {
+      "path": "internal/mission/atlas_workgraph_next_action_test.go",
+      "mode": "100644",
+      "bytes": 12277,
+      "digest": "sha256:2001d50ea9a4a7336cd2fa14b2ae9d9ad652c356a111d40fe98ecfe5e44e41ce"
+    },
+    {
+      "path": "internal/mission/beta_incident.go",
+      "mode": "100644",
+      "bytes": 2300,
+      "digest": "sha256:c384b61cc5d80f8998076c84f26e1433d3adf128125ea9fcd50b72b358fb1390"
+    },
+    {
+      "path": "internal/mission/campaign_lease.go",
+      "mode": "100644",
+      "bytes": 6242,
+      "digest": "sha256:7fc3fe8441ab03268754b6d1242759107a4524a50ff1747f1adc621cdd851004"
+    },
+    {
+      "path": "internal/mission/checkpoint_resume.go",
+      "mode": "100644",
+      "bytes": 9183,
+      "digest": "sha256:6c15b86d8c2ceb8904ccad5df4cbcb782202837b2ed5bedca595cee3aee71d29"
+    },
+    {
+      "path": "internal/mission/cli.go",
+      "mode": "100644",
+      "bytes": 63672,
+      "digest": "sha256:c6fc4ba5a85addec3462882815085439fb2a3ec0b7567f48204a576d8de499f3"
+    },
+    {
+      "path": "internal/mission/cli_continuation.go",
+      "mode": "100644",
+      "bytes": 251,
+      "digest": "sha256:0b01945bf0f4173111511f984e4620490527523215e3f1685f74afbe7aa0626b"
+    },
+    {
+      "path": "internal/mission/cli_correlation.go",
+      "mode": "100644",
+      "bytes": 127,
+      "digest": "sha256:d8b0022e0470afb3163ebfbe4540c6807d4df184017913ea338094d3c2444e7e"
+    },
+    {
+      "path": "internal/mission/cli_issue_repair.go",
+      "mode": "100644",
+      "bytes": 3041,
+      "digest": "sha256:66525f692fc95ffc0df8cc55ee790084c9ff1eea73aed805970e93b6207c1b7b"
+    },
+    {
+      "path": "internal/mission/cli_mission.go",
+      "mode": "100644",
+      "bytes": 119,
+      "digest": "sha256:a669eb4e5dbf3087ca9c547e9709a6540a703bad606ecf33dbf653ef09cbdd8d"
+    },
+    {
+      "path": "internal/mission/cli_registry.go",
+      "mode": "100644",
+      "bytes": 1885,
+      "digest": "sha256:3a471305d27c5e688130e0c168e50e5df170159df8795acffa1ce1ecf7da80e5"
+    },
+    {
+      "path": "internal/mission/cli_request_file_unix.go",
+      "mode": "100644",
+      "bytes": 1057,
+      "digest": "sha256:1e19c29f358fc3700187da8d26f08105fbe2fd5a530b760809c4d6682fc76f18"
+    },
+    {
+      "path": "internal/mission/cli_request_file_unix_test.go",
+      "mode": "100644",
+      "bytes": 833,
+      "digest": "sha256:3ccf91ea89717252aecc9cfb7ce03e301d088fcdb7c42471d1695512104e7044"
+    },
+    {
+      "path": "internal/mission/cli_request_file_windows.go",
+      "mode": "100644",
+      "bytes": 1031,
+      "digest": "sha256:02e2815100f1cb8c8478e6e6135d4f672e97e9e297b8f85082447c01fa88b58f"
+    },
+    {
+      "path": "internal/mission/cli_soak_canary.go",
+      "mode": "100644",
+      "bytes": 5892,
+      "digest": "sha256:c1613091d65378f8c74fe4f374e5e5c7c7a584c2a6e8de221b4ab295ad3855de"
+    },
+    {
+      "path": "internal/mission/cli_terminal_index.go",
+      "mode": "100644",
+      "bytes": 2475,
+      "digest": "sha256:57f5e9efb3ff70c70700f2e8247683d3f6c8fc31a0635b5fd891eaff84c59b03"
+    },
+    {
+      "path": "internal/mission/continuation_import_route_test.go",
+      "mode": "100644",
+      "bytes": 1751,
+      "digest": "sha256:77c56b9ad05ec3a158abc0bc7510d3d85f0d2b4bf8d0e02545ea413321b7ce64"
+    },
+    {
+      "path": "internal/mission/continuation_lifecycle.go",
+      "mode": "100644",
+      "bytes": 7789,
+      "digest": "sha256:4e60585d2116278b112a0c5f952de29674b2658da69b072fc4f65cd4f0c14e17"
+    },
+    {
+      "path": "internal/mission/continuation_lifecycle_test.go",
+      "mode": "100644",
+      "bytes": 8744,
+      "digest": "sha256:36a2a399217580475b1b7eda64439b591ac38543b779a0f240c22bd1c9603e54"
+    },
+    {
+      "path": "internal/mission/continuation_prompt.go",
+      "mode": "100644",
+      "bytes": 3822,
+      "digest": "sha256:8b2bf5a8cd031e4ebbb379dd07c6ce7fe503c78c5dfbdcc4a8d02f99d8ead566"
+    },
+    {
+      "path": "internal/mission/continue_transaction_test.go",
+      "mode": "100644",
+      "bytes": 7321,
+      "digest": "sha256:8ff28f64ee65a961bd53b3f09ec9310ce6d0354990da9ee3a3366e6c6098d8ae"
+    },
+    {
+      "path": "internal/mission/correlation_chain.go",
+      "mode": "100644",
+      "bytes": 66720,
+      "digest": "sha256:446eef81ef154b5cf0fc6a35236999971bb5452f02e6d46749590f7424780af2"
+    },
+    {
+      "path": "internal/mission/correlation_chain_fifo_test.go",
+      "mode": "100644",
+      "bytes": 2133,
+      "digest": "sha256:0cdb2061647d16dd14d497614c8a6bfd899af873a848005c7322addaed0bbd83"
+    },
+    {
+      "path": "internal/mission/correlation_chain_test.go",
+      "mode": "100644",
+      "bytes": 91578,
+      "digest": "sha256:f78be039c75e613757eb86ec6a7eac9ceebca69c9e7ca5eefcef7300c7b68da9"
+    },
+    {
+      "path": "internal/mission/correlation_file_other.go",
+      "mode": "100644",
+      "bytes": 229,
+      "digest": "sha256:a55542f20101358f26fac580b2d558327558edf72e0eefc578b6a28515dadccb"
+    },
+    {
+      "path": "internal/mission/correlation_file_policy.go",
+      "mode": "100644",
+      "bytes": 187,
+      "digest": "sha256:71d7edb89415c9976638f2003fca42fbead21452e0ae4bd46132ede1d00f379d"
+    },
+    {
+      "path": "internal/mission/correlation_file_policy_test.go",
+      "mode": "100644",
+      "bytes": 1449,
+      "digest": "sha256:9c2e58441c616e599deb00f0308464b5dff732a4d39d382044fca119a478a288"
+    },
+    {
+      "path": "internal/mission/correlation_file_unix.go",
+      "mode": "100644",
+      "bytes": 334,
+      "digest": "sha256:1c2b13e12e09a758953312c130a69641cbb7b9acacef3577225d2f666a5458c1"
+    },
+    {
+      "path": "internal/mission/correlation_file_windows.go",
+      "mode": "100644",
+      "bytes": 1226,
+      "digest": "sha256:b2c5da1ecb0b658e007ec41c65ba793ccea8f8009edffd69dd4ca8e095ab0be7"
+    },
+    {
+      "path": "internal/mission/correlation_file_windows_test.go",
+      "mode": "100644",
+      "bytes": 771,
+      "digest": "sha256:9bef0714588b20be0019615cc658e4e7058b44071f8a4b704db8b5cdc4cb1e9c"
+    },
+    {
+      "path": "internal/mission/decomposition_parity_test.go",
+      "mode": "100644",
+      "bytes": 8713,
+      "digest": "sha256:dcbf816f3e25e896c148e2fa52e54b48c93534d5afb286acd5842996210253a2"
+    },
+    {
+      "path": "internal/mission/duplicate_json_test.go",
+      "mode": "100644",
+      "bytes": 5417,
+      "digest": "sha256:5dbdb6c789c5d162634f95f6f34d1e5c9e3eecaca5c046d8e4971396c9f5ffa7"
+    },
+    {
+      "path": "internal/mission/event_index.go",
+      "mode": "100644",
+      "bytes": 41840,
+      "digest": "sha256:4f7f863f563aa8d07c61be4088901df735bf309355ba1790afcfb67ef1f6cc0a"
+    },
+    {
+      "path": "internal/mission/final_synthesis.go",
+      "mode": "100644",
+      "bytes": 4102,
+      "digest": "sha256:bbf2a17ab50970d1edab80e34853c2f1b19c5c0678131017fdee07d89706bd32"
+    },
+    {
+      "path": "internal/mission/gateway.go",
+      "mode": "100644",
+      "bytes": 18485,
+      "digest": "sha256:41ad7728a3f892dad36ee961737cabad59047120add50204e3cd10b629151a1a"
+    },
+    {
+      "path": "internal/mission/gateway_suite.go",
+      "mode": "100644",
+      "bytes": 22383,
+      "digest": "sha256:6ef76442515ef2f425e10b40758e681da25ed87dce5367569f79d5d282d252bd"
+    },
+    {
+      "path": "internal/mission/imports.go",
+      "mode": "100644",
+      "bytes": 31312,
+      "digest": "sha256:f2049e310d09ca23e123f0a578f92237a4be21fdda2bf396249fb4dc54962cdf"
+    },
+    {
+      "path": "internal/mission/issue_repair_supervisor.go",
+      "mode": "100644",
+      "bytes": 22491,
+      "digest": "sha256:d3d157a126bb43532b5654d23564f49baf04b87ed071eecfaf3777774bea8173"
+    },
+    {
+      "path": "internal/mission/issue_repair_supervisor_test.go",
+      "mode": "100644",
+      "bytes": 19483,
+      "digest": "sha256:ff95564cab166cf2d654102aee90de8800a6a11b05d25393a6123e153a6ab3c1"
+    },
+    {
+      "path": "internal/mission/ledger_compaction.go",
+      "mode": "100644",
+      "bytes": 4465,
+      "digest": "sha256:fcdd1cfd9f7f63b66165fbe6b1436c7b4a8a87b6aa982dc8a8d9d2ba028b191d"
+    },
+    {
+      "path": "internal/mission/lifecycle_metrics.go",
+      "mode": "100644",
+      "bytes": 5547,
+      "digest": "sha256:b14cd8c865348c8199e5143e157147c6af071a2abee4a2fc2582f022e59b1c67"
+    },
+    {
+      "path": "internal/mission/lifecycle_metrics_test.go",
+      "mode": "100644",
+      "bytes": 3701,
+      "digest": "sha256:c44f4287029fc905b9a31169aea4390086beff46262c54a5b417ed0cf7fc8075"
+    },
+    {
+      "path": "internal/mission/lifecycle_projection.go",
+      "mode": "100644",
+      "bytes": 4835,
+      "digest": "sha256:319f1c16f208a9291b3389538da14fd2e05557fa7a74cb51f4ffb8425d5ca9cf"
+    },
+    {
+      "path": "internal/mission/lifecycle_projection_test.go",
+      "mode": "100644",
+      "bytes": 2857,
+      "digest": "sha256:a70c0e2be57c72336e1bcd9761586efd41e8e6dc372a373da03615d2f358a600"
+    },
+    {
+      "path": "internal/mission/mission_test.go",
+      "mode": "100644",
+      "bytes": 253853,
+      "digest": "sha256:4482fce903d43beaf9a31f0b7ef8b4fcc8d2a6b89ea2c599565da2b4ee017151"
+    },
+    {
+      "path": "internal/mission/native_artifact_workflow_test.go",
+      "mode": "100644",
+      "bytes": 21061,
+      "digest": "sha256:85ce9ccf04a077c76be53b14e86c9267f697b100716170bde4b314f1d3c26b21"
+    },
+    {
+      "path": "internal/mission/new_wave_reactivation_test.go",
+      "mode": "100644",
+      "bytes": 3788,
+      "digest": "sha256:ede23217899b52b3fabc31122ace85923a489b1826f5aa5350ae17eb9b875229"
+    },
+    {
+      "path": "internal/mission/objective_entry_test.go",
+      "mode": "100644",
+      "bytes": 18819,
+      "digest": "sha256:0ae9490e5243163ac7ef238e0b88528677e14e731492002b98f984476a0f57c7"
+    },
+    {
+      "path": "internal/mission/pilot_feedback.go",
+      "mode": "100644",
+      "bytes": 1761,
+      "digest": "sha256:8dbfe3f9555d79d8df7541d32593973186077363374fe350d9b9b78bc57e0f2f"
+    },
+    {
+      "path": "internal/mission/production_lease_test.go",
+      "mode": "100644",
+      "bytes": 5839,
+      "digest": "sha256:269e3f56882460cd17da58bd0b4c09b8a88d5591b9764803c16ef30fcebc57d6"
+    },
+    {
+      "path": "internal/mission/python_repair_product_gate.go",
+      "mode": "100644",
+      "bytes": 24548,
+      "digest": "sha256:42839372882fac5870f2f8a3dbdf6893ce61a0471c01449733c3ec2e94d9988c"
+    },
+    {
+      "path": "internal/mission/python_repair_product_gate_links_unix.go",
+      "mode": "100644",
+      "bytes": 230,
+      "digest": "sha256:0d1bab776f5b690fe134fcae469d88057322497ac2bb2df0522d52f153245579"
+    },
+    {
+      "path": "internal/mission/python_repair_product_gate_links_windows.go",
+      "mode": "100644",
+      "bytes": 348,
+      "digest": "sha256:49cddc25fc69541fc38a03a5dc4715c92353e0881dc0942be5c4c2d166408183"
+    },
+    {
+      "path": "internal/mission/python_repair_product_gate_test.go",
+      "mode": "100644",
+      "bytes": 17433,
+      "digest": "sha256:0ca0bbfd3fde44daf390edee42aa01aa211881c71ea9925b43218325a721107c"
+    },
+    {
+      "path": "internal/mission/qualification_orchestration.go",
+      "mode": "100644",
+      "bytes": 10145,
+      "digest": "sha256:111a3a00694d5b7e5191d5131c79f62e4b3ef5502ef4780dbcedf0862780ddc4"
+    },
+    {
+      "path": "internal/mission/readback.go",
+      "mode": "100644",
+      "bytes": 17480,
+      "digest": "sha256:931f0fde6ea55eb2d04fb270c846d643263174ae0e2e3cdaa3fd116bde1ae849"
+    },
+    {
+      "path": "internal/mission/reconciliation.go",
+      "mode": "100644",
+      "bytes": 9739,
+      "digest": "sha256:449691d7bf67afbe99a5c1e41a83274e968cdcbfbf998459a85b947a8a8d3ab7"
+    },
+    {
+      "path": "internal/mission/release_rehearsal_workflow_test.go",
+      "mode": "100644",
+      "bytes": 60593,
+      "digest": "sha256:26241036cf1a8e66ffcfca02894129ec1d13900eb3aa8131dd35ebec6c6db0ee"
+    },
+    {
+      "path": "internal/mission/review_schema_path_test.go",
+      "mode": "100644",
+      "bytes": 8453,
+      "digest": "sha256:b2e29d53dd1db5c2630997b27c63ba5cc18a6195a08f38a8fab1befcb65f08c9"
+    },
+    {
+      "path": "internal/mission/rollup.go",
+      "mode": "100644",
+      "bytes": 4134,
+      "digest": "sha256:c0b41662e27857d451d5986de2405cf4f7cc36f01990f7e7fc09a7e2bfef4e54"
+    },
+    {
+      "path": "internal/mission/route_reconciliation.go",
+      "mode": "100644",
+      "bytes": 2835,
+      "digest": "sha256:e918affbe4a87bbeb4c7ec1b826bc0a348986f97bf1f4103cfab03b440aaad57"
+    },
+    {
+      "path": "internal/mission/routing.go",
+      "mode": "100644",
+      "bytes": 6264,
+      "digest": "sha256:4729c60d792018a4c0208f440d536fc50d04a0192ae139af4575e3293cb3a1f5"
+    },
+    {
+      "path": "internal/mission/scheduler.go",
+      "mode": "100644",
+      "bytes": 687,
+      "digest": "sha256:55ada0a9e0a1da33c278720460a4f1b380e42beff9781286972fe5598b78b5b6"
+    },
+    {
+      "path": "internal/mission/scheduler_recovery.go",
+      "mode": "100644",
+      "bytes": 913,
+      "digest": "sha256:16add091860b8ed845562f8fcd5207a0e18bf3c3006dcf68d28e4236dd060a17"
+    },
+    {
+      "path": "internal/mission/scheduler_replay.go",
+      "mode": "100644",
+      "bytes": 2935,
+      "digest": "sha256:a1de4a38454ffacd9feb9c7c308a29e9f249c10392d09246aa22e70784500701"
+    },
+    {
+      "path": "internal/mission/snapshot.go",
+      "mode": "100644",
+      "bytes": 1462,
+      "digest": "sha256:f4fee5ccec6693322a5684dbc51f1a92b4f158755a92e595b251671d924cadba"
+    },
+    {
+      "path": "internal/mission/soak_canary.go",
+      "mode": "100644",
+      "bytes": 78554,
+      "digest": "sha256:eb8770957f171e43e60f83a75b554678963e890f88964a6d4b44828b32cc9019"
+    },
+    {
+      "path": "internal/mission/soak_canary_executor.go",
+      "mode": "100644",
+      "bytes": 45345,
+      "digest": "sha256:5cf5abde23bcb751eee01b776693b2245ed7ee24dacee5833b2129db18ef37f9"
+    },
+    {
+      "path": "internal/mission/soak_canary_git.go",
+      "mode": "100644",
+      "bytes": 43762,
+      "digest": "sha256:3626a607f5dc002a7a6d59a6befa56eddbd5a9f22948bc69d7806a1584514d5e"
+    },
+    {
+      "path": "internal/mission/soak_canary_git_metadata.go",
+      "mode": "100644",
+      "bytes": 4398,
+      "digest": "sha256:6c8f4f5614348f87ecdfe50fd29c4931a81ddc20bedb83515067c4deaea04984"
+    },
+    {
+      "path": "internal/mission/soak_canary_git_metadata_unix.go",
+      "mode": "100644",
+      "bytes": 581,
+      "digest": "sha256:f23a1aad7a453ef0878b586be457e3062af9f207fd16b1aa9cbb49e93a5b29ed"
+    },
+    {
+      "path": "internal/mission/soak_canary_git_metadata_unix_test.go",
+      "mode": "100644",
+      "bytes": 1536,
+      "digest": "sha256:b870296c4484777405d6d0723d960f5e003a827702eaf1ef5030d1aacfdd0187"
+    },
+    {
+      "path": "internal/mission/soak_canary_git_metadata_windows.go",
+      "mode": "100644",
+      "bytes": 1560,
+      "digest": "sha256:96493d1f4c61e698983c649f762d1e8d779bd419323f37cc7075b4da48dcef78"
+    },
+    {
+      "path": "internal/mission/soak_canary_round1_test.go",
+      "mode": "100644",
+      "bytes": 25286,
+      "digest": "sha256:7242cd1443487312b8c4d8186f098e3a81bd2eab8a1e7fc25e78d553e4188400"
+    },
+    {
+      "path": "internal/mission/soak_canary_round2_test.go",
+      "mode": "100644",
+      "bytes": 18180,
+      "digest": "sha256:ed28887406efa3063e9e564667f3c38f44777247b5d77b573bdf882553867abf"
+    },
+    {
+      "path": "internal/mission/soak_canary_round3_test.go",
+      "mode": "100644",
+      "bytes": 14997,
+      "digest": "sha256:d4fe51e99ff5570b37d003f1789f6d8aee74f7caa3d629399f35fc26070e0a30"
+    },
+    {
+      "path": "internal/mission/soak_canary_snapshot.go",
+      "mode": "100644",
+      "bytes": 7721,
+      "digest": "sha256:127963e755536fbcc9f3753485527ef580bb2981571eb5a28357d791dd8fe5b8"
+    },
+    {
+      "path": "internal/mission/soak_canary_special_file_unix_test.go",
+      "mode": "100644",
+      "bytes": 658,
+      "digest": "sha256:bb77199b8b69f23136db8c604112ee75abf789a27fa8ba98390137e5f19da414"
+    },
+    {
+      "path": "internal/mission/soak_canary_test.go",
+      "mode": "100644",
+      "bytes": 41329,
+      "digest": "sha256:dd83a0593ed1770f7664613af47dfa7702097a1a01d7706c5d362f10798d772a"
+    },
+    {
+      "path": "internal/mission/soak_plan.go",
+      "mode": "100644",
+      "bytes": 29284,
+      "digest": "sha256:dcc82baa9ab6d8c2af24114bf2ee288f33245ef6823a2e8d4cfad932b14a7962"
+    },
+    {
+      "path": "internal/mission/soak_plan_test.go",
+      "mode": "100644",
+      "bytes": 32372,
+      "digest": "sha256:fc9a01c9a216659f993e99446a7a1cacefd433fa9999a0e1c4d6cb7cf54b943d"
+    },
+    {
+      "path": "internal/mission/store.go",
+      "mode": "100644",
+      "bytes": 14685,
+      "digest": "sha256:9e61ad2e37458211b351a4702f55d6cf200ad4c03836a7e33aa78f0230066b8e"
+    },
+    {
+      "path": "internal/mission/store_atomic_other.go",
+      "mode": "100644",
+      "bytes": 224,
+      "digest": "sha256:5551a44148f3a1112e0c8ebe01e568acde42a7b384be182a93edfeeff31dfb0a"
+    },
+    {
+      "path": "internal/mission/store_atomic_unix.go",
+      "mode": "100644",
+      "bytes": 304,
+      "digest": "sha256:2273986a7c6cb7c23fa37583862bd3f0d133978b6b7f5847ef10007341fcab76"
+    },
+    {
+      "path": "internal/mission/store_atomic_windows.go",
+      "mode": "100644",
+      "bytes": 929,
+      "digest": "sha256:e4cc7c2a1fde40bd352851097f8f4bb600b44f08451adb8a92f89c8021760b0b"
+    },
+    {
+      "path": "internal/mission/store_lock_other.go",
+      "mode": "100644",
+      "bytes": 316,
+      "digest": "sha256:0a98c8763f2f76078a3a0b7c53ec4d71b05234f3b014cee73ebed518a3885a5f"
+    },
+    {
+      "path": "internal/mission/store_lock_unix.go",
+      "mode": "100644",
+      "bytes": 279,
+      "digest": "sha256:0f59f8794ece9d02f7629d14cce7d2ec49334a48fd036f364ef1bcdf9bce8bd6"
+    },
+    {
+      "path": "internal/mission/store_lock_windows.go",
+      "mode": "100644",
+      "bytes": 837,
+      "digest": "sha256:2c2c1847c48d5937f651dd2002d74758ba0a502e929a10adc83b7508d28faf02"
+    },
+    {
+      "path": "internal/mission/store_transaction.go",
+      "mode": "100644",
+      "bytes": 24667,
+      "digest": "sha256:d275b25f5a050a7100d0b94ebc1abbfc60e8695eac05f480ede5eb1a5c6cc38f"
+    },
+    {
+      "path": "internal/mission/store_transaction_commit_other.go",
+      "mode": "100644",
+      "bytes": 369,
+      "digest": "sha256:d29eddd68c985e5072d2252c2662682ec7d4ded924dc38ada0eac9a3efbc2244"
+    },
+    {
+      "path": "internal/mission/store_transaction_commit_unix.go",
+      "mode": "100644",
+      "bytes": 373,
+      "digest": "sha256:f532b420d0eeaa3c2256d3226b4e3e1794297da769332bf43535485c4f43e624"
+    },
+    {
+      "path": "internal/mission/store_transaction_commit_windows.go",
+      "mode": "100644",
+      "bytes": 342,
+      "digest": "sha256:eda622a558f9a81d65f46a69f1308c2b16a60c837ab4741b035ba83499af235f"
+    },
+    {
+      "path": "internal/mission/store_transaction_commit_windows_test.go",
+      "mode": "100644",
+      "bytes": 443,
+      "digest": "sha256:51dd19cd44e9651089bfa333744773e0c9d84dfeedf06137cbddd5009688f0dc"
+    },
+    {
+      "path": "internal/mission/store_transaction_test.go",
+      "mode": "100644",
+      "bytes": 20162,
+      "digest": "sha256:87aba008a4e3b29aa16ada5abae9ea451d9c2eea422fb25245f8e6a2e1326728"
+    },
+    {
+      "path": "internal/mission/store_transaction_validation_test.go",
+      "mode": "100644",
+      "bytes": 19879,
+      "digest": "sha256:b21ae89daba9907b91184ad23e863be560e8a02d2e1cfa2bb03d6e4bc162c423"
+    },
+    {
+      "path": "internal/mission/supervisor.go",
+      "mode": "100644",
+      "bytes": 13280,
+      "digest": "sha256:81fb68b20179a7732bb260987c1f165aeb5e1deb98e837704ea31807685c3706"
+    },
+    {
+      "path": "internal/mission/symlink_test.go",
+      "mode": "100644",
+      "bytes": 1280,
+      "digest": "sha256:e4f81d54c1729ca63a69eb85feda22613a8ced8df2742e41e1e0204d0e2708bd"
+    },
+    {
+      "path": "internal/mission/terminal_index.go",
+      "mode": "100644",
+      "bytes": 39031,
+      "digest": "sha256:cfac2bf4efa3e23a26a6a52050f730b5ae73c6914cfe1ff3250cd07bd612eff9"
+    },
+    {
+      "path": "internal/mission/terminal_index_test.go",
+      "mode": "100644",
+      "bytes": 20283,
+      "digest": "sha256:8f1c08b91c2aa8c06f8694268828a62bd3246b9d3f8a714e2db27d9d99940917"
+    },
+    {
+      "path": "internal/mission/terminal_reconciliation_cli_test.go",
+      "mode": "100644",
+      "bytes": 28399,
+      "digest": "sha256:8391f28a0dfa06fa94b8f3399e989edc275123e58bca891703fbb0889e970c47"
+    },
+    {
+      "path": "internal/mission/types.go",
+      "mode": "100644",
+      "bytes": 63190,
+      "digest": "sha256:30f03f4b5af434032a54830e4f86618d6bb99ce114ef0cc7629fb9568d248845"
+    },
+    {
+      "path": "internal/mission/validate.go",
+      "mode": "100644",
+      "bytes": 22742,
+      "digest": "sha256:dce98c990d50b5162238a483331e171af70bc418819ec2bf3cbbaa21464d4981"
+    },
+    {
+      "path": "internal/mission/verification_bundle.go",
+      "mode": "100644",
+      "bytes": 5135,
+      "digest": "sha256:8cac96dd6a0044def5aaae2bfe72927640459b6d10cf11c8edabc22bf0f77451"
+    },
+    {
+      "path": "internal/mission/workflow_contract_strict_test.go",
+      "mode": "100644",
+      "bytes": 11636,
+      "digest": "sha256:fd46d6fd478f4027fc3c8d4b6a68c65c47bf36355e98c539edbcfb3fd7eddc7d"
+    },
+    {
+      "path": "scripts/ci-go-test/main.go",
+      "mode": "100644",
+      "bytes": 4719,
+      "digest": "sha256:7d149164bca9242f9de0d5cb893c5186f4234f984d34328b985cb137d9d0236d"
+    },
+    {
+      "path": "scripts/ci-go-test/main_test.go",
+      "mode": "100644",
+      "bytes": 7495,
+      "digest": "sha256:bd496e3e40376244e5afe460c816300c247eafd8838c33781e8db0e7a03be8cf"
+    },
+    {
+      "path": "scripts/production-readiness.sh",
+      "mode": "100755",
+      "bytes": 9274,
+      "digest": "sha256:d76565569121e8d082c40b66fd84a4dbabb171c417acfd20b0864cca0347a3d9"
+    },
+    {
+      "path": "scripts/production_readiness_json.py",
+      "mode": "100644",
+      "bytes": 39191,
+      "digest": "sha256:1bff8483e4ccb4752d5a780376d88189432e541cf3c1506bbcaec1c0ae6e74d2"
+    },
+    {
+      "path": "scripts/public-safety-scan.py",
+      "mode": "100644",
+      "bytes": 7030,
+      "digest": "sha256:975d4a2f997eb8161be3dbb390e8e2d252b84d115e60ee290560e8a63a7107da"
+    },
+    {
+      "path": "scripts/soak-canary-offline-stdlib-test.sh",
+      "mode": "100755",
+      "bytes": 990,
+      "digest": "sha256:631c899d9f110ea86b1728279b6e9431447f715805e8b0a6c50fd9c2d9b930d9"
+    },
+    {
+      "path": "scripts/test_production_readiness_json.py",
+      "mode": "100644",
+      "bytes": 20842,
+      "digest": "sha256:3ed9f8f076555fae8eca3213481c42d28e0af027ab0eb4758bce170b04de1046"
+    },
+    {
+      "path": "scripts/test_public_safety_scan.py",
+      "mode": "100644",
+      "bytes": 6754,
+      "digest": "sha256:dd867e567805ac88f3d2cd25ef3cc095035a9fdf4c869f850d557df537f62c81"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/event-search-production-smoke.json",
+      "mode": "100644",
+      "bytes": 653,
+      "digest": "sha256:f39cd89f03259cc0ff5cff7f9e10cfd35d3e463f374611bcb0c70944037e3d20"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/final-synthesis.json",
+      "mode": "100644",
+      "bytes": 4503,
+      "digest": "sha256:84977e0c2ab9c25a3ccc3aacc5da1461c27cb445991caf813d4a963292bed691"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/merged-pr-branch-cleanup.json",
+      "mode": "100644",
+      "bytes": 966,
+      "digest": "sha256:10360bbec4ce18be4bfa7b299f667941d193a8d6da21da697b8307697fe91227"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/next-recommended-prompt.md",
+      "mode": "100644",
+      "bytes": 2269,
+      "digest": "sha256:2e5936624820a13af7ac31d141d1c3fee8ae5a769872ee668430ad78777105bc"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/next-wave-recommended-prompt.md",
+      "mode": "100644",
+      "bytes": 2224,
+      "digest": "sha256:3ebf0881ee0f17e0a29091800fe49159c2cd2336866b33f9c9acd6fbb0487002"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-01-atlas-recommendation-readback-import/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 319,
+      "digest": "sha256:9641cdbc2cd93ec10e594221b85e3b461fe459001b0a3956c1b864b6692590ea"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-01-atlas-recommendation-readback-import/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 272,
+      "digest": "sha256:5bb62ff2371a96a295c667e401b96b42ed1c0660262e65a650d6b590dde7b9a6"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-02-nonterminal-atlas-readback-gate/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 321,
+      "digest": "sha256:5f13c82103a1cc4c9075b398e6b31ef1b2b5728094e6335070fbee9a6a1938b1"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-02-nonterminal-atlas-readback-gate/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 267,
+      "digest": "sha256:0dd72229006077449763ded113be17b49c11f379687a005989a7534f6cb35249"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-03-atlas-readback-authority-rejection/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 295,
+      "digest": "sha256:bb94d69a733f598f04417dff70d0327615d2573440d84b50ec7ba539f926168a"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-03-atlas-readback-authority-rejection/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 270,
+      "digest": "sha256:9279d3f85eba5a92a37b7a6281c3a65a41d307e45346c2fe52e4b84e56838edd"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-04-atlas-terminal-blocker-readbacks/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 306,
+      "digest": "sha256:ed95ed393a84ee971e802985e23de2641e09f469102e09306d1689280a9369d8"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-04-atlas-terminal-blocker-readbacks/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 268,
+      "digest": "sha256:772c16b65fa2bc39495336f18330d0d4f030de6ff26466bf6d5edf722dcf51bf"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-05-atlas-recommendation-event-index/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 293,
+      "digest": "sha256:359b61dd74f7741774e57dbe00dc13ab4638024b5c4edbd3bdaf8d12292814ce"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-05-atlas-recommendation-event-index/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 268,
+      "digest": "sha256:6d433a50c4e5fa7ef12dd4ded90b2c1b06c61ac2f0d8c657d532ad348c588aad"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-06-command-status-atlas-recommendation-summary/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 297,
+      "digest": "sha256:8bd12f25b2fd080d1db4c35e48c8a13452718dd89551fd24ad934512a14ac235"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-06-command-status-atlas-recommendation-summary/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 279,
+      "digest": "sha256:4bf3f60742a0286cfb35be4d4745dca6c6ac9749b6fc3e78498f5b7bb569802e"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-07-final-reconciliation-packet/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 292,
+      "digest": "sha256:0b475552baccff4686b9934a3fb27b003958362cf04666babbe7fce2c656f01d"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-07-final-reconciliation-packet/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 263,
+      "digest": "sha256:27a318589458fc5119e50c8d5a5097a4cea4608fe0065736d5178134ca0a0e30"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-08-runbook-next-prompt/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 272,
+      "digest": "sha256:7f2859d2d85332bab9e265158c2198a32c15e24d3d621ec9efba5b7298edd3f3"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-08-runbook-next-prompt/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 255,
+      "digest": "sha256:1c344fa54216f26b072817c991dd246ea0544e9ae53f03d5f30837d0f639ca90"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-09-reconciliation-mismatch-blockers/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 281,
+      "digest": "sha256:406d613ef62784a6524216fc0de9963a8dd92e3c8257b4781c8483fb8a627ec7"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-09-reconciliation-mismatch-blockers/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 268,
+      "digest": "sha256:0763efc8e03de561bba83c63cab1fa27b4abfca2505f5658734bfbcf6cad3bf4"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-10-final-reconcile-cli/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 287,
+      "digest": "sha256:f69218817524023531e75d6eef6a20d35a5d6085351a0c97f5a648a68b2a74e5"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-10-final-reconcile-cli/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 255,
+      "digest": "sha256:fa5961bfadd451b1203804eb8ac77a71e880963488a445a37efacb24879a7fdc"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-11-final-reconciliation-event-index/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 288,
+      "digest": "sha256:25c3b90dd861d81bd9c2251d8f6a1e10778f3b8415971f3b4b987737cb12cdcb"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-11-final-reconciliation-event-index/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 268,
+      "digest": "sha256:a74706a5d0607b0ef6ca550be45f269c2957dee458c1f420a28ac52ddd4d79ca"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-12-final-reconciliation-fixture-docs/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 290,
+      "digest": "sha256:0941ad90940049842fab3fbc2517a07fe37c53d1b25ca1322eb7074b08293648"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-12-final-reconciliation-fixture-docs/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 269,
+      "digest": "sha256:c027f10d43cb6a6765f653be3e4fb2a395f5c43fce67a1b429c5675c09c64853"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-13-command-status-text-summary/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 285,
+      "digest": "sha256:c93650325a97a2f105b32bd05941c8f4c83a1ee5d7ccb07c66ab3d11c03e243a"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-13-command-status-text-summary/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 263,
+      "digest": "sha256:7c242a760f71b2a442d27001f25fb56f781a7987d1a764a8551e413150214e18"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-14-root-public-safety-scan/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 286,
+      "digest": "sha256:51c66175c21976fe60d00025effe1e8c816e332f21219bda41dde131f21db173"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-14-root-public-safety-scan/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 259,
+      "digest": "sha256:805520f7644c1f61f11897b790af16c6756e9fd07b492b62227f5ab960139f4a"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-15-production-readiness-branch-cleanup/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 246,
+      "digest": "sha256:1362e105aa7d0b0b25888943f75a4b2b8c14ba8a8f87f809ce9be54c284c157c"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-15-production-readiness-branch-cleanup/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 247,
+      "digest": "sha256:b28ad92507357485a9b18e88e7bf9fb4409ec57e6256ef50787e53b6e3c78d7f"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-16-promoter-no-promotion-root-summary/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 269,
+      "digest": "sha256:ed6b4ff877fee88bb2b79f8d7b2013f2da4cd2afa96c586c337ec29106e58646"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-16-promoter-no-promotion-root-summary/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 246,
+      "digest": "sha256:a5a93c96fd788913f64dc26103a434f0e1b8c060d633eb129546656d16330ab4"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-17-foundry-terminal-state-fixture-binding/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 281,
+      "digest": "sha256:673971b1546cf5679bc8248e1388e0c969140f98aed4cf64aec9ddc4d5ee8fa6"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-17-foundry-terminal-state-fixture-binding/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 250,
+      "digest": "sha256:a8785c5ec2e90eede61234cff6a10f6f3d273220270e0555694e3568f2b731fe"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-18-command-compact-timeline-fixture/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 269,
+      "digest": "sha256:f0c1fdad010bbad8ba9fdfb2b32bd50d6b48a487b13cf484982ce57130506b24"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-18-command-compact-timeline-fixture/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 244,
+      "digest": "sha256:16091fd52bd641cd9515eaf3dbf9433a41cc72a67007eb92ccfa6a0a87090e1a"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-19-command-final-reconcile-operator-flow/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 275,
+      "digest": "sha256:e112fa5d875e6b3b9d8bbdb0fb86d22cf755d25aa94c17a44e4be420705b15d8"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-19-command-final-reconcile-operator-flow/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 249,
+      "digest": "sha256:bf2ffd7cb9505ba40a005e408cfdfd21ea76d6ba8adc5f9a07ef159195699d95"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-20-final-reconciliation-event-search-smoke/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 276,
+      "digest": "sha256:42e6a1256e825f4d7f4069611ebd32894e0c9e351445039002b207c86104710c"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-20-final-reconciliation-event-search-smoke/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 251,
+      "digest": "sha256:08659ff71e07d3a74c05c5ec6ead491f894b005af567492d9f989593e2349660"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-21-final-reconciliation-mismatch-fixture/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 282,
+      "digest": "sha256:1d8f0580dbc742ef11045faaa19f9bbc18cf58af7c54ad64cf3e0e76f648470c"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-21-final-reconciliation-mismatch-fixture/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 249,
+      "digest": "sha256:c936febfe3415434f77b3462cf95da65c899a5d5cd4163f6c09034e41a0e36c7"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-22-final-reconciliation-event-search-fixture/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 283,
+      "digest": "sha256:599b95b146b3a36ddaf4c4d495b7a3223c1ddc4427bde5220b1397a4647e47ca"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-22-final-reconciliation-event-search-fixture/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 253,
+      "digest": "sha256:243f0b68467a88548fd4d1a28327ad32b6aeae88291edef7c56edff8b9a62b9d"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-23-wave-boundary-readiness-scan/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 268,
+      "digest": "sha256:4ae5bcec1c2a3e1bfe545a26a5b8bc3cd3d9341c0cd493597dd776116c790842"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-23-wave-boundary-readiness-scan/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 240,
+      "digest": "sha256:effb21dce573ebc6d2566dc2c7a28c0dd46c2b1d1833cefda336f7ed1b5d7dae"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-24-merged-pr-branch-cleanup/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 262,
+      "digest": "sha256:e06dbb47564470354c6b5c3ff1e5f6286875900cc9f7bc02a46c5a5cad5ed37b"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-24-merged-pr-branch-cleanup/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 236,
+      "digest": "sha256:59334ad4105096a7597bc5e3be756ece10b1c1d76fe3f970cdbd77a932cdcfac"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-25-final-synthesis-next-recommendations/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 281,
+      "digest": "sha256:588c3f3460a5e2780eea3317316dc12259c2473d76f35b1abfb3d6a043161873"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-25-final-synthesis-next-recommendations/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 248,
+      "digest": "sha256:01392ef362388c757f0004c6b9db261f94afcc11ebe53aab252b0d819914115f"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-26-post-merge-final-closure-readback/promoter-no-promotion.json",
+      "mode": "100644",
+      "bytes": 271,
+      "digest": "sha256:45ad17454d9977f247a2926f8e83ca2d72754cb1f43b4da4b6106c46234a1085"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/nodes/node-26-post-merge-final-closure-readback/sentinel-public-safety.json",
+      "mode": "100644",
+      "bytes": 245,
+      "digest": "sha256:3e1dafeaaf72d67ac112e293ddf31f96d5b684ffccdedbfb577fda7f7ace08f9"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/post-merge-final-closure.json",
+      "mode": "100644",
+      "bytes": 821,
+      "digest": "sha256:a1ce3b374edd7703b83ff6b0a99b72db46e502c4414f7807bf4e84d8beabf8eb"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/production-readiness-branch-cleanup.json",
+      "mode": "100644",
+      "bytes": 957,
+      "digest": "sha256:b694de440ff670501505af4f5a946fedb2b5c0ff78759503aff5bbea12aa4485"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/promoter-no-promotion-summary.json",
+      "mode": "100644",
+      "bytes": 726,
+      "digest": "sha256:95aab61d4fb03223534a332a56a848dab1176fa30b892aeefad44b31635c3c78"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/sentinel-public-safety-scan.json",
+      "mode": "100644",
+      "bytes": 924,
+      "digest": "sha256:86354bf3d33e5a82aec782a793b99cb8c7150329989e9236d238a739762e4828"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/wave-boundary-readiness.json",
+      "mode": "100644",
+      "bytes": 515,
+      "digest": "sha256:034bd00ea42a52ef50a50c0e6995e4349b93a135f0c0a52a2cb4bdb18ae0a8a4"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-doubled-wave-v01/codex-session-duration-readback.json",
+      "mode": "100644",
+      "bytes": 738,
+      "digest": "sha256:8d4a9935717305b48d7d833cbfc451d1d9a3bd1708ef63b3200eddf4e8e28351"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-doubled-wave-v01/duration-ledger.json",
+      "mode": "100644",
+      "bytes": 658,
+      "digest": "sha256:027c255a0b3c28456228eeb0fb852e3f94e9e2a9198e22e05ff084da7062c098"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-doubled-wave-v01/nodes/node-10-event-evidence-aliases/event-alias-search-readbacks.json",
+      "mode": "100644",
+      "bytes": 916,
+      "digest": "sha256:6eca82f6f94ebf311262be0b78c56ab7a5663c2ba623b213aff6971a6b713c61"
+    },
+    {
+      "path": "testdata/production-readiness/ao-mission-doubled-wave-v01/workgraph.json",
+      "mode": "100644",
+      "bytes": 6628,
+      "digest": "sha256:263953256cd1c5b1fce32273473a21087915ea126b433febde93bf909b56c866"
+    }
+  ],
+  "vectors": [
+    {
+      "id": "archive-recovery-readback",
+      "surfaces": [
+        "readbacks",
+        "archive_import"
+      ],
+      "expected_disposition": "accepted",
+      "source_path": "examples/valid/artifact-manifest-recovery-compaction.json",
+      "fixture_path": "vectors/archive-import.json",
+      "bytes": 933,
+      "digest": "sha256:5b6ba96ab0cc9624524d3d642f3e7fc06ddc077d51a24cb133c556c2b3e1cf4b"
+    },
+    {
+      "id": "command-status-readback",
+      "surfaces": [
+        "commands",
+        "readbacks"
+      ],
+      "expected_disposition": "accepted",
+      "source_path": "examples/valid/command-status.json",
+      "fixture_path": "vectors/command-status.json",
+      "bytes": 423,
+      "digest": "sha256:8f8c173d251530ff525433b7eaf014a31e8e9be5516306459135af147319a11e"
+    },
+    {
+      "id": "terminal-import-readback",
+      "surfaces": [
+        "lifecycle_transitions",
+        "readbacks",
+        "archive_import"
+      ],
+      "expected_disposition": "accepted",
+      "source_path": "examples/valid/foundry-terminal-state-binding.json",
+      "fixture_path": "vectors/import-terminal.json",
+      "bytes": 1384,
+      "digest": "sha256:bf79465bc10507640099436cbf421d22e38e0a018278d46321a4753597eca4a8"
+    },
+    {
+      "id": "missing-objective-contract",
+      "surfaces": [
+        "strict_contracts"
+      ],
+      "expected_disposition": "rejected",
+      "source_path": "examples/invalid/a2a-jsonrpc-missing-objective.json",
+      "fixture_path": "vectors/invalid-missing-objective.json",
+      "bytes": 105,
+      "digest": "sha256:00b4915ee78fb84767ed58ced573d37e66bd783d608d065e96597eebbd4b440d"
+    },
+    {
+      "id": "lifecycle-timeline-readback",
+      "surfaces": [
+        "lifecycle_transitions",
+        "readbacks"
+      ],
+      "expected_disposition": "accepted",
+      "source_path": "examples/valid/mission-status-timeline-compatibility-vector.json",
+      "fixture_path": "vectors/lifecycle-timeline.json",
+      "bytes": 3005,
+      "digest": "sha256:f6019cd70d26b359f1b7923431e16cc83dd786bde58bd4c9e56787afa8f62394"
+    },
+    {
+      "id": "mission-record-contract",
+      "surfaces": [
+        "strict_contracts"
+      ],
+      "expected_disposition": "accepted",
+      "source_path": "examples/valid/mission-record.json",
+      "fixture_path": "vectors/mission-record.json",
+      "bytes": 371,
+      "digest": "sha256:a0c4452d31541ec22ef38f0dc0b705e1ae5bdf24eeee9b25d8a37af3ae111bcc"
+    },
+    {
+      "id": "public-safety-readback",
+      "surfaces": [
+        "readbacks",
+        "public_safety"
+      ],
+      "expected_disposition": "accepted",
+      "source_path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/sentinel-public-safety-scan.json",
+      "fixture_path": "vectors/public-safety.json",
+      "bytes": 924,
+      "digest": "sha256:86354bf3d33e5a82aec782a793b99cb8c7150329989e9236d238a739762e4828"
+    }
+  ],
+  "manifest_digest": "sha256:d224b7d18c0ee2999595ab2f4bd8137617ceb740af99366f4024fc7f4014793f"
+}

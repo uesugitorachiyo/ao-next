@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.timeline-compaction-readback.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "mission_id",
+    "status",
+    "route_history_before",
+    "route_history_after",
+    "steps_before",
+    "steps_after",
+    "timeline_digest",
+    "exact_next_action",
+    "executes_work",
+    "approves_work",
+    "mutates_repositories",
+    "generated_at_utc"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.timeline-compaction-readback.v0.1" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string", "minLength": 1 },
+    "status": { "type": "string" },
+    "route_history_before": { "type": "integer" },
+    "route_history_after": { "type": "integer" },
+    "steps_before": { "type": "integer" },
+    "steps_after": { "type": "integer" },
+    "timeline_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "exact_next_action": { "type": "string" },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "mutates_repositories": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

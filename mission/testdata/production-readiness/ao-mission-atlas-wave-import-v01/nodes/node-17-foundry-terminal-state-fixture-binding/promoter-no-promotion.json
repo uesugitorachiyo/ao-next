@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-17-foundry-terminal-state-fixture-binding",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The fixture verifies terminal rollup handling and does not request promotion."
+}

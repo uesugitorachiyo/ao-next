@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.readiness-bundle-readback.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "repo_count", "ready_repos", "blocked_repos", "repos", "safe_to_execute", "executes_work", "approves_work", "mutates_repositories", "exact_next_action", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.readiness-bundle-readback.v0.1" },
+    "status": { "type": "string" },
+    "repo_count": { "type": "integer" },
+    "ready_repos": { "type": "integer" },
+    "blocked_repos": { "type": "integer" },
+    "repos": { "type": "array" },
+    "safe_to_execute": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "mutates_repositories": { "type": "boolean", "const": false },
+    "exact_next_action": { "type": "string" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

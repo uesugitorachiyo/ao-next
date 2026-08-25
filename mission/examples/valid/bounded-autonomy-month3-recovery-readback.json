@@ -1,0 +1,96 @@
+{
+  "schema": "ao.mission.bounded-autonomy-month3-recovery-readback.v0.1",
+  "status": "passed",
+  "cycle": "bounded-autonomy",
+  "month": 3,
+  "evidence_id": "ao-stack-bounded-autonomy-month1-6-plus-stable-release-20260716T071830Z",
+  "current_public_pair": {
+    "ao2_version": "v0.5.1",
+    "control_plane_version": "v0.1.16"
+  },
+  "compatibility_gate_state": "ready",
+  "compatibility_gate_active": false,
+  "failure_injection_count": 10,
+  "failure_injections": [
+    {
+      "class": "process_interruption_after_checkpoint",
+      "status": "recovered",
+      "evidence": "month3-run/checkpoint-bundle.json"
+    },
+    {
+      "class": "stale_checkpoint_detection",
+      "status": "detected",
+      "evidence": "month3-run/doctor.json"
+    },
+    {
+      "class": "rejected_or_expired_approval",
+      "status": "denied_by_policy_fixture",
+      "evidence": "month3-failure-injection-plan.json"
+    },
+    {
+      "class": "failed_local_verification",
+      "status": "repaired",
+      "evidence": "month3-recovery-results.json"
+    },
+    {
+      "class": "failed_hosted_ci",
+      "status": "fixture_documented",
+      "evidence": "month3-recovery-results.json"
+    },
+    {
+      "class": "stale_or_orphan_task_branch",
+      "status": "cleaned",
+      "evidence": "repo-status-after.json"
+    },
+    {
+      "class": "partial_cross_repository_merge",
+      "status": "ordered_and_reconciled",
+      "evidence": "month2-cross-repo-workflow-report.md"
+    },
+    {
+      "class": "retry_failed_atlas_node",
+      "status": "recovered",
+      "evidence": "month3-run/restart-proof.json"
+    },
+    {
+      "class": "mismatched_role_readback",
+      "status": "detected_and_reconciled",
+      "evidence": "month3-run/final-reconcile.json"
+    },
+    {
+      "class": "final_response_request_with_ready_work",
+      "status": "denied",
+      "evidence": "month3-run/final-rollup.json"
+    }
+  ],
+  "recovery_proof_count": 9,
+  "recovery_proofs": [
+    "exact_next_action_survived_interruption",
+    "resume_did_not_duplicate_mutation",
+    "stale_route_and_checkpoint_states_detected",
+    "approval_reuse_denied_outside_bound_digest",
+    "failed_ci_routes_to_diagnosis_and_repair",
+    "cross_repository_ordering_remained_safe",
+    "orphan_branches_and_worktrees_removed",
+    "archive_validation_event_index_dashboard_artifact_manifest_verification_bundle_final_rollup_and_reconciliation_agree",
+    "final_response_denied_while_ready_work_remained"
+  ],
+  "duplicate_mutation_detected": false,
+  "ready_nodes_remaining": 0,
+  "exact_next_action_remaining": false,
+  "stale_task_branches_remaining": 0,
+  "stale_worktrees_remaining": 0,
+  "final_response_denied_while_ready_work_remained": true,
+  "role_readbacks_agree": true,
+  "release_or_publish": false,
+  "provider_pilot": false,
+  "external_beta_launched": false,
+  "promotion_requested": false,
+  "promotion_granted": false,
+  "live_self_modification": false,
+  "rsi_remains_denied": true,
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false
+}

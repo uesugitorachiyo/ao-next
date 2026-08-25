@@ -1,0 +1,18 @@
+{
+  "schema": "ao.mission.wave-duration-ledger.v0.1",
+  "mission": "ao-mission-doubled-wave-v01",
+  "status": "active",
+  "minimum_minutes": 120,
+  "target_minutes": 120,
+  "max_minutes": 180,
+  "elapsed_minutes_observed": 0,
+  "minimum_minutes_met": false,
+  "final_response_allowed": false,
+  "duration_source": "wave timing ledger initialized; final duration evidence must be recorded before closure",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "continue node-03 and record session-duration readback without exposing secrets"
+}

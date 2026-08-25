@@ -1,0 +1,8 @@
+{
+  "schema": "ao.mission.telegram-config.v0.1",
+  "token_env": "AO_MISSION_TELEGRAM_REDACTED",
+  "allowed_chats": {
+    "1001": "admin",
+    "1002": "user"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "ao.mission.event-index.v0.2",
+  "status": "ready",
+  "index_version": "v0.2",
+  "index_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "root": ".ao-mission",
+  "mission_count": 1,
+  "total_events": 1,
+  "events": [
+    {
+      "schema": "ao.mission.event.v0.1",
+      "mission_id": "mission-demo",
+      "kind": "mission_record",
+      "sequence": 0,
+      "status": "active",
+      "route": "ao-atlas",
+      "phase": "routing",
+      "summary": "mission mission-demo status active route ao-atlas",
+      "generated_at_utc": "2026-07-03T00:00:00Z"
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

@@ -1,0 +1,31 @@
+{
+  "schema": "ao.mission.a2a-http-integration-fixture.v0.1",
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": "req-status",
+      "method": "mission.status",
+      "params": {
+        "mission_id": "mission-demo"
+      },
+      "expected_status": "intent_recorded"
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "req-start",
+      "method": "mission.start",
+      "params": {
+        "objective": "build mission gateway readback"
+      },
+      "expected_status": "intent_recorded"
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "req-invalid",
+      "method": "mission.continue",
+      "params": {},
+      "expected_status": "invalid"
+    }
+  ],
+  "mutation_authority": false
+}

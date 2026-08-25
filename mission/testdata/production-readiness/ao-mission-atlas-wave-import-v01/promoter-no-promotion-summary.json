@@ -1,0 +1,17 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "status": "no_promotion_requested",
+  "mission_id": "ao-mission-atlas-wave-import-v01",
+  "completed_nodes_at_recording": 16,
+  "reason": "This wave imports and reconciles completed Atlas recommendation evidence as readback only; it does not prove or request a capability promotion.",
+  "safe_to_promote": false,
+  "promotion_claimed": false,
+  "claims_authority_advance": false,
+  "broad_RSI": "denied",
+  "unrestricted_self_modification": "denied",
+  "rsi_remains_denied": true,
+  "executes_work": false,
+  "approves_work": false,
+  "per_node_no_promotion_records_bound": true,
+  "exact_next_action": "continue node 17 with Foundry terminal-state fixture binding"
+}

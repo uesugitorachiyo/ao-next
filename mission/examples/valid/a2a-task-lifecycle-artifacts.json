@@ -1,0 +1,40 @@
+{
+  "schema": "ao.mission.a2a-task-lifecycle-fixture.v0.1",
+  "tasks": [
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-artifact-001",
+      "method": "mission.artifacts",
+      "status": "artifact_readback",
+      "artifact_refs": [
+        {
+          "schema": "ao.mission.artifact-ref.v0.1",
+          "ref": "missions/mission-demo/artifact-manifest.json",
+          "kind": "mission_artifact_readback"
+        }
+      ],
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-artifact-002",
+      "method": "mission.governance_snapshot",
+      "status": "artifact_readback",
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-cancel-003",
+      "method": "mission.cancel",
+      "status": "cancel_requested",
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-cancel-003",
+      "method": "mission.cancel",
+      "status": "cancelled",
+      "mutation_authority": false
+    }
+  ]
+}

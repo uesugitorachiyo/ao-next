@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.telegram-command.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "chat_id",
+    "command",
+    "role"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.telegram-command.v0.1" },
+    "chat_id": { "type": "string" },
+    "command": { "type": "string" },
+    "role": { "type": "string" }
+  }
+}

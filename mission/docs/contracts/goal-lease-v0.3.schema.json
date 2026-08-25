@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.goal-lease.v0.3",
+  "type": "object",
+  "required": ["schema", "min_nodes", "min_minutes", "max_minutes", "max_iterations", "return_only_when", "checkpoint_policy"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.goal-lease.v0.3" },
+    "min_nodes": { "type": "integer", "minimum": 1 },
+    "min_minutes": { "type": "integer", "minimum": 0 },
+    "max_minutes": { "type": "integer", "minimum": 1 },
+    "max_iterations": { "type": "integer" },
+    "return_only_when": { "type": "string" },
+    "checkpoint_policy": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "updated_at_utc": { "type": "string" }
+  }
+}

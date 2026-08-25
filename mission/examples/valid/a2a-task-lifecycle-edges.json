@@ -1,0 +1,40 @@
+{
+  "schema": "ao.mission.a2a-task-lifecycle-fixture.v0.1",
+  "tasks": [
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-resume-001",
+      "method": "mission.resume",
+      "status": "intent_recorded",
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-resume-001",
+      "method": "mission.resume",
+      "status": "resume_requested",
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-resume-001",
+      "method": "mission.resume",
+      "status": "resumed",
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-cancel-002",
+      "method": "mission.cancel",
+      "status": "cancel_requested",
+      "mutation_authority": false
+    },
+    {
+      "schema": "ao.mission.a2a-task.v0.1",
+      "task_id": "task-cancel-002",
+      "method": "mission.cancel",
+      "status": "cancelled",
+      "mutation_authority": false
+    }
+  ]
+}

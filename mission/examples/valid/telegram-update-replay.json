@@ -1,0 +1,30 @@
+{
+  "schema": "ao.mission.telegram-update-replay.v0.1",
+  "correlation_id": "corr-telegram-replay-001",
+  "updates": [
+    {
+      "update_id": 1,
+      "chat_id": "1001",
+      "text": "/continue",
+      "expected_status": "intent_recorded"
+    },
+    {
+      "update_id": 2,
+      "chat_id": "1002",
+      "text": "/status",
+      "expected_status": "intent_recorded"
+    },
+    {
+      "update_id": 3,
+      "chat_id": "1002",
+      "text": "/approve",
+      "expected_status": "denied"
+    },
+    {
+      "update_id": 4,
+      "chat_id": "1001",
+      "text": "status",
+      "expected_status": "invalid"
+    }
+  ]
+}

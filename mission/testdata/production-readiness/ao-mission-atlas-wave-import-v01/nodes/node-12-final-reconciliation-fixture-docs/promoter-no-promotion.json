@@ -1,0 +1,8 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-12-final-reconciliation-fixture-docs",
+  "status": "no_promotion",
+  "promotion_claimed": false,
+  "rsi_remains_denied": true,
+  "reason": "The node adds fixture and docs references; it does not claim promotion."
+}

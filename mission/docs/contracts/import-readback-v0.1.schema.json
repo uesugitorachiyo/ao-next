@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.import-readback.v0.1",
+  "type": "object",
+  "required": ["schema", "mission_id", "kind", "status", "artifact", "safe_to_execute", "executes_work", "approves_work"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.import-readback.v0.1" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "correlation_chain_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "kind": { "type": "string" },
+    "status": { "type": "string" },
+    "artifact": { "type": "object" },
+    "exact_next_action": { "type": "string" },
+    "safe_to_execute": { "type": "boolean" },
+    "executes_work": { "type": "boolean" },
+    "approves_work": { "type": "boolean" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

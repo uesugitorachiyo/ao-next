@@ -1,0 +1,105 @@
+{
+  "schema": "ao.mission.doctor-command-compact-early-return-risk.v0.1",
+  "status": "risk_detected",
+  "mission": "ao-mission-doubled-wave-v01",
+  "doctor": {
+    "schema": "ao.mission.doctor-readback.v0.1",
+    "status": "ready",
+    "root": ".ao-mission",
+    "mission_count": 1,
+    "event_count": 7,
+    "lease_count": 1,
+    "lease_health_status": "healthy",
+    "fresh_checkpoints": 1,
+    "checkpoint_freshness_status": "fresh",
+    "early_return_risks": 1,
+    "early_return_risk_status": "risk_detected",
+    "stale_routes": 0,
+    "stale_route_decision_status": "clear",
+    "risk_missions": [
+      {
+        "mission_id": "ao-mission-doubled-wave-v01",
+        "kind": "early_return",
+        "status": "early_return_denied",
+        "reason": "ready nodes remain and the long-run lease is still open",
+        "exact_next_action": "Continue node-23: AO Mission doctor JSON fixture binding Command compact early-return risk."
+      }
+    ],
+    "exact_next_action": "Continue node-23: AO Mission doctor JSON fixture binding Command compact early-return risk.",
+    "checks": [
+      "mission_records_readable",
+      "mission_event_index_readable",
+      "authority_flags_false",
+      "lease_health_checked",
+      "checkpoint_freshness_checked",
+      "early_return_risk_checked",
+      "early_return_risk_exact_next_action_bound"
+    ],
+    "blockers": [],
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false,
+    "mutates_repositories": false,
+    "generated_at_utc": "2026-07-05T00:00:00Z"
+  },
+  "command_compact": {
+    "schema": "ao.command.compact-timeline-readback.v0.1",
+    "status": "ready",
+    "mission_id": "ao-mission-doubled-wave-v01",
+    "mission_status": "active",
+    "current_route": "ao-atlas",
+    "current_phase": "long_run_supervisor_wave",
+    "compact": true,
+    "includes_event_kinds": [
+      "doctor_risk",
+      "return_gate",
+      "exact_next_action"
+    ],
+    "recent_events": [
+      {
+        "schema": "ao.mission.event.v0.1",
+        "mission_id": "ao-mission-doubled-wave-v01",
+        "kind": "doctor_risk",
+        "sequence": 1,
+        "status": "early_return_denied",
+        "route": "ao-atlas",
+        "phase": "long_run_supervisor_wave",
+        "summary": "doctor risk kind=early_return status=early_return_denied final_response_allowed=false exact_next_action=Continue node-23: AO Mission doctor JSON fixture binding Command compact early-return risk.",
+        "generated_at_utc": "2026-07-05T00:00:00Z"
+      },
+      {
+        "schema": "ao.mission.event.v0.1",
+        "mission_id": "ao-mission-doubled-wave-v01",
+        "kind": "return_gate",
+        "sequence": 2,
+        "status": "early_return_denied",
+        "route": "ao-atlas",
+        "phase": "long_run_supervisor_wave",
+        "summary": "final_response_allowed=false ready_nodes=38 exact_next_action=Continue node-23",
+        "generated_at_utc": "2026-07-05T00:00:00Z"
+      }
+    ],
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false,
+    "mutates_repositories": false,
+    "claims_authority_advance": false,
+    "rsi_remains_denied": true,
+    "exact_next_action": "Continue node-23: AO Mission doctor JSON fixture binding Command compact early-return risk."
+  },
+  "binding": {
+    "doctor_risk_kind": "early_return",
+    "command_event_kind": "doctor_risk",
+    "exact_next_action_bound": true,
+    "final_response_allowed": false,
+    "final_response_denial_bound": true,
+    "command_compact_risk_bound": true
+  },
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "Continue node-24: AO Mission final atlas-prompt regression rejecting shallow Feature Depth output."
+}

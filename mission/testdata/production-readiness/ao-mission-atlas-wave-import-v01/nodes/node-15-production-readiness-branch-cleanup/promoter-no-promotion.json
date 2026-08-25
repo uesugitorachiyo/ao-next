@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-15-production-readiness-branch-cleanup",
+  "status": "not_requested",
+  "promotion_claimed": false,
+  "reason": "This node records readiness and cleanup evidence only."
+}

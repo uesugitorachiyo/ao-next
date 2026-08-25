@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.verification-bundle-readback.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "mission_id", "component_count", "components", "bundle_digest", "safe_to_execute", "executes_work", "approves_work", "mutates_repositories", "exact_next_action", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.verification-bundle-readback.v0.1" },
+    "status": { "type": "string" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "component_count": { "type": "integer" },
+    "components": { "type": "array" },
+    "bundle_digest": { "type": "string" },
+    "safe_to_execute": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "mutates_repositories": { "type": "boolean", "const": false },
+    "exact_next_action": { "type": "string" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

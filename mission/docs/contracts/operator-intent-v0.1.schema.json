@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.operator-intent.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "source",
+    "action",
+    "mission_id"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.operator-intent.v0.1" },
+    "source": { "type": "string" },
+    "action": { "type": "string" },
+    "mission_id": { "type": "string" }
+  }
+}

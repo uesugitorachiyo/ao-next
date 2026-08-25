@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.a2a-task.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "method",
+    "status"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.a2a-task.v0.1" },
+    "task_id": { "type": "string" },
+    "method": { "type": "string" },
+    "status": { "type": "string" },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["schema", "ref", "kind"],
+        "properties": {
+          "schema": { "type": "string", "const": "ao.mission.artifact-ref.v0.1" },
+          "ref": { "type": "string" },
+          "kind": { "type": "string" }
+        }
+      }
+    },
+    "mutation_authority": { "type": "boolean" }
+  }
+}

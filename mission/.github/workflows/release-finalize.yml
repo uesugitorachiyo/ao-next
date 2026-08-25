@@ -1,0 +1,342 @@
+name: Release finalize
+
+on:
+  workflow_dispatch:
+    inputs:
+      producer_run_id:
+        description: Successful release-rehearsal run containing the sealed candidates.
+        required: true
+        type: string
+      expected_source_sha:
+        description: Exact producer source commit.
+        required: true
+        type: string
+      expected_version:
+        description: Exact release version without the v prefix.
+        required: true
+        type: string
+      expected_tag:
+        description: Exact release tag.
+        required: true
+        type: string
+      expected_manifest_digest:
+        description: SHA-256 of the approved release manifest.
+        required: true
+        type: string
+      dry_run:
+        description: Validate imported candidates without public mutation.
+        required: true
+        default: true
+        type: boolean
+      repair_empty_release_notes:
+        description: Repair only an existing exact release whose body is empty.
+        required: true
+        default: false
+        type: boolean
+      live_confirmation:
+        description: Exact confirmation required for a separately authorized publication.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: ao-mission-release-finalize-${{ inputs.expected_tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-imported-release:
+    name: Validate exact rehearsal candidates
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Verify producer run identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PRODUCER_RUN_ID}" > producer-run.json
+          jq -e --arg repository "$GITHUB_REPOSITORY" --arg sha "$SOURCE_SHA" '
+            .head_repository.full_name == $repository and
+            .head_sha == $sha and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            (.path | endswith(".github/workflows/release-rehearsal.yml"))
+          ' producer-run.json >/dev/null
+
+      - name: Download exact producer plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-release-rehearsal-plan-${{ inputs.expected_source_sha }}
+          path: imported/plan
+          run-id: ${{ inputs.producer_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download exact producer candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ao-mission-release-candidate-*-${{ inputs.expected_source_sha }}
+          path: imported/candidates
+          run-id: ${{ inputs.producer_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download exact approved manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-approved-release-manifest-${{ inputs.expected_source_sha }}
+          path: imported/manifest
+          run-id: ${{ inputs.producer_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Independently validate imported bytes
+        shell: bash
+        env:
+          EXPECTED_MANIFEST_DIGEST: ${{ inputs.expected_manifest_digest }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_TAG: ${{ inputs.expected_tag }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          mkdir -p validated
+          python3 - imported validated producer-run.json <<'PY'
+          # imported-release-validator-begin
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          out = Path(sys.argv[2])
+          run = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          expected_sha = os.environ["EXPECTED_SOURCE_SHA"]
+          expected_version = os.environ["EXPECTED_VERSION"]
+          expected_tag = os.environ["EXPECTED_TAG"]
+          expected_manifest = os.environ["EXPECTED_MANIFEST_DIGEST"]
+          producer_run_id = os.environ["PRODUCER_RUN_ID"]
+          if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+              raise SystemExit("expected source SHA is invalid")
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?", expected_version):
+              raise SystemExit("expected version is invalid")
+          if expected_tag != f"v{expected_version}" or not re.fullmatch(r"[0-9a-f]{64}", expected_manifest):
+              raise SystemExit("expected tag or manifest digest is invalid")
+          created_at = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+          age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+          if age_seconds < 0 or age_seconds > 14 * 24 * 60 * 60:
+              raise SystemExit("producer run is outside the 14-day freshness window")
+          files = [path for path in root.rglob("*") if path.is_file()]
+          if not files or len(files) > 128 or sum(path.stat().st_size for path in files) > 128 * 1024 * 1024:
+              raise SystemExit("imported artifact inventory is outside bounds")
+          if any(path.is_symlink() for path in root.rglob("*")):
+              raise SystemExit("imported artifact inventory contains a symlink")
+
+          def one(name):
+              matches = [path for path in files if path.name == name]
+              if len(matches) != 1:
+                  raise SystemExit(f"expected exactly one {name}")
+              return matches[0]
+
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          manifest_path = one("approved-release-manifest.json")
+          plan_path = one("immutable-promotion-plan.json")
+          checksum_path = one("immutable-promotion-plan.sha256")
+          verifier_path = one("strict-release-verifier.py")
+          notes_path = one("release-notes.md")
+          if digest(manifest_path) != expected_manifest:
+              raise SystemExit("approved manifest digest mismatch")
+          plan_digest = digest(plan_path)
+          checksum_fields = checksum_path.read_text(encoding="utf-8").strip().split()
+          if checksum_fields != [plan_digest, "immutable-promotion-plan.json"]:
+              raise SystemExit("promotion plan checksum mismatch")
+          def strict_object(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
+          if (manifest.get("source_sha"), manifest.get("version"), manifest.get("tag")) != (expected_sha, expected_version, expected_tag):
+              raise SystemExit("approved manifest identity mismatch")
+          plan = json.loads(plan_path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
+          if (plan.get("source_sha"), plan.get("version"), plan.get("tag"), plan.get("approved_manifest_digest"), plan.get("immutable")) != (expected_sha, expected_version, expected_tag, expected_manifest, True):
+              raise SystemExit("promotion plan identity mismatch")
+          if digest(notes_path) != plan.get("release_notes_sha256"):
+              raise SystemExit("release notes digest mismatch")
+          if digest(verifier_path) != plan.get("verifier_sha256"):
+              raise SystemExit("strict verifier digest mismatch")
+          candidates = plan.get("candidates")
+          if not isinstance(candidates, list) or {item.get("target_label") for item in candidates} != {"linux-x86_64", "macos-aarch64", "windows-x86_64"}:
+              raise SystemExit("promotion plan candidate inventory mismatch")
+          for item in candidates:
+              archive = one(item["archive"])
+              if digest(archive) != item.get("archive_sha256"):
+                  raise SystemExit(f"candidate archive digest mismatch: {item['target_label']}")
+          summaries = [json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=strict_object) for path in files if path.name == "candidate-summary.json"]
+          provenances = [json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=strict_object) for path in files if path.name == "provenance.json"]
+          if len(summaries) != 3 or len(provenances) != 3:
+              raise SystemExit("candidate summary or provenance inventory mismatch")
+          version_source_paths = {item.get("version_evidence", {}).get("version_source") for item in summaries}
+          version_source_digests = {item.get("version_evidence", {}).get("version_source_sha256") for item in summaries}
+          workflow_refs = {item.get("workflow_ref") for item in provenances}
+          if len(version_source_paths) != 1 or len(version_source_digests) != 1 or len(workflow_refs) != 1 or None in version_source_paths | version_source_digests | workflow_refs:
+              raise SystemExit("candidate verifier bindings disagree")
+          for path in [manifest_path, plan_path, checksum_path, verifier_path]:
+              shutil.copy2(path, out / path.name)
+          shutil.copy2(notes_path, out / notes_path.name)
+          for summary_path in [path for path in files if path.name == "candidate-summary.json"]:
+              shutil.copytree(summary_path.parent, out / summary_path.parent.name)
+          summary = {
+              "approved_manifest_digest": expected_manifest,
+              "candidate_count": 3,
+              "dry_run": os.environ.get("DRY_RUN", "true").lower() == "true",
+              "producer_run_id": producer_run_id,
+              "promotion_plan_sha256": plan_digest,
+              "publication_attempted": False,
+              "schema_version": "ao.mission.imported-release-validation.v0.1",
+              "source_sha": expected_sha,
+              "status": "passed",
+              "tag": expected_tag,
+              "release_notes_sha256": plan.get("release_notes_sha256"),
+              "verifier_sha256": plan.get("verifier_sha256"),
+              "version": expected_version,
+              "version_source_path": next(iter(version_source_paths)),
+              "version_source_sha256": next(iter(version_source_digests)),
+              "workflow_ref": next(iter(workflow_refs)),
+          }
+          (out / "import-validation.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          # imported-release-validator-end
+          PY
+          export APPROVED_MANIFEST_DIGEST="$EXPECTED_MANIFEST_DIGEST"
+          export RELEASE_TAG="$EXPECTED_TAG"
+          export RELEASE_VERSION="$EXPECTED_VERSION"
+          export SOURCE_SHA="$EXPECTED_SOURCE_SHA"
+          RELEASE_NOTES_SHA256=$(jq -er .release_notes_sha256 validated/import-validation.json)
+          VERIFIER_SHA256=$(jq -er .verifier_sha256 validated/import-validation.json)
+          VERSION_SOURCE_PATH=$(jq -er .version_source_path validated/import-validation.json)
+          VERSION_SOURCE_SHA256=$(jq -er .version_source_sha256 validated/import-validation.json)
+          WORKFLOW_REF=$(jq -er .workflow_ref validated/import-validation.json)
+          export RELEASE_NOTES_SHA256 VERIFIER_SHA256 VERSION_SOURCE_PATH VERSION_SOURCE_SHA256 WORKFLOW_REF
+          python3 validated/strict-release-verifier.py plan \
+            --manifest validated/approved-release-manifest.json \
+            --candidates validated \
+            --plan validated/immutable-promotion-plan.json \
+            --plan-checksum validated/immutable-promotion-plan.sha256
+
+      - name: Upload validated immutable import
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-validated-release-import-${{ inputs.producer_run_id }}
+          path: validated
+          retention-days: 14
+
+  publish-release:
+    name: Publish exact imported release
+    needs: validate-imported-release
+    if: ${{ inputs.dry_run == false && ((inputs.repair_empty_release_notes == false && inputs.live_confirmation == format('publish-imported-ao-mission-{0}-{1}-{2}-{3}-{4}', inputs.producer_run_id, inputs.expected_version, inputs.expected_tag, inputs.expected_source_sha, inputs.expected_manifest_digest)) || (inputs.repair_empty_release_notes == true && inputs.live_confirmation == format('repair-empty-ao-mission-release-notes-{0}-{1}-{2}-{3}-{4}', inputs.producer_run_id, inputs.expected_version, inputs.expected_tag, inputs.expected_source_sha, inputs.expected_manifest_digest))) }}
+    runs-on: ubuntu-latest
+    environment: ao-mission-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download validated immutable import
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-validated-release-import-${{ inputs.producer_run_id }}
+          path: validated
+      - name: Publish only exact imported archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_MANIFEST_DIGEST: ${{ inputs.expected_manifest_digest }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          TAG: ${{ inputs.expected_tag }}
+          VERSION: ${{ inputs.expected_version }}
+          REPAIR_EMPTY_RELEASE_NOTES: ${{ inputs.repair_empty_release_notes }}
+        run: |
+          set -euo pipefail
+          mapfile -t archives < <(find validated -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          [ "${#archives[@]}" -eq 3 ]
+          notes=validated/release-notes.md
+          plan=validated/immutable-promotion-plan.json
+          [ -f "$notes" ] && [ ! -L "$notes" ]
+          if [ "$REPAIR_EMPTY_RELEASE_NOTES" = "true" ]; then
+            # release-notes-repair-begin
+            authorized_release_id=369467111
+            authorized_source_sha=cee287597024b5a1e990c6e272518236bc9e32fa
+            authorized_manifest_digest=ec21a5639a582d3f8c520053bc5b72974a1b333e26b8f09696fe6cb695873d22
+            authorized_notes_digest=9a84817e6d75b197c72a3219f7f851cb31935da679688bb14e8560eea0bf1022
+            [ "$PRODUCER_RUN_ID" = 31630121755 ]
+            [ "$VERSION" = 0.1.4 ] && [ "$TAG" = v0.1.4 ]
+            [ "$SOURCE_SHA" = "$authorized_source_sha" ]
+            [ "$EXPECTED_MANIFEST_DIGEST" = "$authorized_manifest_digest" ]
+            [ "$(sha256sum < "$notes" | awk '{print $1}')" = "$authorized_notes_digest" ]
+            mkdir repair-readbacks current-assets
+            printf '%s\n' '[{"id":511958192,"name":"ao-mission-0.1.4-linux-x86_64.tar.gz","size":6638215,"digest":"sha256:041d4b4ab076601bf6fe15335cb70a5d9f87301beb239e8e106b3ee4fd12f800"},{"id":511958193,"name":"ao-mission-0.1.4-macos-aarch64.tar.gz","size":6329247,"digest":"sha256:d8b418e42b57306862c75fc10e5c347109c13c144a18e240d2a2edba29c1a34e"},{"id":511958191,"name":"ao-mission-0.1.4-windows-x86_64.zip","size":6543779,"digest":"sha256:027ceba61e7b1d3655cce63a1ce4269824d7a5e3acf65fef5fabb0b539c53221"}]' > authorized-assets.json
+            expected_assets=$(jq -c 'sort_by(.name)' authorized-assets.json)
+            plan_assets=$(jq -c '[.candidates[] | {name:.archive,digest:("sha256:" + .archive_sha256)}] | sort_by(.name)' "$plan")
+            jq -e --argjson plan "$plan_assets" '[.[] | {name,digest}] | sort_by(.name) == $plan' authorized-assets.json >/dev/null
+            verify_empty_release() {
+              prefix=$1
+              gh api "repos/${GITHUB_REPOSITORY}/releases/${authorized_release_id}" > "repair-readbacks/${prefix}-release.json"
+              gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > "repair-readbacks/${prefix}-tag.json"
+              jq -e --argjson id "$authorized_release_id" --arg tag "$TAG" --arg sha "$SOURCE_SHA" --arg title "AO Mission $VERSION" --argjson assets "$expected_assets" '
+                .id == $id and .tag_name == $tag and .target_commitish == $sha and .name == $title and
+                (.draft | not) and (.prerelease | not) and (.body == null or .body == "") and
+                ([.assets[] | {id,name,size,digest}] | sort_by(.name)) == $assets
+              ' "repair-readbacks/${prefix}-release.json" >/dev/null
+              jq -e --arg sha "$SOURCE_SHA" '.object.type == "commit" and .object.sha == $sha' "repair-readbacks/${prefix}-tag.json" >/dev/null
+            }
+            verify_empty_release preflight
+            while IFS=$'\t' read -r asset_id archive expected_digest; do
+              candidate="current-assets/$archive"
+              gh api -H 'Accept: application/octet-stream' "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$candidate"
+              [ -f "$candidate" ] && [ ! -L "$candidate" ]
+              actual_digest=$(sha256sum < "$candidate" | awk '{print $1}')
+              [ "sha256:$actual_digest" = "$expected_digest" ] || { echo "candidate archive digest mismatch: $archive" >&2; exit 1; }
+            done < <(jq -r '.[] | [.id, .name, .digest] | @tsv' authorized-assets.json)
+            verify_empty_release prepatch
+            jq -Rs '{body:.}' "$notes" > repair-readbacks/request-body.json
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${authorized_release_id}" \
+              --input repair-readbacks/request-body.json > repair-readbacks/patch-result.json
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${authorized_release_id}" > repair-readbacks/post-release.json
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > repair-readbacks/post-tag.json
+            jq -e --argjson id "$authorized_release_id" --arg tag "$TAG" --arg sha "$SOURCE_SHA" --arg title "AO Mission $VERSION" --argjson assets "$expected_assets" --slurpfile request repair-readbacks/request-body.json '
+              .id == $id and .tag_name == $tag and .target_commitish == $sha and .name == $title and
+              (.draft | not) and (.prerelease | not) and .body == $request[0].body and
+              ([.assets[] | {id,name,size,digest}] | sort_by(.name)) == $assets
+            ' repair-readbacks/post-release.json >/dev/null
+            jq -e --arg sha "$SOURCE_SHA" '.object.type == "commit" and .object.sha == $sha' repair-readbacks/post-tag.json >/dev/null
+            # release-notes-repair-end
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "AO Mission $VERSION" --notes-file "$notes" "${archives[@]}"
+          fi
+      - name: Upload release-notes repair readbacks
+        if: ${{ always() && inputs.repair_empty_release_notes == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-release-notes-repair-readbacks-${{ inputs.producer_run_id }}
+          path: repair-readbacks
+          if-no-files-found: error
+          retention-days: 14

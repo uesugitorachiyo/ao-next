@@ -1,0 +1,14 @@
+{
+  "schema": "ao.mission.ledger-compaction-readback.v0.1",
+  "mission_id": "mission-demo",
+  "status": "compacted",
+  "route_history_before": 12,
+  "route_history_after": 3,
+  "steps_before": 10,
+  "steps_after": 3,
+  "exact_next_action": "mission ledger compacted; continue from latest retained route and step readbacks",
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "generated_at_utc": "2026-07-03T12:00:00Z"
+}

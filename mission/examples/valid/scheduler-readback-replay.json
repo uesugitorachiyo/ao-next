@@ -1,0 +1,39 @@
+{
+  "schema": "ao.mission.scheduler-replay-fixture.v0.1",
+  "evaluated_at_utc": "2026-07-03T12:00:00Z",
+  "readbacks": [
+    {
+      "schema": "ao.mission.scheduler-readback.v0.1",
+      "mission_id": "mission-demo",
+      "status": "ready",
+      "scheduler": "codex-cron",
+      "event_loop": true,
+      "reason": "fresh scheduler wakeup fixture",
+      "generated_at_utc": "2026-07-03T00:00:00Z",
+      "executes_work": false,
+      "approves_work": false
+    },
+    {
+      "schema": "ao.mission.scheduler-readback.v0.1",
+      "mission_id": "mission-demo",
+      "status": "ready",
+      "scheduler": "codex-cron",
+      "event_loop": true,
+      "reason": "stale scheduler wakeup fixture",
+      "generated_at_utc": "2026-07-01T00:00:00Z",
+      "executes_work": false,
+      "approves_work": false
+    },
+    {
+      "schema": "ao.mission.scheduler-readback.v0.1",
+      "mission_id": "mission-demo",
+      "status": "ready",
+      "scheduler": "codex-cron",
+      "event_loop": true,
+      "reason": "unknown scheduler wakeup fixture",
+      "generated_at_utc": "",
+      "executes_work": false,
+      "approves_work": false
+    }
+  ]
+}

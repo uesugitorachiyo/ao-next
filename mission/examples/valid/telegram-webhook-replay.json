@@ -1,0 +1,35 @@
+{
+  "schema": "ao.mission.telegram-webhook-fixture.v0.1",
+  "updates": [
+    {
+      "update_id": 2001,
+      "chat_id": "1001",
+      "text": "/status",
+      "expected_status": "intent_recorded"
+    },
+    {
+      "update_id": 2002,
+      "chat_id": "1002",
+      "text": "/next",
+      "expected_status": "intent_recorded"
+    },
+    {
+      "update_id": 2003,
+      "chat_id": "1002",
+      "text": "/continue",
+      "expected_status": "denied"
+    },
+    {
+      "update_id": 2004,
+      "chat_id": "9999",
+      "text": "/status",
+      "expected_status": "denied"
+    },
+    {
+      "update_id": 2005,
+      "chat_id": "1001",
+      "text": "status",
+      "expected_status": "invalid"
+    }
+  ]
+}

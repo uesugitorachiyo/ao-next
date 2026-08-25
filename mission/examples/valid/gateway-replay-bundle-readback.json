@@ -1,0 +1,22 @@
+{
+  "schema": "ao.mission.gateway-replay-bundle-readback.v0.1",
+  "status": "ready",
+  "telegram_readbacks": 3,
+  "a2a_readbacks": 2,
+  "scheduler_readbacks": 1,
+  "total_intents": 12,
+  "denied": 2,
+  "invalid": 1,
+  "replay_refs": [
+    "examples/valid/telegram-command-matrix.json",
+    "examples/valid/telegram-update-replay.json",
+    "examples/valid/a2a-http-integration.json",
+    "examples/valid/scheduler-readback-replay.json"
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "exact_next_action": "gateway replay bundle verified as local readback only",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

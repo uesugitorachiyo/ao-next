@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.return-gate.v0.3",
+  "type": "object",
+  "required": ["schema", "mission_id", "status", "final_response_allowed", "reason", "completed_nodes", "min_nodes", "ready_nodes_remaining", "hard_blocker", "exact_next_action", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.return-gate.v0.3" },
+    "mission_id": { "type": "string" },
+    "status": { "type": "string" },
+    "final_response_allowed": { "type": "boolean" },
+    "reason": { "type": "string" },
+    "completed_nodes": { "type": "integer" },
+    "min_nodes": { "type": "integer" },
+    "ready_nodes_remaining": { "type": "integer" },
+    "hard_blocker": { "type": "boolean" },
+    "exact_next_action": { "type": "string" },
+    "blockers": { "type": "array" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

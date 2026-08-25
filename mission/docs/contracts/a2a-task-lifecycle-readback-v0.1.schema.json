@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.a2a-task-lifecycle-readback.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "total", "tasks", "mutation_authority", "executes_work", "approves_work"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.a2a-task-lifecycle-readback.v0.1" },
+    "status": { "type": "string" },
+    "total": { "type": "integer" },
+    "intent_recorded": { "type": "integer" },
+    "cancel_requested": { "type": "integer" },
+    "cancelled": { "type": "integer" },
+    "resume_requested": { "type": "integer" },
+    "resumed": { "type": "integer" },
+    "tasks": { "type": "array" },
+    "mutation_authority": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "schema": "ao.mission.stack-qualification-orchestration.v0.1",
+  "status": "ready",
+  "mission_id": "ao-stack-qualification-release-dsa-20260718",
+  "release_targets": {
+    "ao2_version": "v0.5.2",
+    "control_plane_version": "v0.1.17",
+    "publication_authorized_elsewhere": true,
+    "mission_orchestration_publishes_release": false
+  },
+  "source_heads": {
+    "ao-architecture": "c731cdb16376d6c4e6de99ad5ebaaffa9277c1cc",
+    "ao2": "0a4509fb904c90827c11dfcfe1c9e9c552c9f590",
+    "ao2-control-plane": "6336801eedc4a8402d12b306b98603ce0a6fb6b5",
+    "ao-command": "cdc31d5889c254280680d5ce3f0b937aefa8d4f1"
+  },
+  "profile_digest": "sha256:72b9e8b5e4e5e745b3a9b95d61a0a77ef6fb01c530c5f66a04ce27d9a4a4fd31",
+  "affected_shard_reruns": [
+    {
+      "shard_id": "architecture-windows-coverage-contract",
+      "reason": "coverage ownership contract changed",
+      "required_before_final_full_run": true
+    },
+    {
+      "shard_id": "ao2-windows-worker-deadline-resume",
+      "reason": "Windows shard deadline and resume behavior changed",
+      "required_before_final_full_run": true
+    },
+    {
+      "shard_id": "control-plane-progress-observer-readback",
+      "reason": "Control Plane progress readback surface changed",
+      "required_before_final_full_run": true
+    },
+    {
+      "shard_id": "ao-command-progress-operator-readback",
+      "reason": "AO Command operator progress readback changed",
+      "required_before_final_full_run": true
+    }
+  ],
+  "final_full_exact_head_qualification": {
+    "required": true,
+    "mode": "full_exact_head",
+    "after_affected_shards": true,
+    "uses_exact_source_heads": true,
+    "uses_exact_profile_digest": true,
+    "reuses_existing_windows_request": true
+  },
+  "restart_safety": {
+    "checkpoint_after_each_shard": true,
+    "resume_from_last_completed_shard": true,
+    "no_restart_from_zero": true,
+    "progress_readback_required": true,
+    "global_deadline_required": true
+  },
+  "expected_mission_orchestration": {
+    "schema": "ao.mission.qualification-orchestration-readback.v0.1",
+    "status": "ready",
+    "affected_shard_count": 4,
+    "final_qualification_mode": "full_exact_head",
+    "source_head_count": 4,
+    "exact_head_required": true,
+    "restart_from_zero_allowed": false,
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false,
+    "mutates_repositories": false,
+    "calls_providers": false,
+    "releases_or_deploys": false,
+    "exact_next_action": "run affected Windows qualification shards, record progress readback after each shard, then run final full exact-head qualification"
+  }
+}

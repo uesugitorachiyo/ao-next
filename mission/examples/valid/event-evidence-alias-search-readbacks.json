@@ -1,0 +1,75 @@
+{
+  "schema": "ao.mission.event-evidence-alias-search-readbacks.v0.1",
+  "status": "passed",
+  "mission": "ao-mission-doubled-wave-v01",
+  "event_kinds": [
+    "route_evidence",
+    "node_evidence",
+    "pr_evidence",
+    "ci_evidence",
+    "rollup_evidence",
+    "blocker_evidence"
+  ],
+  "searches": [
+    {
+      "kind": "route_evidence",
+      "query": "ao-atlas",
+      "total_matches": 1,
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false
+    },
+    {
+      "kind": "node_evidence",
+      "query": "node gate",
+      "total_matches": 1,
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false
+    },
+    {
+      "kind": "pr_evidence",
+      "query": "pull request",
+      "total_matches": 1,
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false
+    },
+    {
+      "kind": "ci_evidence",
+      "query": "actions run",
+      "total_matches": 1,
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false
+    },
+    {
+      "kind": "rollup_evidence",
+      "query": "Foundry rollup",
+      "total_matches": 1,
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false
+    },
+    {
+      "kind": "blocker_evidence",
+      "query": "ready nodes remain",
+      "total_matches": 1,
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "Continue Mission event search from route, node, PR, CI, rollup, and blocker aliases before final response."
+}

@@ -1,0 +1,47 @@
+{
+  "schema": "ao.mission.verification-bundle-readback.v0.1",
+  "status": "ready",
+  "mission_id": "mission-demo",
+  "component_count": 5,
+  "components": [
+    {
+      "name": "event_index",
+      "schema": "ao.mission.event-index.v0.2",
+      "status": "ready",
+      "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "dashboard",
+      "schema": "ao.mission.dashboard-readback.v0.1",
+      "status": "ready",
+      "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "artifact_manifest",
+      "schema": "ao.mission.artifact-manifest.v0.1",
+      "status": "ready",
+      "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "name": "readiness_bundle",
+      "schema": "ao.mission.readiness-bundle-readback.v0.1",
+      "path": "tmp/ao-mission-readiness-bundle.json",
+      "status": "ready",
+      "sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "name": "gateway_replay_bundle",
+      "schema": "ao.mission.gateway-replay-bundle-readback.v0.1",
+      "path": "tmp/gateway-replay-bundle.json",
+      "status": "ready",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "bundle_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "exact_next_action": "verification bundle is local readback evidence; remote PR lifecycle remains operator-controlled",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

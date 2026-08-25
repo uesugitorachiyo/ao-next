@@ -1,0 +1,8 @@
+{
+  "schema": "ao.sentinel.public-safety-readback.v0.1",
+  "node_id": "node-17-foundry-terminal-state-fixture-binding",
+  "status": "passed",
+  "unsafe_public_wording_found": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.scheduler-replay-readback.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "total",
+    "fresh",
+    "stale",
+    "unknown",
+    "executes_work",
+    "approves_work",
+    "evaluated_at_utc",
+    "generated_at_utc"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.scheduler-replay-readback.v0.1" },
+    "status": { "type": "string" },
+    "total": { "type": "integer" },
+    "fresh": { "type": "integer" },
+    "stale": { "type": "integer" },
+    "unknown": { "type": "integer" },
+    "executes_work": { "type": "boolean" },
+    "approves_work": { "type": "boolean" },
+    "evaluated_at_utc": { "type": "string" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

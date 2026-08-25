@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.final-rollup.v0.1",
+  "type": "object",
+  "required": ["schema", "mission_id", "status", "safe_to_execute", "executes_work", "approves_work", "exact_next_action"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.final-rollup.v0.1" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "status": { "type": "string" },
+    "completed_steps": { "type": "integer" },
+    "artifact_refs": { "type": "array" },
+    "safe_to_execute": { "type": "boolean" },
+    "executes_work": { "type": "boolean" },
+    "approves_work": { "type": "boolean" },
+    "provider_calls": { "type": "boolean" },
+    "final_response_allowed": { "type": "boolean" },
+    "return_gate_status": { "type": "string" },
+    "ready_nodes_remaining": { "type": "integer" },
+    "completed_nodes": { "type": "integer" },
+    "total_nodes": { "type": "integer" },
+    "atlas_continuation_prompt": { "type": "string" },
+    "feature_depth_recommendations": { "type": "array" },
+    "exact_next_action": { "type": "string" },
+    "remaining_denied_surfaces": { "type": "array" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ao.command.mission-status.v0.1",
+  "mission_id": "mission-command-status-lease-checkpoint",
+  "status": "active",
+  "current_route": "ao-atlas",
+  "current_phase": "routing",
+  "exact_next_action": "send objective to AO Atlas for workgraph sequencing",
+  "goal_lease": {
+    "schema": "ao.mission.goal-lease.v0.3",
+    "min_nodes": 15,
+    "min_minutes": 120,
+    "max_minutes": 180,
+    "max_iterations": 2,
+    "return_only_when": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action",
+    "checkpoint_policy": "after_each_node_or_timed_interval",
+    "created_at_utc": "2026-07-05T00:00:00Z",
+    "updated_at_utc": "2026-07-05T00:02:00Z"
+  },
+  "checkpoint_count": 2,
+  "checkpoint_freshness_status": "fresh",
+  "return_gate_status": "early_return_denied",
+  "read_only": true,
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "blockers": [],
+  "generated_at_utc": "2026-07-05T00:02:00Z"
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "ao.mission.telegram-webhook-fixture.v0.1",
+  "updates": [
+    {
+      "update_id": 3001,
+      "chat_id": "1001",
+      "text": "/status",
+      "expected_status": "duplicate_ignored"
+    },
+    {
+      "update_id": 3001,
+      "chat_id": "1001",
+      "text": "/status",
+      "expected_status": "intent_recorded"
+    },
+    {
+      "update_id": 3002,
+      "chat_id": "1001",
+      "text": "/next",
+      "expected_status": "intent_recorded"
+    }
+  ]
+}

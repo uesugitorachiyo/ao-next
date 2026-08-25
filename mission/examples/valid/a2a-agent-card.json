@@ -1,0 +1,50 @@
+{
+  "schema": "ao.mission.a2a-agent-card.v0.1",
+  "name": "ao-mission",
+  "protocol_version": "a2a-local-fixture-v0.1",
+  "description": "AO Mission local gateway for intent and readback requests only",
+  "endpoint": "/",
+  "methods": [
+    "mission.start",
+    "mission.status",
+    "mission.next",
+    "mission.continue",
+    "mission.pause",
+    "mission.resume",
+    "mission.cancel",
+    "mission.artifacts",
+    "mission.governance_snapshot"
+  ],
+  "capabilities": [
+    "streaming=false",
+    "push_notifications=false",
+    "mutation_authority=false"
+  ],
+  "capabilities_detail": {
+    "streaming": false,
+    "push_notifications": false,
+    "state_transition_history": true,
+    "artifact_readbacks": true
+  },
+  "skills": [
+    {
+      "id": "mission-readback",
+      "name": "Mission readback",
+      "description": "Return mission status, route, next action, and governance snapshot readbacks.",
+      "tags": ["mission", "readback", "intent-only"]
+    },
+    {
+      "id": "mission-continuation-intent",
+      "name": "Mission continuation intent",
+      "description": "Record a continuation request without granting execution authority.",
+      "tags": ["mission", "continuation", "intent-only"]
+    },
+    {
+      "id": "mission-artifact-readback",
+      "name": "Mission artifact readback",
+      "description": "Return artifact references and digest-bound readback pointers.",
+      "tags": ["artifacts", "readback", "no-mutation"]
+    }
+  ],
+  "mutation_authority": false
+}

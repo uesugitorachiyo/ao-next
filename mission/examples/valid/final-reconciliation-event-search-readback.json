@@ -1,0 +1,25 @@
+{
+  "schema": "ao.mission.event-search-readback.v0.1",
+  "status": "ready",
+  "mission_id": "ao-mission-atlas-wave-import-v01",
+  "kind": "final_reconciliation",
+  "total_matches": 1,
+  "events": [
+    {
+      "schema": "ao.mission.event.v0.1",
+      "mission_id": "ao-mission-atlas-wave-import-v01",
+      "kind": "final_reconciliation",
+      "sequence": 2,
+      "status": "ready",
+      "route": "complete",
+      "phase": "complete",
+      "summary": "artifacts_agree=true final_response_allowed=true completed_nodes=40 total_nodes=40 blocker= rsi_remains_denied=true claims_authority_advance=false",
+      "generated_at_utc": "2026-07-05T00:00:00Z"
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "generated_at_utc": "2026-07-05T00:00:00Z"
+}

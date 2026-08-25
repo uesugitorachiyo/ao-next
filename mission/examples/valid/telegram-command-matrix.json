@@ -1,0 +1,18 @@
+{
+  "schema": "ao.mission.telegram-command-matrix.v0.1",
+  "commands": [
+    { "command": "/status", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/next", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/pause", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/resume", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/stop", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/where", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/help", "role": "user", "expected_status": "intent_recorded" },
+    { "command": "/continue", "role": "user", "expected_status": "denied" },
+    { "command": "/approve", "role": "user", "expected_status": "denied" },
+    { "command": "/continue", "role": "admin", "expected_status": "intent_recorded" },
+    { "command": "/approve", "role": "admin", "expected_status": "intent_recorded" },
+    { "command": "/deny", "role": "admin", "expected_status": "intent_recorded" }
+  ],
+  "mutation_authority": false
+}

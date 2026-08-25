@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.dashboard-readback.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "mission_id", "mission_status", "current_phase", "current_route", "event_count", "event_index_digest", "compact", "recent_events", "safe_to_execute", "executes_work", "approves_work", "mutates_repositories", "exact_next_action", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.dashboard-readback.v0.1" },
+    "status": { "type": "string" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "mission_status": { "type": "string" },
+    "source_record_status": { "type": "string" },
+    "terminal_projection_status": { "type": "string" },
+    "terminal_projection_read_only": { "type": "boolean" },
+    "effective_operator_status": { "type": "string" },
+    "current_phase": { "type": "string" },
+    "current_route": { "type": "string" },
+    "latest_route": { "type": "string" },
+    "event_count": { "type": "integer" },
+    "event_index_digest": { "type": "string" },
+    "compact": { "type": "boolean" },
+    "recent_events": { "type": "array" },
+    "safe_to_execute": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "mutates_repositories": { "type": "boolean", "const": false },
+    "exact_next_action": { "type": "string" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

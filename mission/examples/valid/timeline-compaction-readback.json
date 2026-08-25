@@ -1,0 +1,15 @@
+{
+  "schema": "ao.mission.timeline-compaction-readback.v0.1",
+  "mission_id": "mission-demo",
+  "status": "compacted",
+  "route_history_before": 12,
+  "route_history_after": 3,
+  "steps_before": 10,
+  "steps_after": 3,
+  "timeline_digest": "sha256:4d6545f49e29858b51975fde6721907269c081884bc5f8c30ab8e4c8b8322945",
+  "exact_next_action": "mission timeline compacted; continue from digest-bound retained readbacks",
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "generated_at_utc": "2026-07-03T12:00:00Z"
+}

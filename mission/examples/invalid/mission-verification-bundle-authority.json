@@ -1,0 +1,14 @@
+{
+  "schema": "ao.mission.verification-bundle-readback.v0.1",
+  "status": "ready",
+  "mission_id": "mission-demo",
+  "component_count": 0,
+  "components": [],
+  "bundle_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": true,
+  "exact_next_action": "invalid fixture: verification bundle must not mutate repositories",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

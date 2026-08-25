@@ -1,0 +1,14 @@
+{
+  "schema": "ao.mission.scheduler-recovery-readback.v0.1",
+  "mission_id": "mission-demo",
+  "status": "attention_required",
+  "recovery_mode": "immediate_continue_recommended",
+  "missed_wakeups": 2,
+  "fresh": 1,
+  "stale": 1,
+  "unknown": 1,
+  "exact_next_action": "ao-mission continue --mission mission-demo --until-done --max-iterations 1",
+  "executes_work": false,
+  "approves_work": false,
+  "generated_at_utc": "2026-07-03T12:00:00Z"
+}

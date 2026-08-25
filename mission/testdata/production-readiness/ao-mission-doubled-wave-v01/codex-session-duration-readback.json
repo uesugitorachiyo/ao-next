@@ -1,0 +1,21 @@
+{
+  "schema": "ao.mission.codex-session-duration-readback.v0.1",
+  "mission": "ao-mission-doubled-wave-v01",
+  "status": "metadata_available",
+  "session_log_files_found": 1435,
+  "content_read": false,
+  "secret_values_read": false,
+  "local_absolute_paths_recorded": false,
+  "metadata_used": [
+    "session file count",
+    "session file modification-time samples",
+    "session file size samples"
+  ],
+  "duration_estimate_status": "requires bounded parser in a later node",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "continue node-04 and keep session-log content unread until a bounded parser is added"
+}

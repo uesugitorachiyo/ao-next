@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.scheduler-recovery-readback.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "mission_id",
+    "status",
+    "recovery_mode",
+    "missed_wakeups",
+    "exact_next_action",
+    "executes_work",
+    "approves_work",
+    "generated_at_utc"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.scheduler-recovery-readback.v0.1" },
+    "mission_id": { "type": "string" },
+    "status": { "type": "string" },
+    "recovery_mode": { "type": "string" },
+    "missed_wakeups": { "type": "integer" },
+    "fresh": { "type": "integer" },
+    "stale": { "type": "integer" },
+    "unknown": { "type": "integer" },
+    "exact_next_action": { "type": "string" },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

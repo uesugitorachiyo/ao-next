@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-25-final-synthesis-next-recommendations",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The final synthesis closes a readback-only wave and does not request promotion."
+}

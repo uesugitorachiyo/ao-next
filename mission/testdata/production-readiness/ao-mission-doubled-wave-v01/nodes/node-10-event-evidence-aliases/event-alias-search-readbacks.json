@@ -1,0 +1,28 @@
+{
+  "schema": "ao.mission.event-evidence-alias-readback.v0.1",
+  "mission": "ao-mission-doubled-wave-v01",
+  "node_id": "node-10-event-evidence-aliases",
+  "status": "passed",
+  "event_kinds": [
+    "route_evidence",
+    "node_evidence",
+    "pr_evidence",
+    "ci_evidence",
+    "rollup_evidence",
+    "blocker_evidence"
+  ],
+  "validated_queries": [
+    "mission events search --kind route_evidence",
+    "mission events search --kind node_evidence",
+    "mission events search --kind pr_evidence --query pull/54",
+    "mission events search --kind ci_evidence --query actions/runs/123",
+    "mission events search --kind rollup_evidence",
+    "mission events search --kind blocker_evidence"
+  ],
+  "test": "TestEventIndexSearchesRouteNodePRCIRollupAndBlockerEvidence",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "rsi_remains_denied": true
+}

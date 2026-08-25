@@ -1,0 +1,131 @@
+name: native-artifacts
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-artifacts:
+    name: native-artifacts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_label: linux-x86_64
+            binary_suffix: ""
+          - os: macos-latest
+            target_label: macos-aarch64
+            binary_suffix: ""
+          - os: windows-latest
+            target_label: windows-x86_64
+            binary_suffix: ".exe"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      - name: Verify Go toolchain
+        shell: bash
+        run: '[ "$(go env GOVERSION)" = "go1.26.4" ]'
+
+      - name: Build native artifact from clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="target/native-artifacts/${{ matrix.target_label }}"
+          binary="ao-mission${{ matrix.binary_suffix }}"
+          mkdir -p "$artifact_dir"
+          go build -trimpath -o "$artifact_dir/$binary" ./cmd/ao-mission
+          "$artifact_dir/$binary" --version > "$artifact_dir/version.txt"
+          set +e
+          "$artifact_dir/$binary" > "$artifact_dir/smoke.txt" 2>&1
+          smoke_exit=$?
+          set -e
+          if [ "$smoke_exit" -ne 1 ]; then
+            echo "expected usage smoke to return exit 1 for no-argument invocation, got $smoke_exit" >&2
+            exit 1
+          fi
+          grep -F "error: usage: ao-mission" "$artifact_dir/smoke.txt"
+          cp LICENSE "$artifact_dir/"
+          if [ -f NOTICE ]; then
+            cp NOTICE "$artifact_dir/"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$artifact_dir/$binary" > "$artifact_dir/SHA256SUMS"
+          else
+            shasum -a 256 "$artifact_dir/$binary" > "$artifact_dir/SHA256SUMS"
+          fi
+          go env -json GOOS GOARCH GOVERSION > "$artifact_dir/go-env.json"
+
+      - name: Checkout pinned supply-chain policy
+        uses: actions/checkout@v7
+        with:
+          repository: uesugitorachiyo/ao-architecture
+          ref: 4c501b4f1e55cb9b926709e19d496edf41984fb1
+          path: .ao-supply-chain-policy
+
+      - name: Package and verify supply-chain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="target/native-artifacts/${{ matrix.target_label }}"
+          binary="ao-mission${{ matrix.binary_suffix }}"
+          go run .ao-supply-chain-policy/scripts/read_go_binary_metadata.go \
+            "$artifact_dir/$binary" > "$artifact_dir/go-modules.json"
+          source_sha="${GITHUB_SHA}"
+          version="0.0.0+git.${source_sha:0:12}"
+          generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          dependency_lock=go.mod
+          if [[ -f go.sum ]]; then
+            dependency_lock=go.sum
+          fi
+          supply_chain_dir="$artifact_dir/supply-chain"
+          archive="ao-mission-${version}-${TARGET_LABEL}.tar.gz"
+          python3 .ao-supply-chain-policy/scripts/build_go_supply_chain_candidate.py \
+            --workspace-root . \
+            --repository ao-mission \
+            --source-sha "$source_sha" \
+            --version "$version" \
+            --target "$TARGET_LABEL" \
+            --binary "$artifact_dir/$binary" \
+            --module-json "$artifact_dir/go-modules.json" \
+            --dependency-lock "$dependency_lock" \
+            --license LICENSE \
+            --notice NOTICE \
+            --archive-name "$archive" \
+            --generated-at-utc "$generated_at_utc" \
+            --out "$supply_chain_dir"
+          python3 .ao-supply-chain-policy/scripts/verify_supply_chain_policy.py \
+            --inventory .ao-supply-chain-policy/stack/distributable-inventory.json \
+            --policy .ao-supply-chain-policy/stack/sbom-policy.json \
+            --evidence "$supply_chain_dir/supply-chain-evidence.json" \
+            --workspace-root "$supply_chain_dir" \
+            --expected-source-sha "$source_sha" \
+            --expected-version "$version" \
+            --expected-target "$TARGET_LABEL" \
+            --now "$generated_at_utc"
+          go_version=$(go version | sed 's|"|\\"|g')
+          cat > "$artifact_dir/native-artifact-summary.json" <<EOF
+          {"command":"./cmd/ao-mission","entry_point":"ao-mission","go_version":"${go_version}","publication_allowed":false,"release_upload_attempted":false,"repository":"ao-mission","runner_os":"${RUNNER_OS}","schema_version":"ao.native-artifact-summary.v0.1","smoke":{"command":"no-args-usage","expected_success":false,"status":"passed"},"source_commit":"${GITHUB_SHA}","target_label":"${TARGET_LABEL}"}
+          EOF
+        env:
+          TARGET_LABEL: ${{ matrix.target_label }}
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ao-mission-native-artifact-${{ matrix.target_label }}-${{ github.sha }}
+          path: target/native-artifacts/${{ matrix.target_label }}

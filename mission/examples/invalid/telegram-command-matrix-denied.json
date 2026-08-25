@@ -1,0 +1,11 @@
+{
+  "schema": "ao.mission.telegram-command-matrix.v0.1",
+  "commands": [
+    { "command": "/continue", "role": "user", "expected_status": "denied" },
+    { "command": "/approve", "role": "user", "expected_status": "denied" },
+    { "command": "/status", "role": "none", "expected_status": "denied" },
+    { "command": "status", "role": "user", "expected_status": "invalid" },
+    { "command": "/restart", "role": "admin", "expected_status": "invalid" }
+  ],
+  "mutation_authority": false
+}

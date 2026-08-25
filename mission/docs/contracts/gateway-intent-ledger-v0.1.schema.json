@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.gateway-intent-ledger.v0.1",
+  "type": "object",
+  "required": ["schema", "mission_id", "status", "total", "intents", "mutation_authority", "executes_work", "approves_work"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.gateway-intent-ledger.v0.1" },
+    "mission_id": { "type": "string" },
+    "status": { "type": "string" },
+    "total": { "type": "integer" },
+    "intent_recorded": { "type": "integer" },
+    "denied": { "type": "integer" },
+    "invalid": { "type": "integer" },
+    "intents": { "type": "array" },
+    "mutation_authority": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ao.mission.readiness-bundle-readback.v0.1",
+  "status": "ready",
+  "repo_count": 2,
+  "ready_repos": 2,
+  "blocked_repos": 0,
+  "repos": [
+    {
+      "repo": "ao-mission",
+      "path": "tmp/ao-mission-readiness.txt",
+      "status": "ready",
+      "score": "100/100",
+      "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "repo": "ao-atlas",
+      "path": "tmp/ao-atlas-readiness.txt",
+      "status": "ready",
+      "score": "100/100",
+      "sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "exact_next_action": "readiness bundle verified locally; remote PR lifecycle remains operator-controlled",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

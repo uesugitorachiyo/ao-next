@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.event-index.v0.2",
+  "type": "object",
+  "required": ["schema", "status", "index_version", "index_digest", "source_digest", "mission_count", "total_events", "events", "safe_to_execute", "executes_work", "approves_work", "mutates_repositories", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.event-index.v0.2" },
+    "status": { "type": "string" },
+    "index_version": { "type": "string", "const": "v0.2" },
+    "index_digest": { "type": "string" },
+    "source_digest": { "type": "string" },
+    "root": { "type": "string" },
+    "mission_count": { "type": "integer" },
+    "total_events": { "type": "integer" },
+    "events": { "type": "array" },
+    "safe_to_execute": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "mutates_repositories": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

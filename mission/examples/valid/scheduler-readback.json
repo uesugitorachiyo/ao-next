@@ -1,0 +1,9 @@
+{
+  "schema": "ao.mission.scheduler-readback.v0.1",
+  "mission_id": "mission-demo",
+  "status": "ready",
+  "scheduler": "codex-cron",
+  "event_loop": true,
+  "reason": "scheduler fixture records wakeup substrate only",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

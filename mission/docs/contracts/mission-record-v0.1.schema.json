@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.record.v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "mission_id",
+    "objective_digest",
+    "status",
+    "created_at_utc",
+    "current_route"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.record.v0.1" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "objective": { "type": "string" },
+    "objective_digest": { "type": "string" },
+    "objective_redacted": { "type": "boolean" },
+    "status": { "type": "string" },
+    "source_record_status": { "type": "string" },
+    "terminal_projection_status": { "type": "string" },
+    "terminal_projection_read_only": { "type": "boolean" },
+    "effective_operator_status": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "updated_at_utc": { "type": "string" },
+    "current_route": { "type": "string" },
+    "current_phase": { "type": "string" },
+    "blockers": { "type": "array" },
+    "exact_next_action": { "type": "string" },
+    "artifact_refs": { "type": "array" },
+    "steps": { "type": "array" },
+    "route_history": { "type": "array" },
+    "evidence": { "type": "object" },
+    "goal_lease": { "type": "object" },
+    "checkpoints": { "type": "array" },
+    "return_gate": { "type": "object" },
+    "route_reconciliation": { "type": "object" },
+    "workflow_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "status",
+        "mission_id",
+        "correlation_id",
+        "objective_digest",
+        "routing_class",
+        "acceptance_status",
+        "initial_route",
+        "stages",
+        "lifecycle_commands",
+        "exact_next_action",
+        "safe_to_execute",
+        "executes_work",
+        "approves_work",
+        "mutates_repositories",
+        "generated_at_utc"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ao.mission.objective-workflow-contract.v0.1"
+        },
+        "status": {
+          "type": "string",
+          "const": "ready"
+        },
+        "mission_id": {
+          "type": "string",
+          "pattern": "^mission-[0-9a-f]{16}$"
+        },
+        "correlation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "objective_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "routing_class": {
+          "type": "string",
+          "enum": ["pending_blueprint", "complex", "reduced"]
+        },
+        "acceptance_status": {
+          "type": "string",
+          "enum": ["pending_blueprint", "accepted"]
+        },
+        "initial_route": {
+          "type": "string",
+          "enum": ["ao-blueprint", "ao-atlas", "ao-foundry"]
+        },
+        "stages": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "status", "reason"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "ao-blueprint",
+                  "ao-atlas",
+                  "ao-foundry",
+                  "ao-forge",
+                  "ao-covenant",
+                  "ao2",
+                  "tests",
+                  "ao-control-plane",
+                  "ao-command",
+                  "ao-mission-reconciliation"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": ["required", "conditional", "omitted"]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        },
+        "lifecycle_commands": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "exact_next_action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "safe_to_execute": {
+          "type": "boolean",
+          "const": false
+        },
+        "executes_work": {
+          "type": "boolean",
+          "const": false
+        },
+        "approves_work": {
+          "type": "boolean",
+          "const": false
+        },
+        "mutates_repositories": {
+          "type": "boolean",
+          "const": false
+        },
+        "generated_at_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      }
+    },
+    "correlation_chain_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "mission_id",
+          "correlation_id",
+          "chain_digest",
+          "reference_digest",
+          "entries",
+          "safe_to_execute",
+          "executes_work",
+          "approves_work",
+          "mutates_repositories",
+          "widens_policy",
+          "publishes_artifacts"
+        ],
+        "properties": {
+          "schema": {
+            "type": "string",
+            "const": "ao.mission.correlation-chain-reference.v0.1"
+          },
+          "mission_id": { "type": "string", "minLength": 1 },
+          "correlation_id": { "type": "string", "minLength": 1 },
+          "chain_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "reference_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "entries": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "role",
+                "digest",
+                "locator_state",
+                "locator_digest",
+                "producer",
+                "binding_mode",
+                "safe_to_execute",
+                "executes_work",
+                "approves_work",
+                "mutates_repositories",
+                "widens_policy",
+                "publishes_artifacts"
+              ],
+              "properties": {
+                "role": { "type": "string", "minLength": 1 },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "locator_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "locator_state": {
+                  "type": "string",
+                  "enum": ["live", "archive_redacted"]
+                },
+                "archive_source_locator_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "producer": { "type": "string", "minLength": 1 },
+                "binding_mode": {
+                  "type": "string",
+                  "enum": ["native_field", "digest_link"]
+                },
+                "native_identifier": { "type": "string", "minLength": 1 },
+                "native_field": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)+$",
+                  "description": "RFC 6901 JSON Pointer to the exact native identifier field."
+                },
+                "parent_role": { "type": "string", "minLength": 1 },
+                "parent_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "parent_digest_field": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^(?:/(?:[^~/]|~[01])*)+$",
+                  "description": "RFC 6901 JSON Pointer to the exact parent digest field."
+                },
+                "safe_to_execute": { "type": "boolean", "const": false },
+                "executes_work": { "type": "boolean", "const": false },
+                "approves_work": { "type": "boolean", "const": false },
+                "mutates_repositories": { "type": "boolean", "const": false },
+                "widens_policy": { "type": "boolean", "const": false },
+                "publishes_artifacts": { "type": "boolean", "const": false }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "binding_mode": { "const": "native_field" }
+                    }
+                  },
+                  "then": {
+                    "required": ["native_identifier", "native_field"],
+                    "not": {
+                      "anyOf": [
+                        { "required": ["parent_role"] },
+                        { "required": ["parent_digest"] },
+                        { "required": ["parent_digest_field"] }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": ["parent_role", "parent_digest", "parent_digest_field"],
+                    "not": {
+                      "anyOf": [
+                        { "required": ["native_identifier"] },
+                        { "required": ["native_field"] }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "locator_state": { "const": "archive_redacted" }
+                    }
+                  },
+                  "then": {
+                    "required": ["archive_source_locator_digest"]
+                  },
+                  "else": {
+                    "not": {
+                      "required": ["archive_source_locator_digest"]
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "safe_to_execute": { "type": "boolean", "const": false },
+          "executes_work": { "type": "boolean", "const": false },
+          "approves_work": { "type": "boolean", "const": false },
+          "mutates_repositories": { "type": "boolean", "const": false },
+          "widens_policy": { "type": "boolean", "const": false },
+          "publishes_artifacts": { "type": "boolean", "const": false }
+        }
+      }
+    },
+    "correlated_imports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "digest",
+          "artifact_path",
+          "locator_state",
+          "locator_digest",
+          "chain_digest",
+          "reference_digest"
+        ],
+        "properties": {
+          "role": { "type": "string", "minLength": 1 },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "artifact_path": { "type": "string", "minLength": 1 },
+          "locator_state": {
+            "type": "string",
+            "enum": ["live", "archive_redacted"]
+          },
+          "locator_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "archive_source_locator_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "chain_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "reference_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "locator_state": { "const": "live" }
+              },
+              "required": ["locator_state"]
+            },
+            "then": {
+              "not": {
+                "required": ["archive_source_locator_digest"]
+              }
+            },
+            "else": {
+              "required": ["archive_source_locator_digest"],
+              "properties": {
+                "artifact_path": {
+                  "const": "<local-path-redacted>"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

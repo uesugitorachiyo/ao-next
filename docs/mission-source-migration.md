@@ -1,6 +1,6 @@
 # Mission Source Migration Contract
 
-- Status: Stage 1 contract; implementation is incomplete until the S1.8 exit gate
+- Status: Stage 1 contract; implementation is incomplete until Stage 1 qualification
 - Engine implementation: Rust workspace at the repository root
 - Mission implementation: Go module under `mission/`
 - Canonical Mission source: `uesugitorachiyo/ao-mission` at
@@ -51,10 +51,8 @@ git read-tree --prefix=mission/ -u \
 git commit -m "feat: import AO Mission source history"
 ```
 
-Preconditions are a clean isolated AO Next task branch, the exact reviewed AO
-Next parent selected by the Stage 1 plan, a clean canonical Mission checkout at
-the commit above, no existing `mission/` entry, and a verified S1.2 corpus.
-Direct mutation of `main` is excluded.
+Preconditions are the exact AO Next source parent, the canonical Mission commit
+above, no existing `mission/` entry, and a verified compatibility corpus.
 
 The merge commit must have the selected AO Next head as its first parent and
 the canonical Mission commit as its second parent. Its `mission` tree object
@@ -73,17 +71,15 @@ This preserves every canonical Mission commit ID and parent edge. Git history
 before the merge remains at its original paths; the merge places the exact
 source tree under `mission/` without rewriting that history.
 
-If the import fails review after it has been shared, rollback is a normal
-first-parent revert:
+Rollback uses a normal first-parent revert of the exact import merge:
 
 ```sh
 git revert -m 1 "$IMPORT_COMMIT"
 ```
 
 `IMPORT_COMMIT` is the exact retained two-parent import merge. The revert
-removes the imported tree from the candidate line without deleting
-or rewriting the retained Mission ancestry. An unshared failed attempt may be
-abandoned with its isolated worktree and branch after evidence retention.
+removes the imported tree from the candidate line without deleting or rewriting
+the retained Mission ancestry.
 
 ### Alternatives
 
@@ -215,7 +211,7 @@ Mission-store operation.
 
 Mission exposes the projection separately from the durable source record on
 Mission inspect and Command-compatible status readbacks. Import never changes
-the Mission status, route, phase, blockers, exact next action, or workgraph.
+durable Mission lifecycle or scheduling state.
 The model, projection, or import readback cannot approve Engine work or advance
 authority.
 
@@ -224,7 +220,7 @@ authority.
 The imported source must first pass its existing Go tests, build, vet,
 public-safety checks, and production-readiness gate without behavior changes.
 `ao-next-mission` and the temporary `ao-mission` command then replay all seven
-S1.2 operations in isolated state roots:
+frozen operations in isolated state roots:
 
 - Command-compatible status;
 - archive validation and import round trip;
@@ -243,7 +239,7 @@ while a later generic-schema path can require a literal `schema` field. The
 imported repository must add one regression test and one discriminator resolver
 that accepts `schema`, `schema_version`, or `contract_version`, rejects
 conflicting values, and routes the AO Next prefix to its strict intrinsic
-validator. This compatibility support must pass before the S1.8 generic
+validator. This compatibility support must pass before the Stage 1 generic
 contract-validation gate.
 
 Schema generation and checked-in JSON Schema bytes must match. Positive vectors
@@ -257,42 +253,24 @@ sequence gaps, schema drift, digest drift, request or journal identity drift,
 and terminal contradictions. Deterministic replay must produce the same prefix
 digest and Mission projection from the same bytes.
 
-## Per-Task Durable Progression
-
-S1.4 through S1.8 each close only after independent review. The controller
-retains a typed task result, implementation report, verification manifest, and
-review report beneath that task's private evidence node. AO Atlas creates an
-evidence-bound `ao.atlas.run-link.v0.1` from those exact files and advances the
-latest workgraph with `workgraph complete`, which marks only the matching task
-complete. `workgraph next` must return the immediate successor before Mission
-imports the run link and updated workgraph.
-
-AO Mission imports the typed `foundry-run-link` and `atlas-workgraph`, creates a
-checkpoint, and reconciles Mission and Command views after every reviewed task.
-S1.4 makes only S1.5 dependency-ready; S1.5 makes only S1.6 dependency-ready;
-S1.6 makes only S1.7 dependency-ready; and S1.7 makes only S1.8
-dependency-ready. S1.8 consumes the S1.7-completed workgraph and marks only
-S1.8 complete. It never retroactively completes S1.3 through S1.7.
-
 ## Stage 1 Exit And Ownership
 
-S1.8 runs provider-free equivalence on Windows x86_64, macOS arm64, and Ubuntu
-x86_64 from one exact candidate head. It also runs the existing Stage 0 Rust
-recovery gates, the imported Go gates, schema drift, deterministic replay,
-public-safety, independent evidence verification, and a broad final review.
+Stage 1 qualification runs provider-free equivalence on Windows x86_64, macOS
+arm64, and Ubuntu x86_64 from one exact candidate head. It also runs the existing
+Stage 0 Rust recovery gates, the imported Go gates, schema drift, deterministic
+replay, and public-safety checks.
 
 Stage 1 reaches `MISSION_SOURCE_MIGRATION_READY_FOR_PACKAGING` only after a
-reviewed pull request is green, merged, verified again at the merged head, and
-reconciled by AO Mission. Any unresolved history, behavior, import, projection,
-platform, review, merge, or reconciliation failure reaches
-`STOP_MISSION_SOURCE_MIGRATION`. A local plan, imported tree, green single-host
-run, or unmerged branch is not the exit result.
+single source head passes canonical ancestry, frozen old/new behavior,
+journal-prefix import and projection, and all three required platform gates.
+Any unresolved history, behavior, import, projection, or platform failure
+reaches `STOP_MISSION_SOURCE_MIGRATION`.
 
 The canonical AO Mission repository remains the source owner through the old/new
-equivalence gate. After the reviewed Stage 1 merge and reconciliation, AO Next
-owns the imported `mission/` source for Stage 2 candidate packaging. The
-canonical repository remains a comparison and rollback source until an
-independent later lifecycle decision assigns another role.
+equivalence gate. After Stage 1 qualification, AO Next owns the imported
+`mission/` source for Stage 2 candidate packaging. The canonical repository
+remains a comparison and rollback source until an independent later lifecycle
+decision assigns another role.
 
 Stage 2 packaging acceptance includes read-only
 `ao-next-engine capabilities --json` and

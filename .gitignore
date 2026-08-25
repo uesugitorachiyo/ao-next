@@ -1,6 +1,11 @@
 # Rust build output
 /target/
 
+# Owner-internal plans/specifications; retain the Stage 1-5-pinned design.
+/docs/superpowers/plans/
+/docs/superpowers/specs/*
+!/docs/superpowers/specs/2026-08-23-ao-next-dual-process-cross-platform-successor-design.md
+
 # AO Next local state and generated run output
 /.ao-next/
 /artifacts/

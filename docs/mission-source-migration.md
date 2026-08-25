@@ -173,11 +173,25 @@ ao-next-mission --home "$MISSION_STATE_ROOT" import ao-next-journal-prefix \
   --path "$PREFIX_JSON"
 ```
 
+`MISSION_STATE_ROOT` and `PREFIX_JSON` must be clean absolute local paths.
+`PREFIX_JSON` must be outside the Mission state root. Relative, drive-relative,
+empty, `.` or `..` component, NUL-containing, Windows UNC, and Windows device
+namespace locators are rejected. Every existing ancestor and the prefix leaf is
+opened without following links; Unix symlinks and Windows reparse points at any
+component are rejected. Ancestors must be directories and the leaf must be a
+bounded regular file. Spaces and non-ASCII components are accepted. Engine
+applies the same component rules to `--journal-root`, `--request`, and `--out`;
+the new output must be outside the journal root, its parent must already be a
+safe directory, and the leaf must not exist.
+
 Mission retains the exact accepted bytes in its content-addressed artifact
 store and preserves the supplied locator as provenance. Exact digest reimport
-is idempotent. A different prefix for the same accepted run is rejected before
-Mission state changes. A later incremental-prefix contract requires a separate
-version and is outside Stage 1.
+is idempotent. The retained provenance is the exact accepted absolute locator,
+not a rewritten relative path. Mission calculates the candidate digest and
+checks the existing run projection before retaining bytes. A different prefix
+for the same accepted run is rejected before artifact retention or Mission
+state change, leaving no orphan content-addressed object. A later
+incremental-prefix contract requires a separate version and is outside Stage 1.
 
 ## Pure Projection
 
@@ -234,11 +248,31 @@ contract-validation gate.
 
 Schema generation and checked-in JSON Schema bytes must match. Positive vectors
 cover an empty prepared prefix, a retained provider outcome, and a passed
-terminal. Negative vectors and filesystem tests cover duplicate keys, unknown
-fields, oversized input, unsafe paths, symlinks, non-regular files, sequence
-gaps, schema drift, digest drift, request or journal identity drift, and terminal
-contradictions. Deterministic replay must produce the same prefix digest and
-Mission projection from the same bytes.
+terminal. Constructed valid prefixes exercise all ten projections; denied and
+interrupted terminals each map to `stopped`. Negative vectors and filesystem
+tests independently cover duplicate keys, incorrect field casing, trailing
+JSON, wrong field types, unknown fields, oversized input, relative or
+state-contained locators, symlink or reparse components, non-regular files,
+sequence gaps, schema drift, digest drift, request or journal identity drift,
+and terminal contradictions. Deterministic replay must produce the same prefix
+digest and Mission projection from the same bytes.
+
+## Per-Task Durable Progression
+
+S1.4 through S1.8 each close only after independent review. The controller
+retains a typed task result, implementation report, verification manifest, and
+review report beneath that task's private evidence node. AO Atlas creates an
+evidence-bound `ao.atlas.run-link.v0.1` from those exact files and advances the
+latest workgraph with `workgraph complete`, which marks only the matching task
+complete. `workgraph next` must return the immediate successor before Mission
+imports the run link and updated workgraph.
+
+AO Mission imports the typed `foundry-run-link` and `atlas-workgraph`, creates a
+checkpoint, and reconciles Mission and Command views after every reviewed task.
+S1.4 makes only S1.5 dependency-ready; S1.5 makes only S1.6 dependency-ready;
+S1.6 makes only S1.7 dependency-ready; and S1.7 makes only S1.8
+dependency-ready. S1.8 consumes the S1.7-completed workgraph and marks only
+S1.8 complete. It never retroactively completes S1.3 through S1.7.
 
 ## Stage 1 Exit And Ownership
 

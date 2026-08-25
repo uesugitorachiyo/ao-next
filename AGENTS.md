@@ -34,7 +34,7 @@ AO Next is not established as superior, production-ready, released, published, d
 - Retain raw provider captures only under the input's empty operator-owned private capture directory outside every worker authority root.
 - Keep sealed hidden tests outside worker workspaces and authority roots. Never copy hidden bytes or paths into prompts, effect observations, logs, or public evidence.
 - Repository co-location grants no authority. Keep Rust Engine and Go Mission as separate binaries, processes, state roots, and failure domains; neither process may discover or open the other's private state.
-- Mission may import only an explicitly supplied, immutable, digest-bound `ao.next.execution-journal-prefix.v1` file. Import and projection are read-only: they never scan Engine state, call a provider, execute an effect, or change durable Mission source status.
+- Mission may import only an explicitly supplied, immutable, digest-bound `ao.next.execution-journal-prefix.v1` file at a clean absolute local locator outside its state root. Reject relative, non-normal, symlink, reparse, and non-regular components. Preserve the exact accepted locator as provenance. Import and projection are read-only: they never scan Engine state, call a provider, execute an effect, or change durable Mission source status.
 
 ## Working Method
 
@@ -51,6 +51,9 @@ AO Next is not established as superior, production-ready, released, published, d
 - Reject duplicate keys, unknown contract fields, oversized input, stale authority, unsafe paths, symlinks, non-regular files, identity drift, digest mismatch, and terminal contradictions.
 - Preserve canonical Go Mission ancestry during migration. Import the exact source as a two-parent merge under `mission/` without squash, cherry-pick replay, or path-history rewriting; verify the second parent and imported tree object before changing imported bytes.
 - Keep `ao-next-mission` behavior equivalent to the temporary `ao-mission` compatibility command through the frozen corpus. Resolve generic contract discriminators consistently across `schema`, `schema_version`, and `contract_version`, and reject conflicting values.
+- Decode journal prefixes with the duplicate-aware exact decoder, then apply exact field whitelists, type checks, lowercase names, typed unknown-field denial, and an EOF check. Test duplicate, casing, trailing, type, and unknown failures separately.
+- Detect an existing-run prefix conflict before retaining candidate bytes. A rejected changed digest must leave the Mission record and artifact directory byte-identical with no orphan content-addressed object.
+- After each reviewed S1.4 through S1.8 task, use an evidence-bound AO Atlas run link and `workgraph complete` to complete only that task. Import the typed run link and updated workgraph into Mission, checkpoint, and reconcile before the next task becomes dependency-ready; never defer earlier task reconciliation to S1.8.
 - Keep native effects and deterministic Git workspace preparation functional on Linux, macOS, and Windows. Reject Windows reparse points at workspace and provider-visible roots and every nested entry. Preserve descriptor-relative Unix traversal and handle-anchored Windows identity checks; never replace either with unchecked canonical-path access.
 - Publication changes require physical Windows qualification on a new empty NTFS root whose path contains spaces, with result JSON outside the checkout.
 - Store retained evidence beneath digest-addressed paths and preserve the original locator separately.

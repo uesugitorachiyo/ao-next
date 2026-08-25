@@ -1,6 +1,14 @@
 # Rust build output
 /target/
 
+# Owner-internal future plans/specifications; retain the current context chain.
+/docs/superpowers/plans/*
+!/docs/superpowers/plans/2026-08-23-ao-next-engine-recovery-repair.md
+!/docs/superpowers/plans/2026-08-24-ao-next-stage0-final-blocker-closure.md
+/docs/superpowers/specs/*
+!/docs/superpowers/specs/2026-08-23-ao-next-dual-process-cross-platform-successor-design.md
+!/docs/superpowers/specs/2026-08-24-ao-next-stage0-final-blocker-closure-design.md
+
 # AO Next local state and generated run output
 /.ao-next/
 /artifacts/

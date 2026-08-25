@@ -4,7 +4,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ao_next_core::strict_json::canonical_digest;
-use ao_next_eval::mission_corpus::{verify_mission_corpus, verify_mission_corpus_snapshot};
+use ao_next_eval::mission_corpus::{
+    MissionCorpusError, verify_mission_corpus, verify_mission_corpus_snapshot,
+};
 use serde_json::{Value, json};
 
 fn repository_root() -> PathBuf {
@@ -31,6 +33,58 @@ fn frozen_mission_corpus_verifies_without_the_source_checkout() {
     );
     assert_eq!(verified.source_file_count, 346);
     assert_eq!(verified.vector_count, 7);
+}
+
+#[test]
+fn behavior_vectors_bind_replayable_operations_and_exact_expectations() {
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(corpus_root().join("corpus-v1.json")).expect("manifest"))
+            .expect("manifest JSON");
+    let vectors = manifest["vectors"].as_array().expect("vectors");
+    let operations = vectors
+        .iter()
+        .map(|vector| {
+            assert!(
+                !vector["arguments"]
+                    .as_array()
+                    .expect("arguments")
+                    .is_empty()
+            );
+            assert!(
+                !vector["setup_state"]
+                    .as_array()
+                    .expect("setup state")
+                    .is_empty()
+            );
+            assert!(
+                !vector["expected_result"]
+                    .as_array()
+                    .expect("result")
+                    .is_empty()
+            );
+            assert!(vector["expected_error"].is_string());
+            assert!(
+                !vector["expected_state"]
+                    .as_array()
+                    .expect("state")
+                    .is_empty()
+            );
+            vector["operation"].as_str().expect("operation")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        operations,
+        std::collections::BTreeSet::from([
+            "archive_validate_import_round_trip",
+            "command_status",
+            "lifecycle_pause_resume",
+            "public_safety_accepted",
+            "public_safety_rejected",
+            "validate_contract_accepted",
+            "validate_contract_rejected",
+        ])
+    );
 }
 
 #[test]
@@ -94,6 +148,14 @@ fn manifest_rejects_paths_reordering_digest_drift_and_status_conflation() {
         &scratch.0,
         &serde_json::to_vec(&conflated).expect("conflated manifest"),
     );
+
+    let mut replay_drift: Value = serde_json::from_slice(&source).expect("manifest JSON");
+    replay_drift["vectors"][0]["arguments"][0][0] = json!("not-a-mission-operation");
+    rewrite_digest(&mut replay_drift);
+    assert_rejected(
+        &scratch.0,
+        &serde_json::to_vec(&replay_drift).expect("replay drift manifest"),
+    );
 }
 
 #[test]
@@ -115,6 +177,39 @@ fn vector_inventory_rejects_missing_extra_and_non_regular_entries() {
     fs::remove_file(non_regular.0.join("vectors/archive-import.json")).expect("remove vector");
     fs::create_dir(non_regular.0.join("vectors/archive-import.json")).expect("directory vector");
     assert_rejected(&non_regular.0, &manifest);
+}
+
+#[test]
+fn vector_inventory_rejects_cumulative_declared_bytes_over_32_mib() {
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(corpus_root().join("corpus-v1.json")).expect("manifest"))
+            .expect("manifest JSON");
+    let originals = manifest["vectors"].as_array().expect("vectors").clone();
+    let mut vectors = Vec::new();
+    for index in 0..33 {
+        let mut vector = originals[index.min(originals.len() - 1)].clone();
+        vector["id"] = json!(format!("oversized-{index:02}"));
+        vector["fixture_path"] = json!(format!("vectors/{index:02}.json"));
+        vector["bytes"] = json!(1024 * 1024);
+        vector["digest"] =
+            json!("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        vectors.push(vector);
+    }
+    manifest["vectors"] = Value::Array(vectors);
+    rewrite_digest(&mut manifest);
+
+    let scratch = Scratch::new("vector-total");
+    copy_vectors(&corpus_root(), &scratch.0);
+    let path = scratch.0.join("corpus-v1.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&manifest).expect("manifest bytes"),
+    )
+    .expect("oversized manifest");
+    assert!(matches!(
+        verify_mission_corpus_snapshot(&path, &scratch.0),
+        Err(MissionCorpusError::Oversized)
+    ));
 }
 
 #[cfg(unix)]
@@ -171,6 +266,21 @@ fn frozen_mission_corpus_matches_the_bound_source_tree_and_rejects_drift() {
     fs::write(&readme, b"digest drift\n").expect("drift source");
     assert!(verify_mission_corpus(&manifest, &root, &clone).is_err());
     fs::write(&readme, original).expect("restore source");
+
+    let original = fs::read(&readme).expect("README");
+    fs::write(&readme, b"staged-only digest drift\n").expect("stage source drift");
+    run(Command::new("git").args(["-C", clone.to_str().expect("clone"), "add", "README.md"]));
+    fs::write(&readme, original).expect("restore only the worktree");
+    assert!(verify_mission_corpus(&manifest, &root, &clone).is_err());
+    run(Command::new("git").args([
+        "-C",
+        clone.to_str().expect("clone"),
+        "reset",
+        "--quiet",
+        "HEAD",
+        "--",
+        "README.md",
+    ]));
 
     fs::write(clone.join("unexpected.txt"), b"extra\n").expect("extra source");
     run(Command::new("git").args([

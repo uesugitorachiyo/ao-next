@@ -1,0 +1,11 @@
+{
+  "pause": {
+    "status": "paused",
+    "current_phase": "paused",
+    "exact_next_action": "resume mission before continuation"
+  },
+  "resume": {
+    "status": "active",
+    "current_phase": "routing"
+  }
+}

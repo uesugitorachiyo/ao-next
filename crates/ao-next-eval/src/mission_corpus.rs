@@ -47,29 +47,27 @@ struct SourceFile {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum BehaviorSurface {
-    Commands,
-    StrictContracts,
-    LifecycleTransitions,
-    Readbacks,
-    ArchiveImport,
-    PublicSafety,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ExpectedDisposition {
-    Accepted,
-    Rejected,
+enum BehaviorOperation {
+    ArchiveValidateImportRoundTrip,
+    CommandStatus,
+    LifecyclePauseResume,
+    PublicSafetyAccepted,
+    PublicSafetyRejected,
+    ValidateContractAccepted,
+    ValidateContractRejected,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BehaviorVector {
     id: String,
-    surfaces: Vec<BehaviorSurface>,
-    expected_disposition: ExpectedDisposition,
-    source_path: String,
+    operation: BehaviorOperation,
+    arguments: Vec<Vec<String>>,
+    setup_state: Vec<String>,
+    expected_result: Vec<String>,
+    expected_error: String,
+    expected_state: Vec<String>,
+    source_paths: Vec<String>,
     fixture_path: String,
     bytes: u64,
     digest: Digest,
@@ -155,48 +153,7 @@ impl MissionCorpus {
             return Err(MissionCorpusError::Oversized);
         }
 
-        let source_entries = self
-            .source_files
-            .iter()
-            .map(|entry| (entry.path.as_str(), (&entry.digest, entry.bytes)))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let mut ids = BTreeSet::new();
-        let mut fixture_paths = Vec::new();
-        let mut coverage = BTreeSet::new();
-        let mut dispositions = BTreeSet::new();
-        for vector in &self.vectors {
-            validate_relative_path(&vector.source_path)?;
-            validate_relative_path(&vector.fixture_path)?;
-            if vector.id.trim().is_empty()
-                || !ids.insert(vector.id.as_str())
-                || vector.surfaces.is_empty()
-                || vector.surfaces.windows(2).any(|pair| pair[0] >= pair[1])
-                || vector.bytes > FILE_LIMIT
-                || !vector.fixture_path.starts_with("vectors/")
-                || source_entries.get(vector.source_path.as_str())
-                    != Some(&(&vector.digest, vector.bytes))
-            {
-                return invalid("behavior vector is invalid");
-            }
-            fixture_paths.push(vector.fixture_path.as_str());
-            coverage.extend(vector.surfaces.iter().copied());
-            dispositions.insert(vector.expected_disposition);
-        }
-        if fixture_paths.windows(2).any(|pair| pair[0] >= pair[1])
-            || coverage
-                != BTreeSet::from([
-                    BehaviorSurface::Commands,
-                    BehaviorSurface::StrictContracts,
-                    BehaviorSurface::LifecycleTransitions,
-                    BehaviorSurface::Readbacks,
-                    BehaviorSurface::ArchiveImport,
-                    BehaviorSurface::PublicSafety,
-                ])
-            || dispositions
-                != BTreeSet::from([ExpectedDisposition::Accepted, ExpectedDisposition::Rejected])
-        {
-            return invalid("behavior corpus coverage is incomplete or reordered");
-        }
+        self.validate_vectors()?;
         let observed = self.calculated_digest()?;
         if observed != self.manifest_digest {
             return Err(MissionCorpusError::DigestDrift {
@@ -205,6 +162,133 @@ impl MissionCorpus {
             });
         }
         Ok(())
+    }
+
+    fn validate_vectors(&self) -> Result<(), MissionCorpusError> {
+        if self.vectors.is_empty() || self.vectors.len() > ENTRY_LIMIT {
+            return invalid("behavior vector inventory is empty or oversized");
+        }
+        let vector_bytes = self.vectors.iter().try_fold(0_u64, |total, vector| {
+            total
+                .checked_add(vector.bytes)
+                .ok_or(MissionCorpusError::Oversized)
+        })?;
+        if vector_bytes > TOTAL_LIMIT {
+            return Err(MissionCorpusError::Oversized);
+        }
+
+        let source_entries = self
+            .source_files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut ids = BTreeSet::new();
+        let mut fixture_paths = Vec::new();
+        let mut operations = BTreeSet::new();
+        for vector in &self.vectors {
+            validate_relative_path(&vector.fixture_path)?;
+            if vector.id.trim().is_empty()
+                || !ids.insert(vector.id.as_str())
+                || vector.arguments.is_empty()
+                || vector.arguments.iter().any(|args| {
+                    args.is_empty() || args.iter().any(|argument| argument.trim().is_empty())
+                })
+                || vector.setup_state.is_empty()
+                || vector.expected_result.is_empty()
+                || vector.expected_state.is_empty()
+                || vector.source_paths.is_empty()
+                || vector
+                    .source_paths
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || vector.bytes > FILE_LIMIT
+                || !vector.fixture_path.starts_with("vectors/")
+                || vector.operation.is_rejection() == vector.expected_error.is_empty()
+            {
+                return invalid("behavior vector is invalid");
+            }
+            operations.insert(vector.operation);
+            for path in &vector.source_paths {
+                validate_relative_path(path)?;
+                if !source_entries.contains(path.as_str()) {
+                    return invalid("behavior vector source binding is unknown");
+                }
+            }
+            if vector.calculated_replay_digest()?.as_str()
+                != vector.operation.expected_replay_digest()
+            {
+                return invalid("behavior vector replay contract drifted");
+            }
+            fixture_paths.push(vector.fixture_path.as_str());
+        }
+        if fixture_paths.windows(2).any(|pair| pair[0] >= pair[1])
+            || operations
+                != BTreeSet::from([
+                    BehaviorOperation::ArchiveValidateImportRoundTrip,
+                    BehaviorOperation::CommandStatus,
+                    BehaviorOperation::LifecyclePauseResume,
+                    BehaviorOperation::PublicSafetyAccepted,
+                    BehaviorOperation::PublicSafetyRejected,
+                    BehaviorOperation::ValidateContractAccepted,
+                    BehaviorOperation::ValidateContractRejected,
+                ])
+        {
+            return invalid("behavior operation coverage is incomplete or reordered");
+        }
+        Ok(())
+    }
+}
+
+impl BehaviorVector {
+    fn calculated_replay_digest(&self) -> Result<Digest, MissionCorpusError> {
+        Ok(canonical_digest(&(
+            &self.id,
+            self.operation,
+            &self.arguments,
+            &self.setup_state,
+            &self.expected_result,
+            &self.expected_error,
+            &self.expected_state,
+            &self.source_paths,
+            &self.fixture_path,
+            self.bytes,
+            &self.digest,
+        ))?)
+    }
+}
+
+impl BehaviorOperation {
+    fn is_rejection(self) -> bool {
+        matches!(
+            self,
+            Self::PublicSafetyRejected | Self::ValidateContractRejected
+        )
+    }
+
+    fn expected_replay_digest(self) -> &'static str {
+        match self {
+            Self::ArchiveValidateImportRoundTrip => {
+                "sha256:93b6c753a17a27b4d1489d229590bfcfa23bed4e0a95484ddd09b618ac035b99"
+            }
+            Self::CommandStatus => {
+                "sha256:562eb13c2f96ac3d51ab204fa55290f3d6ceec3628f21a74b4d785c1a82eca6e"
+            }
+            Self::LifecyclePauseResume => {
+                "sha256:5ae5826d65206d729a2f00a090c8f88d36266bfaa3b23dcd5cd2675da8934c9b"
+            }
+            Self::PublicSafetyAccepted => {
+                "sha256:17faf04e338333858136cc982bf39afbea417db15b30c3aa7d8cb1fa9fae03ba"
+            }
+            Self::PublicSafetyRejected => {
+                "sha256:5725cd2f8c7d67d854663196ee9fb3fb604e4b79d2cb8c7b34fbbbd108812de8"
+            }
+            Self::ValidateContractAccepted => {
+                "sha256:a41c782c95ede2eb681a7b8045afb59a70223ccf45e10e679c8075bed5e63297"
+            }
+            Self::ValidateContractRejected => {
+                "sha256:4891f432944d182cf3a0d7e6d57e39326845fbf5a7ab70b93b5d178b7e8d4132"
+            }
+        }
     }
 }
 
@@ -272,8 +356,15 @@ fn verify_vectors(manifest: &MissionCorpus, corpus_root: &Path) -> Result<(), Mi
     if actual.iter().map(String::as_str).collect::<Vec<_>>() != expected {
         return Err(MissionCorpusError::VectorInventoryDrift);
     }
+    let mut total = 0_u64;
     for vector in &manifest.vectors {
         let bytes = read_regular_bounded(&corpus_root.join(&vector.fixture_path), FILE_LIMIT)?;
+        total = total
+            .checked_add(bytes.len() as u64)
+            .ok_or(MissionCorpusError::Oversized)?;
+        if total > TOTAL_LIMIT {
+            return Err(MissionCorpusError::Oversized);
+        }
         if bytes.len() as u64 != vector.bytes || digest_bytes(&bytes) != vector.digest {
             return Err(MissionCorpusError::VectorInventoryDrift);
         }
@@ -293,6 +384,7 @@ fn verify_source(manifest: &MissionCorpus, source_root: &Path) -> Result<(), Mis
             observed: observed_head,
         });
     }
+    reject_cached_diff(source_root)?;
 
     let tracked = git(source_root, &["ls-files", "-s", "-z"])?;
     let actual = parse_git_inventory(&tracked)?;
@@ -318,6 +410,19 @@ fn verify_source(manifest: &MissionCorpus, source_root: &Path) -> Result<(), Mis
         return Err(MissionCorpusError::Oversized);
     }
     Ok(())
+}
+
+fn reject_cached_diff(root: &Path) -> Result<(), MissionCorpusError> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--cached", "--quiet", "HEAD", "--"])
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(1) => Err(MissionCorpusError::SourceInventoryDrift),
+        _ => invalid("git could not compare the source index with HEAD"),
+    }
 }
 
 fn parse_git_inventory(bytes: &[u8]) -> Result<Vec<(&str, &str)>, MissionCorpusError> {

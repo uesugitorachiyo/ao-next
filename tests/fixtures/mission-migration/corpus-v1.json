@@ -2087,88 +2087,321 @@
   ],
   "vectors": [
     {
-      "id": "archive-recovery-readback",
-      "surfaces": [
-        "readbacks",
-        "archive_import"
+      "id": "archive-validate-import-round-trip",
+      "operation": "archive_validate_import_round_trip",
+      "arguments": [
+        [
+          "--home",
+          "${export_home}",
+          "start",
+          "archive import round trip"
+        ],
+        [
+          "--home",
+          "${export_home}",
+          "mission",
+          "archive",
+          "--mission",
+          "${mission_id}",
+          "--out",
+          "${archive_path}"
+        ],
+        [
+          "mission",
+          "validate-archive",
+          "--path",
+          "${archive_path}"
+        ],
+        [
+          "--home",
+          "${import_home}",
+          "mission",
+          "import-archive",
+          "--path",
+          "${archive_path}"
+        ],
+        [
+          "--home",
+          "${import_home}",
+          "mission",
+          "inspect",
+          "--mission",
+          "${mission_id}",
+          "--json"
+        ]
       ],
-      "expected_disposition": "accepted",
-      "source_path": "examples/valid/artifact-manifest-recovery-compaction.json",
+      "setup_state": [
+        "empty directory ${export_home}",
+        "empty directory ${import_home}"
+      ],
+      "expected_result": [
+        "all exit codes=0",
+        "archive.schema=ao.mission.archive.v0.1",
+        "validation.schema=ao.mission.archive-validation.v0.1",
+        "validation.status=ready",
+        "import.schema=ao.mission.archive-import-readback.v0.1",
+        "import.status=ready",
+        "inspect.objective=archive import round trip"
+      ],
+      "expected_error": "",
+      "expected_state": [
+        "${import_home}/missions/${mission_id}.json exists",
+        "restored mission objective=archive import round trip",
+        "safe_to_execute=false",
+        "executes_work=false",
+        "approves_work=false"
+      ],
+      "source_paths": [
+        "internal/mission/cli.go",
+        "internal/mission/mission_test.go"
+      ],
       "fixture_path": "vectors/archive-import.json",
-      "bytes": 933,
-      "digest": "sha256:5b6ba96ab0cc9624524d3d642f3e7fc06ddc077d51a24cb133c556c2b3e1cf4b"
+      "bytes": 558,
+      "digest": "sha256:164ad54712927357aa4ea893d7a4d829050a54686abc72cc1990f20d8e67ea69"
     },
     {
-      "id": "command-status-readback",
-      "surfaces": [
-        "commands",
-        "readbacks"
+      "id": "command-status",
+      "operation": "command_status",
+      "arguments": [
+        [
+          "--home",
+          "${home}",
+          "start",
+          "command status replay"
+        ],
+        [
+          "--home",
+          "${home}",
+          "command",
+          "status",
+          "--mission",
+          "${mission_id}",
+          "--json"
+        ]
       ],
-      "expected_disposition": "accepted",
-      "source_path": "examples/valid/command-status.json",
+      "setup_state": [
+        "empty directory ${home}"
+      ],
+      "expected_result": [
+        "all exit codes=0",
+        "stdout.schema=ao.command.mission-status.v0.1",
+        "stdout.mission_id=${mission_id}",
+        "stdout.read_only=true",
+        "stdout.executes_work=false",
+        "stdout.approves_work=false",
+        "stdout.mutates_repositories=false"
+      ],
+      "expected_error": "",
+      "expected_state": [
+        "${home}/missions/${mission_id}.json status=active"
+      ],
+      "source_paths": [
+        "internal/mission/cli.go",
+        "internal/mission/cli_registry.go",
+        "internal/mission/mission_test.go"
+      ],
       "fixture_path": "vectors/command-status.json",
       "bytes": 423,
       "digest": "sha256:8f8c173d251530ff525433b7eaf014a31e8e9be5516306459135af147319a11e"
     },
     {
-      "id": "terminal-import-readback",
-      "surfaces": [
-        "lifecycle_transitions",
-        "readbacks",
-        "archive_import"
-      ],
-      "expected_disposition": "accepted",
-      "source_path": "examples/valid/foundry-terminal-state-binding.json",
-      "fixture_path": "vectors/import-terminal.json",
-      "bytes": 1384,
-      "digest": "sha256:bf79465bc10507640099436cbf421d22e38e0a018278d46321a4753597eca4a8"
-    },
-    {
       "id": "missing-objective-contract",
-      "surfaces": [
-        "strict_contracts"
+      "operation": "validate_contract_rejected",
+      "arguments": [
+        [
+          "validate",
+          "contract",
+          "--path",
+          "${fixture}"
+        ]
       ],
-      "expected_disposition": "rejected",
-      "source_path": "examples/invalid/a2a-jsonrpc-missing-objective.json",
+      "setup_state": [
+        "${fixture}=vectors/invalid-missing-objective.json"
+      ],
+      "expected_result": [
+        "exit code=1",
+        "stdout.schema=ao.mission.contract-validation.v0.1",
+        "stdout.status=blocked",
+        "stdout.contract=",
+        "stdout.blockers=[schema or contract_version is required]",
+        "stdout.read_only=true",
+        "stdout.executes_work=false",
+        "stdout.approves_work=false",
+        "stdout.mutates_repositories=false"
+      ],
+      "expected_error": "error: schema or contract_version is required",
+      "expected_state": [
+        "input fixture unchanged"
+      ],
+      "source_paths": [
+        "internal/mission/cli.go",
+        "internal/mission/validate.go",
+        "internal/mission/workflow_contract_strict_test.go"
+      ],
       "fixture_path": "vectors/invalid-missing-objective.json",
       "bytes": 105,
       "digest": "sha256:00b4915ee78fb84767ed58ced573d37e66bd783d608d065e96597eebbd4b440d"
     },
     {
-      "id": "lifecycle-timeline-readback",
-      "surfaces": [
-        "lifecycle_transitions",
-        "readbacks"
+      "id": "lifecycle-pause-resume",
+      "operation": "lifecycle_pause_resume",
+      "arguments": [
+        [
+          "--home",
+          "${home}",
+          "start",
+          "lifecycle replay"
+        ],
+        [
+          "--home",
+          "${home}",
+          "pause",
+          "--mission",
+          "${mission_id}"
+        ],
+        [
+          "--home",
+          "${home}",
+          "resume",
+          "--mission",
+          "${mission_id}"
+        ],
+        [
+          "--home",
+          "${home}",
+          "status",
+          "--mission",
+          "${mission_id}",
+          "--json"
+        ]
       ],
-      "expected_disposition": "accepted",
-      "source_path": "examples/valid/mission-status-timeline-compatibility-vector.json",
-      "fixture_path": "vectors/lifecycle-timeline.json",
-      "bytes": 3005,
-      "digest": "sha256:f6019cd70d26b359f1b7923431e16cc83dd786bde58bd4c9e56787afa8f62394"
+      "setup_state": [
+        "empty directory ${home}"
+      ],
+      "expected_result": [
+        "all exit codes=0",
+        "pause.status=paused",
+        "pause.current_phase=paused",
+        "pause.exact_next_action=resume mission before continuation",
+        "resume.status=active",
+        "status.status=active"
+      ],
+      "expected_error": "",
+      "expected_state": [
+        "${home}/missions/${mission_id}.json status=active",
+        "route history contains mission pause boundary"
+      ],
+      "source_paths": [
+        "internal/mission/cli.go",
+        "internal/mission/continuation_lifecycle_test.go",
+        "internal/mission/mission_test.go"
+      ],
+      "fixture_path": "vectors/lifecycle-pause-resume.json",
+      "bytes": 212,
+      "digest": "sha256:6606783a0cf12a5dd606e36e49eb03d97fe22dcd3f7e71f64c40cb2e5611434a"
     },
     {
       "id": "mission-record-contract",
-      "surfaces": [
-        "strict_contracts"
+      "operation": "validate_contract_accepted",
+      "arguments": [
+        [
+          "validate",
+          "contract",
+          "--path",
+          "${fixture}"
+        ]
       ],
-      "expected_disposition": "accepted",
-      "source_path": "examples/valid/mission-record.json",
+      "setup_state": [
+        "${fixture}=vectors/mission-record.json"
+      ],
+      "expected_result": [
+        "exit code=0",
+        "stdout.schema=ao.mission.contract-validation.v0.1",
+        "stdout.status=ready",
+        "stdout.contract=ao.mission.record.v0.1",
+        "stdout.blockers=[]",
+        "stdout.read_only=true",
+        "stdout.executes_work=false",
+        "stdout.approves_work=false",
+        "stdout.mutates_repositories=false"
+      ],
+      "expected_error": "",
+      "expected_state": [
+        "input fixture unchanged"
+      ],
+      "source_paths": [
+        "internal/mission/cli.go",
+        "internal/mission/validate.go",
+        "internal/mission/workflow_contract_strict_test.go"
+      ],
       "fixture_path": "vectors/mission-record.json",
       "bytes": 371,
       "digest": "sha256:a0c4452d31541ec22ef38f0dc0b705e1ae5bdf24eeee9b25d8a37af3ae111bcc"
     },
     {
-      "id": "public-safety-readback",
-      "surfaces": [
-        "readbacks",
-        "public_safety"
+      "id": "public-safety-safe",
+      "operation": "public_safety_accepted",
+      "arguments": [
+        [
+          "scripts/public-safety-scan.py",
+          "--root",
+          "${scan_root}",
+          "safe.json"
+        ]
       ],
-      "expected_disposition": "accepted",
-      "source_path": "testdata/production-readiness/ao-mission-atlas-wave-import-v01/sentinel-public-safety-scan.json",
-      "fixture_path": "vectors/public-safety.json",
-      "bytes": 924,
-      "digest": "sha256:86354bf3d33e5a82aec782a793b99cb8c7150329989e9236d238a739762e4828"
+      "setup_state": [
+        "${scan_root}/safe.json=vectors/public-safety-safe.json"
+      ],
+      "expected_result": [
+        "exit code=0",
+        "stdout=",
+        "stderr="
+      ],
+      "expected_error": "",
+      "expected_state": [
+        "scan root unchanged"
+      ],
+      "source_paths": [
+        "scripts/public-safety-scan.py",
+        "scripts/test_public_safety_scan.py"
+      ],
+      "fixture_path": "vectors/public-safety-safe.json",
+      "bytes": 137,
+      "digest": "sha256:86f8e2eb7b6b94c39f45deae7b563fd962f9c8a2b5f8e2f61f314663adeda626"
+    },
+    {
+      "id": "public-safety-symlink",
+      "operation": "public_safety_rejected",
+      "arguments": [
+        [
+          "scripts/public-safety-scan.py",
+          "--root",
+          "${scan_root}",
+          "."
+        ]
+      ],
+      "setup_state": [
+        "create ${scan_root}/outside.txt as regular file",
+        "create ${scan_root}/escape symlink to outside.txt using vectors/public-safety-unsafe.json"
+      ],
+      "expected_result": [
+        "exit code=1",
+        "stdout=",
+        "stderr contains public safety finding: symlink escape:0"
+      ],
+      "expected_error": "public safety finding: symlink escape:0",
+      "expected_state": [
+        "outside.txt unchanged",
+        "escape remains a symlink"
+      ],
+      "source_paths": [
+        "scripts/public-safety-scan.py",
+        "scripts/test_public_safety_scan.py"
+      ],
+      "fixture_path": "vectors/public-safety-unsafe.json",
+      "bytes": 71,
+      "digest": "sha256:472b97bed5590ecef863afb71a6086b1ab228d57f2130faf50472a57e62ea258"
     }
   ],
-  "manifest_digest": "sha256:d224b7d18c0ee2999595ab2f4bd8137617ceb740af99366f4024fc7f4014793f"
+  "manifest_digest": "sha256:c82ae75a836c8a0c94686087a98dc2c5b7a525c59afcfa52fcbb7a2b1a3ed428"
 }

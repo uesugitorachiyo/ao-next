@@ -450,6 +450,11 @@ func BuildCommandStatus(r Record) CommandStatus {
 		copy := *r.Evidence.AONextCandidate
 		aoNextCandidate = &copy
 	}
+	var aoNextJournalProjection *AONextJournalProjection
+	if r.Evidence.AONextJournalProjection != nil {
+		copy := *r.Evidence.AONextJournalProjection
+		aoNextJournalProjection = &copy
+	}
 	var goalLease *GoalLease
 	if r.GoalLease != nil {
 		copy := *r.GoalLease
@@ -495,6 +500,7 @@ func BuildCommandStatus(r Record) CommandStatus {
 		MutatesRepositories:        false,
 		AtlasRecommendation:        atlasRecommendation,
 		AONextCandidate:            aoNextCandidate,
+		AONextJournalProjection:    aoNextJournalProjection,
 		Blockers:                   r.Blockers,
 		GeneratedAtUTC:             now(nil),
 	}

@@ -2722,3 +2722,38 @@ func markCorrelationTestMissionReady(t *testing.T, store Store, missionID string
 	}
 	return record
 }
+
+func TestStrictJSONTypeMatchesNullableUnion(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"null", nil, "null"},
+		{"integer-null", nil, "integer|null"},
+		{"string-null", nil, "string|null"},
+		{"object-null", nil, "object|null"},
+		{"integer", json.Number("7"), "integer|null"},
+		{"string", "value", "string|null"},
+		{"object", map[string]any{}, "object|null"},
+	} {
+		if !strictJSONTypeMatches(test.value, test.want) {
+			t.Fatalf("%s did not match %q", test.name, test.want)
+		}
+	}
+	for _, test := range []struct {
+		value any
+		want  string
+	}{
+		{[]any{}, "integer|null"},
+		{true, "integer|null"},
+		{json.Number("7.5"), "integer|null"},
+		{"value", "integer|null"},
+		{nil, ""},
+		{"value", "string|unsupported"},
+	} {
+		if strictJSONTypeMatches(test.value, test.want) {
+			t.Fatalf("value %#v unexpectedly matched %q", test.value, test.want)
+		}
+	}
+}

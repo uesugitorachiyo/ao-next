@@ -70,14 +70,11 @@ func ValidateContractFile(path string) (ContractValidation, error) {
 		result.Blockers = append(result.Blockers, "invalid JSON")
 		return result, err
 	}
-	schema, _ := doc["schema"].(string)
-	if schema == "" {
-		schema, _ = doc["contract_version"].(string)
-	}
-	if schema == "" {
+	schema, err := contractDiscriminator(doc)
+	if err != nil {
 		result.Status = "blocked"
-		result.Blockers = append(result.Blockers, "schema or contract_version is required")
-		return result, fmt.Errorf("schema or contract_version is required")
+		result.Blockers = append(result.Blockers, err.Error())
+		return result, err
 	}
 	result.Contract = schema
 	required, propertyTypes := contractRules(schema)
@@ -112,8 +109,36 @@ func ValidateContractFile(path string) (ContractValidation, error) {
 	return result, nil
 }
 
+func contractDiscriminator(doc map[string]any) (string, error) {
+	values := []string{
+		stringFromAny(doc["schema"]),
+		stringFromAny(doc["schema_version"]),
+		stringFromAny(doc["contract_version"]),
+	}
+	selected := ""
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if selected != "" && selected != value {
+			return "", fmt.Errorf("contract discriminator fields conflict")
+		}
+		selected = value
+	}
+	if selected == "" {
+		return "", fmt.Errorf("schema, schema_version, or contract_version is required")
+	}
+	return selected, nil
+}
+
 func validateIntrinsicCorrelationContract(body []byte, schema string) (bool, []string) {
 	switch schema {
+	case "ao.next.execution-journal-prefix.v1":
+		if _, err := parseAONextJournalPrefix(body); err != nil {
+			return true, []string{err.Error()}
+		}
+		return true, nil
 	case CorrelationChainSchema:
 		var chain CorrelationChain
 		if err := json.Unmarshal(body, &chain); err != nil {
@@ -315,6 +340,8 @@ func contractRules(schema string) ([]string, map[string]string) {
 
 func requiredFieldsForContract(schema string) []string {
 	switch schema {
+	case "ao.next.execution-journal-prefix.v1":
+		return nil
 	case CorrelationChainSchema:
 		return []string{
 			"schema", "mission_id", "correlation_id", "entries",
@@ -359,6 +386,8 @@ func requiredFieldsForContract(schema string) []string {
 func propertyTypesForContract(schema string) map[string]string {
 	commonString := map[string]string{"schema": "string"}
 	switch schema {
+	case "ao.next.execution-journal-prefix.v1":
+		return nil
 	case CorrelationChainSchema:
 		return map[string]string{
 			"schema": "string", "mission_id": "string", "correlation_id": "string",

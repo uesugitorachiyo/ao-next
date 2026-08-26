@@ -1618,7 +1618,7 @@ func runCLICommand(s Store, args []string, stdout io.Writer) error {
 		return errors.New("validate requires contract --path <file>")
 	case "import":
 		if len(args) < 2 {
-			return errors.New("import requires correlation-evidence, blueprint-authorization, atlas-workgraph, atlas-recommendation-readback, atlas-final-synthesis-readback, foundry-run-link, foundry-final-rollup, scheduler-readback, scheduler-recovery-readback, ledger-compaction-readback, or ao-next-terminal")
+			return errors.New("import requires correlation-evidence, blueprint-authorization, atlas-workgraph, atlas-recommendation-readback, atlas-final-synthesis-readback, foundry-run-link, foundry-final-rollup, scheduler-readback, scheduler-recovery-readback, ledger-compaction-readback, ao-next-terminal, or ao-next-journal-prefix")
 		}
 		fs := flag.NewFlagSet("import "+args[1], flag.ContinueOnError)
 		id := fs.String("mission", "", "")

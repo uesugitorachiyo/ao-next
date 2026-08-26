@@ -364,6 +364,34 @@ func readObjectiveWorkflowFixtureForStrictTest(t *testing.T) []byte {
 	return body
 }
 
+func TestValidateContractAcceptsRepositoryDiscriminatorsAndRejectsConflict(t *testing.T) {
+	prefix := readJournalPrefixFixture(t, "valid-prepared.json")
+	path := filepath.Join(t.TempDir(), "prefix.json")
+	if err := os.WriteFile(path, prefix, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ValidateContractFile(path)
+	if err != nil || result.Contract != "ao.next.execution-journal-prefix.v1" {
+		t.Fatalf("schema_version validation: result=%#v err=%v", result, err)
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal(prefix, &value); err != nil {
+		t.Fatal(err)
+	}
+	value["schema"] = "ao.next.contradictory.v1"
+	conflict, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, conflict, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateContractFile(path); err == nil {
+		t.Fatal("conflicting contract discriminators passed")
+	}
+}
+
 func decodeObjectForStrictTest(t *testing.T, body []byte) map[string]any {
 	t.Helper()
 	var document map[string]any

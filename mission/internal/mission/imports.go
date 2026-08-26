@@ -71,6 +71,9 @@ func importArtifact(
 	missionID, kind, path, chainPath, correlationRole string,
 	neutral bool,
 ) (ImportReadback, error) {
+	if kind == aoNextJournalPrefixImportKind && chainPath != "" {
+		return ImportReadback{}, fmt.Errorf("AO Next journal prefix import does not accept a correlation chain")
+	}
 	var existing Record
 	var body []byte
 	var err error
@@ -79,9 +82,12 @@ func importArtifact(
 	var correlatedBinding *CorrelatedImportBinding
 	chainDigest := ""
 	if chainPath == "" {
-		if kind == aoNextCandidateImportKind {
+		switch kind {
+		case aoNextCandidateImportKind:
 			body, err = readBoundedRegularFile(path, aoNextCandidateInputLimit)
-		} else {
+		case aoNextJournalPrefixImportKind:
+			refPath, body, err = readBoundedAbsoluteRegularFileOutsideRoot(path, s.Root, aoNextJournalPrefixInputLimit)
+		default:
 			body, err = os.ReadFile(path)
 		}
 	} else {
@@ -131,7 +137,7 @@ func importArtifact(
 	if err != nil {
 		return ImportReadback{}, err
 	}
-	if kind != aoNextCandidateImportKind {
+	if kind != aoNextCandidateImportKind && kind != aoNextJournalPrefixImportKind {
 		if err := ValidatePublicSafeText(string(body)); err != nil {
 			return ImportReadback{}, err
 		}
@@ -151,6 +157,26 @@ func importArtifact(
 		}
 		aoNextProjection = &projection
 	}
+	var aoNextJournalProjection *AONextJournalProjection
+	var aoNextJournalRunID string
+	if kind == aoNextJournalPrefixImportKind {
+		prefix, parseErr := parseAONextJournalPrefix(body)
+		if parseErr != nil {
+			return ImportReadback{}, parseErr
+		}
+		status, projectErr := projectAONextJournalPrefix(prefix)
+		if projectErr != nil {
+			return ImportReadback{}, projectErr
+		}
+		aoNextJournalRunID = prefix.RunID
+		aoNextJournalProjection = &AONextJournalProjection{
+			Schema:       "ao.mission.ao-next-journal-projection.v1",
+			RunID:        prefix.RunID,
+			PrefixDigest: prefix.PrefixDigest,
+			Status:       status,
+			ReadOnly:     true,
+		}
+	}
 	if isMissionEvidenceReadback(kind) {
 		for _, field := range []string{"safe_to_execute", "schedules_work", "executes_work", "approves_work", "mutates_repositories", "provider_calls", "release_or_publish", "credential_use", "direct_main_mutation", "concurrent_mutation", "claims_authority_advance"} {
 			if boolFromAny(doc[field]) {
@@ -164,7 +190,31 @@ func importArtifact(
 			return ImportReadback{}, err
 		}
 	}
-	if existing.CorrelationID != "" && chainReference == nil {
+	if kind == aoNextJournalPrefixImportKind && existing.Evidence.AONextJournalProjection != nil {
+		current := existing.Evidence.AONextJournalProjection
+		candidateDigest := digestBytes(body)
+		if current.RunID == aoNextJournalRunID && current.ArtifactDigest != candidateDigest {
+			return ImportReadback{}, fmt.Errorf("AO Next journal run already bound to a different digest")
+		}
+		if current.ArtifactDigest == candidateDigest {
+			for _, existingRef := range existing.ArtifactRefs {
+				if existingRef.Kind == kind && existingRef.Digest == candidateDigest {
+					return ImportReadback{
+						Schema:          "ao.mission.import-readback.v0.1",
+						MissionID:       existing.MissionID,
+						CorrelationID:   existing.CorrelationID,
+						Kind:            kind,
+						Status:          "recorded",
+						Artifact:        existingRef,
+						ExactNextAction: existing.ExactNextAction,
+						GeneratedAtUTC:  now(nil),
+					}, nil
+				}
+			}
+			return ImportReadback{}, fmt.Errorf("AO Next journal projection is missing its retained artifact reference")
+		}
+	}
+	if existing.CorrelationID != "" && chainReference == nil && kind != aoNextJournalPrefixImportKind {
 		correlationID := stringFromAny(doc["correlation_id"])
 		if correlationID == "" {
 			return ImportReadback{}, fmt.Errorf("%s correlation_id is required for correlated mission", kind)
@@ -199,6 +249,14 @@ func importArtifact(
 			}
 			if rec.Evidence.AONextCandidate.RunID == aoNextProjection.RunID {
 				return fmt.Errorf("AO Next candidate run already bound to a different digest")
+			}
+		}
+		if kind == aoNextJournalPrefixImportKind && rec.Evidence.AONextJournalProjection != nil {
+			if rec.Evidence.AONextJournalProjection.ArtifactDigest == ref.Digest {
+				return nil
+			}
+			if rec.Evidence.AONextJournalProjection.RunID == aoNextJournalRunID {
+				return fmt.Errorf("AO Next journal run already bound to a different digest")
 			}
 		}
 		for _, existingRef := range rec.ArtifactRefs {
@@ -407,6 +465,10 @@ func importArtifact(
 			projection.OriginalRef = ref.Ref
 			projection.GeneratedAtUTC = now(nil)
 			rec.Evidence.AONextCandidate = &projection
+		case kind == aoNextJournalPrefixImportKind:
+			projection := *aoNextJournalProjection
+			projection.ArtifactDigest = ref.Digest
+			rec.Evidence.AONextJournalProjection = &projection
 		default:
 			return fmt.Errorf("unsupported import kind %q", kind)
 		}
@@ -438,7 +500,7 @@ func importArtifact(
 
 func isMissionEvidenceReadback(kind string) bool {
 	switch kind {
-	case "atlas-recommendation-readback", "atlas-final-synthesis-readback", "scheduler-readback", "scheduler-recovery-readback", "ledger-compaction-readback", aoNextCandidateImportKind:
+	case "atlas-recommendation-readback", "atlas-final-synthesis-readback", "scheduler-readback", "scheduler-recovery-readback", "ledger-compaction-readback", aoNextCandidateImportKind, aoNextJournalPrefixImportKind:
 		return true
 	default:
 		return false

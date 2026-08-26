@@ -1281,29 +1281,45 @@ func decodeStrictJSONObject(
 }
 
 func strictJSONTypeMatches(value any, want string) bool {
-	switch want {
-	case "string":
-		_, ok := value.(string)
-		return ok
-	case "boolean":
-		_, ok := value.(bool)
-		return ok
-	case "object":
-		_, ok := value.(map[string]any)
-		return ok
-	case "array":
-		_, ok := value.([]any)
-		return ok
-	case "integer":
-		number, ok := value.(json.Number)
-		if !ok {
+	matched := false
+	for _, allowed := range strings.Split(want, "|") {
+		switch allowed {
+		case "null":
+			if value == nil {
+				matched = true
+			}
+		case "string":
+			_, ok := value.(string)
+			if ok {
+				matched = true
+			}
+		case "boolean":
+			_, ok := value.(bool)
+			if ok {
+				matched = true
+			}
+		case "object":
+			_, ok := value.(map[string]any)
+			if ok {
+				matched = true
+			}
+		case "array":
+			_, ok := value.([]any)
+			if ok {
+				matched = true
+			}
+		case "integer":
+			number, ok := value.(json.Number)
+			if ok {
+				if _, err := number.Int64(); err == nil {
+					matched = true
+				}
+			}
+		default:
 			return false
 		}
-		_, err := number.Int64()
-		return err == nil
-	default:
-		return false
 	}
+	return matched
 }
 
 func decodeExactJSON(body []byte) (any, error) {

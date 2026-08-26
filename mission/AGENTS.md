@@ -22,6 +22,7 @@ Mission consumes Blueprint authorization, Atlas workgraphs and terminal indexes,
 - Canonical terminal indexes are read-only reconciliation artifacts. Verify their schema, index, source, and state digests independently; never turn missing historical terminal evidence into a live objective or continuation request.
 - Keep durable source status distinct from read-only terminal projection status on every operator surface. A projected effective status may be terminal while the stored Mission record remains unchanged; expose both facts and never treat projection as mutation or authority.
 - Retain an imported `ao.next.live-run-record.v1` as an AO Next candidate projection only. Preserve Mission status, route, phase, blockers, and exact next action; expose the candidate separately in Mission and Command readbacks without fabricating a canonical terminal index or AO2 artifact.
+- Import `ao.next.execution-journal-prefix.v1` only from a clean absolute regular-file locator outside the Mission state root. Retain exact bytes and the accepted locator, reject same-run digest conflicts before retention, and expose the result as the separate read-only `ao_next_journal_projection`. Never scan Engine state or copy Engine recovery and lifecycle execution into Mission.
 - Use the active AO Next dual-process Stage 1-5 handoff for cross-stage continuation after verified `ENGINE_RECOVERY_READY_FOR_MISSION_MIGRATION`. Advance one stage only after its reviewed merged terminal evidence verifies. Mission never turns a stage readback into provider, release, deployment, publication, adoption, or AO2-retirement authority.
 - The AO Next repository owns the `ao-next-mission` Stage 1 candidate command and the temporary `ao-mission` compatibility command. Both commands must call the imported `mission.Run` entry point with the same argument vector; do not rename the imported Go module or fork Mission behavior.
 - Keep the Go Mission and Rust Engine as separate processes, state roots, and failure domains. Use separate Mission state roots when comparing the two command names. Repository co-location grants no discovery, state access, provider, effect, publication, release, deployment, promotion, adoption, or AO2-retirement authority.
@@ -34,6 +35,7 @@ Mission consumes Blueprint authorization, Atlas workgraphs and terminal indexes,
 
 - Start with the strict contract and its consumer. Validate regular-file containment, bounded sizes, duplicate keys, identities, digests, and authority flags before changing mission state.
 - Keep imports idempotent by exact digest and fail closed on drift or semantic contradiction. Preserve the original locator and retained artifact bytes for audit rather than normalizing away conflicts; legacy v0.1 manifests remain source-reference based.
+- Decode AO Next journal prefixes with the duplicate-aware exact JSON decoder, explicit nested field whitelists, nullable token unions, typed unknown-field denial, and EOF checks. Keep projection pure and leave Mission status, route, phase, blockers, next action, workgraph, and the AO Next candidate projection unchanged.
 - Keep the Python repair product gate read-only. It may validate sealed repair evidence and derive distinct technical, governed-qualification, and release decisions, but it must never execute a repair, approve work, mutate a repository, or turn a passing decision into authority.
 - Bind Atlas workgraph continuation to the first ready node's validated identity. Reject conflicting or unsafe ready-node identifiers; use the legacy generic handoff only when the first ready node has no identity.
 - Treat an explicit zero-minute lease minimum as useful-work mode: preserve zero, enforce the hard maximum, and never require elapsed-time padding. Omission may preserve an existing historical minimum.
@@ -46,6 +48,7 @@ Mission consumes Blueprint authorization, Atlas workgraphs and terminal indexes,
 ## Verification
 
 - Mission lifecycle, import, terminal-index, or readback changes: `go test ./internal/mission -count=1`.
+- AO Next journal-prefix changes: `go test ./internal/mission -run 'TestAONextJournal|TestStrictJSONTypeMatchesNullableUnion|TestValidateContractAcceptsRepositoryDiscriminators' -count=1` and `cargo test -p ao-next-core --test mission_exchange` from the repository root.
 - Public-safety scanner changes: `python3 scripts/test_public_safety_scan.py`.
 - Run `gofmt -d cmd internal`, `go test ./... -count=1`, `go vet ./...`, `go build ./cmd/ao-mission`, and `go build ./cmd/ao-next-mission` for the full Go gate.
 - Run `./scripts/production-readiness.sh` when contracts, fixtures, operator behavior, or readiness claims change. It is a local non-publishing gate.

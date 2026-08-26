@@ -284,6 +284,10 @@ class ReplayTests(unittest.TestCase):
         self.assertIn(f"          ref: {event_head}", native)
         self.assertIn(f"          EXPECTED_CANDIDATE_HEAD: {event_head}", native)
         self.assertIn('test "$observed_head" = "$EXPECTED_CANDIDATE_HEAD"', native)
+        self.assertIn(
+            'git -c core.autocrlf=false archive --format=tar --output="$archive" "$mission_commit"',
+            native,
+        )
         self.assertIn('"source_head": os.environ["EXPECTED_CANDIDATE_HEAD"]', native)
         self.assertIn(
             'value["candidate_source_head"] != os.environ["EXPECTED_CANDIDATE_HEAD"]',

@@ -442,6 +442,18 @@ func TestValidateContractAcceptsRepositoryDiscriminatorsAndRejectsConflict(t *te
 	}
 }
 
+func TestValidateContractMissingDiscriminatorPreservesCanonicalError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contract.json")
+	if err := os.WriteFile(path, []byte(`{"value":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ValidateContractFile(path)
+	want := "schema or contract_version is required"
+	if err == nil || err.Error() != want || len(result.Blockers) != 1 || result.Blockers[0] != want {
+		t.Fatalf("missing discriminator error = result=%#v err=%v, want %q", result, err, want)
+	}
+}
+
 func decodeObjectForStrictTest(t *testing.T, body []byte) map[string]any {
 	t.Helper()
 	var document map[string]any

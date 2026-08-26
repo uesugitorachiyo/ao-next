@@ -130,7 +130,7 @@ func contractDiscriminator(doc map[string]any) (string, error) {
 		selected = value
 	}
 	if selected == "" {
-		return "", fmt.Errorf("schema, schema_version, or contract_version is required")
+		return "", fmt.Errorf("schema or contract_version is required")
 	}
 	return selected, nil
 }

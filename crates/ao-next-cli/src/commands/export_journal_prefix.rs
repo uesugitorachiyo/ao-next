@@ -661,12 +661,12 @@ mod tests {
         use std::os::windows::ffi::OsStringExt as _;
 
         let path = std::path::PathBuf::from(OsString::from_wide(&[
-            b'C' as u16,
-            b':' as u16,
-            b'\\' as u16,
-            b'b' as u16,
+            u16::from(b'C'),
+            u16::from(b':'),
+            u16::from(b'\\'),
+            u16::from(b'b'),
             0,
-            b'd' as u16,
+            u16::from(b'd'),
         ]));
         assert!(clean_absolute_local(&path).is_err());
     }

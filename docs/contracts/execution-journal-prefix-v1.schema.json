@@ -355,6 +355,7 @@
       "items": {
         "$ref": "#/definitions/JournalEvent"
       },
+      "maxItems": 4096,
       "type": "array"
     },
     "events_digest": {
@@ -418,7 +419,12 @@
         "null"
       ]
     },
-    "terminal_record": true,
+    "terminal_record": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "worker_count": {
       "format": "uint32",
       "minimum": 0.0,
@@ -436,7 +442,9 @@
     "first_sequence",
     "grants_provider_access",
     "journal_identity",
+    "last_sequence",
     "mutates_repositories",
+    "preceding_prefix_digest",
     "prefix_digest",
     "publishes_artifacts",
     "releases",
@@ -444,6 +452,8 @@
     "run_id",
     "safe_to_execute",
     "schema_version",
+    "terminal_digest",
+    "terminal_record",
     "worker_count"
   ],
   "title": "ExecutionJournalPrefix",

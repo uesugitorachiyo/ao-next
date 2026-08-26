@@ -17,6 +17,7 @@ use ao_next_core::strict_json::{
     StrictJsonError, canonical_digest, canonical_json_bytes, decode_strict_json,
 };
 use chrono::{DateTime, Utc};
+use schemars::schema_for;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -347,12 +348,118 @@ fn checked_in_positive_vectors_verify() {
         "valid-prepared.json",
         "valid-provider-outcome-unknown.json",
         "valid-passed.json",
+        "valid-event-limit.json",
+        "valid-unicode-separators.json",
     ] {
         let prefix: ExecutionJournalPrefix =
             decode_strict_json(&fixture(name), 16 * 1024 * 1024).expect("strict prefix");
         verify_execution_journal_prefix(&prefix, &request)
             .unwrap_or_else(|error| panic!("verify {name}: {error}"));
     }
+}
+
+#[test]
+fn shared_boundary_vectors_require_nullable_keys() {
+    let bytes = fixture("valid-prepared.json");
+    let document: Value = serde_json::from_slice(&bytes).expect("prepared prefix document");
+    for field in [
+        "last_sequence",
+        "preceding_prefix_digest",
+        "terminal_digest",
+        "terminal_record",
+    ] {
+        let mut missing = document.clone();
+        missing
+            .as_object_mut()
+            .expect("prefix object")
+            .remove(field);
+        assert!(
+            decode_strict_json::<ExecutionJournalPrefix>(
+                &serde_json::to_vec(&missing).expect("missing-field bytes"),
+                MAXIMUM_PREFIX_BYTES,
+            )
+            .is_err(),
+            "missing nullable field {field} was accepted"
+        );
+    }
+}
+
+#[test]
+fn shared_event_limit_vector_accepts_4096_and_rejects_4097() {
+    let request: RunRequest =
+        decode_strict_json(&fixture("run-request.json"), 1024 * 1024).expect("strict request");
+    let boundary_bytes = fixture("valid-event-limit.json");
+    let mut boundary: ExecutionJournalPrefix =
+        decode_strict_json(&boundary_bytes, MAXIMUM_PREFIX_BYTES).expect("event-limit prefix");
+    assert_eq!(boundary.events.len(), 4096);
+    verify_execution_journal_prefix(&boundary, &request).expect("4096-event prefix");
+
+    boundary.events.push(JournalEvent {
+        schema_version: "ao.next.journal-event.v1".into(),
+        sequence: 4096,
+        kind: JournalEventKind::EffectCommitted {
+            effect_id: "effect-4096".into(),
+        },
+    });
+    boundary.last_sequence = Some(4096);
+    refresh_event_and_prefix_digests(&mut boundary);
+    let error = verify_execution_journal_prefix(&boundary, &request)
+        .expect_err("4097-event prefix was accepted");
+    assert!(error.to_string().contains("more than 4096 events"));
+}
+
+#[test]
+fn generated_schema_matches_the_shared_nullable_and_event_boundaries() {
+    let schema = serde_json::to_value(schema_for!(ExecutionJournalPrefix))
+        .expect("execution journal prefix schema");
+    let required = schema["required"].as_array().expect("required fields");
+    for field in [
+        "last_sequence",
+        "preceding_prefix_digest",
+        "terminal_digest",
+        "terminal_record",
+    ] {
+        assert!(
+            required.contains(&json!(field)),
+            "schema made {field} optional"
+        );
+    }
+    assert_eq!(schema["properties"]["events"]["maxItems"], json!(4096));
+    assert_eq!(
+        schema["properties"]["last_sequence"]["type"],
+        json!(["integer", "null"])
+    );
+    for field in ["preceding_prefix_digest", "terminal_digest"] {
+        assert_eq!(
+            schema["properties"][field]["type"],
+            json!(["string", "null"])
+        );
+    }
+    assert_eq!(
+        schema["properties"]["terminal_record"]["type"],
+        json!(["object", "null"])
+    );
+}
+
+#[test]
+fn rust_unicode_vector_is_canonical_and_preserves_literal_escape_text() {
+    let bytes = fixture("valid-unicode-separators.json");
+    let prefix: ExecutionJournalPrefix =
+        decode_strict_json(&bytes, MAXIMUM_PREFIX_BYTES).expect("Unicode prefix");
+    let expected = "rust\u{2028}line\u{2029}literal \\u2028 \\u2029";
+    assert!(matches!(
+        &prefix.events[0].kind,
+        JournalEventKind::EffectCommitted { effect_id } if effect_id == expected
+    ));
+    assert_eq!(
+        prefix.terminal_record.as_ref().expect("terminal record")["measurement"]["model_identifier"],
+        json!(expected)
+    );
+    assert_eq!(
+        bytes,
+        canonical_json_bytes(&prefix).expect("canonical prefix")
+    );
+    verify_execution_journal_prefix(&prefix, &request()).expect("Unicode prefix verification");
 }
 
 #[test]
@@ -462,6 +569,19 @@ fn strict_decode_rejects_oversized_trailing_and_wrong_typed_prefixes() {
         decode_strict_json::<ExecutionJournalPrefix>(wrong_casing.as_bytes(), 16 * 1024 * 1024,)
             .is_err()
     );
+    for terminal_record in [json!([]), json!("terminal"), json!(1), json!(false)] {
+        let mut wrong_terminal: Value =
+            serde_json::from_slice(&fixture("valid-prepared.json")).expect("prefix value");
+        wrong_terminal["terminal_record"] = terminal_record;
+        assert!(
+            decode_strict_json::<ExecutionJournalPrefix>(
+                &serde_json::to_vec(&wrong_terminal).expect("wrong terminal bytes"),
+                MAXIMUM_PREFIX_BYTES,
+            )
+            .is_err(),
+            "non-object terminal_record was decoded"
+        );
+    }
 }
 
 #[test]

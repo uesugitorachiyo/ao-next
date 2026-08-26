@@ -441,6 +441,57 @@ func TestAONextJournalPrefixRejectsExactJSONClasses(t *testing.T) {
 	}
 }
 
+func TestAONextJournalSharedBoundaryVectors(t *testing.T) {
+	prepared := journalTestDocument(t, readJournalPrefixFixture(t, "valid-prepared.json"))
+	for _, field := range []string{"last_sequence", "preceding_prefix_digest", "terminal_digest", "terminal_record"} {
+		t.Run("missing-"+field, func(t *testing.T) {
+			missing := journalTestDocument(t, journalTestJSON(t, prepared))
+			delete(missing, field)
+			if _, err := parseAONextJournalPrefix(journalTestJSON(t, missing)); err == nil ||
+				!strings.Contains(err.Error(), fmt.Sprintf("field %q is required", field)) {
+				t.Fatalf("missing nullable field error=%v", err)
+			}
+		})
+	}
+}
+
+func TestAONextJournalSharedEventLimitVector(t *testing.T) {
+	boundary := readJournalPrefixFixture(t, "valid-event-limit.json")
+	if _, err := parseAONextJournalPrefix(boundary); err != nil {
+		t.Fatalf("4096-event shared vector rejected: %v", err)
+	}
+	oversized := journalTestDocument(t, boundary)
+	events := oversized["events"].([]any)
+	events = append(events, map[string]any{
+		"schema_version": "ao.next.journal-event.v1",
+		"sequence":       json.Number("4096"),
+		"kind": map[string]any{
+			"kind": "effect_committed", "effect_id": "effect-4096",
+		},
+	})
+	oversized["events"] = events
+	oversized["last_sequence"] = json.Number("4096")
+	journalTestRefreshPrefix(t, oversized)
+	if _, err := parseAONextJournalPrefix(journalTestJSON(t, oversized)); err == nil ||
+		!strings.Contains(err.Error(), "more than 4096 events") {
+		t.Fatalf("4097-event boundary error=%v", err)
+	}
+}
+
+func TestAONextJournalRustUnicodeCanonicalVector(t *testing.T) {
+	prefix, err := parseAONextJournalPrefix(readJournalPrefixFixture(t, "valid-unicode-separators.json"))
+	if err != nil {
+		t.Fatalf("Rust Unicode vector rejected: %v", err)
+	}
+	want := "rust\u2028line\u2029literal \\u2028 \\u2029"
+	if got := prefix.Events[0].Kind.EffectID; got != want {
+		t.Fatalf("effect identity=%q want=%q", got, want)
+	}
+	if got := prefix.TerminalRecord.Measurement.ModelIdentifier; got != want {
+		t.Fatalf("model identifier=%q want=%q", got, want)
+	}
+}
+
 func TestAONextJournalPrefixRejectsNestedNativeEffectDrift(t *testing.T) {
 	document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
 	terminal := document["terminal_record"].(map[string]any)

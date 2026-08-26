@@ -3,8 +3,11 @@ use std::io::Write as _;
 use std::path::Path;
 
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
+use serde::de::Error as _;
 use serde::ser::SerializeTuple as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::contracts::{Digest, RunRequest};
@@ -19,6 +22,7 @@ use crate::strict_json::{
 
 const PREFIX_SCHEMA: &str = "ao.next.execution-journal-prefix.v1";
 const MAXIMUM_PREFIX_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_PREFIX_EVENTS: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,11 +38,20 @@ pub struct ExecutionJournalPrefix {
     pub worker_count: u32,
     pub dynamic_fanout: bool,
     pub first_sequence: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required, schema_with = "nullable_u64_schema")]
     pub last_sequence: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required, schema_with = "nullable_digest_schema")]
     pub preceding_prefix_digest: Option<Digest>,
     pub events_digest: Digest,
+    #[schemars(length(max = 4096))]
     pub events: Vec<JournalEvent>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required, schema_with = "nullable_digest_schema")]
     pub terminal_digest: Option<Digest>,
+    #[serde(deserialize_with = "deserialize_required_nullable_object")]
+    #[schemars(required, schema_with = "nullable_object_schema")]
     pub terminal_record: Option<serde_json::Value>,
     pub safe_to_execute: bool,
     pub executes_work: bool,
@@ -70,6 +83,8 @@ pub enum MissionExchangeError {
     PrecedingPrefixUnsupported,
     #[error("execution journal prefix event sequence is invalid")]
     EventSequenceInvalid,
+    #[error("execution journal prefix has more than {limit} events")]
+    EventLimitExceeded { actual: usize, limit: usize },
     #[error("execution journal prefix event digest mismatched")]
     EventsDigestMismatch,
     #[error("execution journal prefix terminal record is contradictory")]
@@ -90,6 +105,61 @@ impl From<std::io::Error> for MissionExchangeError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error.to_string())
     }
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+fn deserialize_required_nullable_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if value.as_ref().is_none_or(serde_json::Value::is_object) {
+        Ok(value)
+    } else {
+        Err(D::Error::custom(
+            "terminal_record must be an object or null",
+        ))
+    }
+}
+
+fn nullable_object_schema(_generator: &mut SchemaGenerator) -> Schema {
+    SchemaObject {
+        instance_type: Some(SingleOrVec::Vec(vec![
+            InstanceType::Object,
+            InstanceType::Null,
+        ])),
+        ..SchemaObject::default()
+    }
+    .into()
+}
+
+fn nullable_u64_schema(generator: &mut SchemaGenerator) -> Schema {
+    nullable_schema::<u64>(generator)
+}
+
+fn nullable_digest_schema(generator: &mut SchemaGenerator) -> Schema {
+    nullable_schema::<Digest>(generator)
+}
+
+fn nullable_schema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = T::json_schema(generator).into();
+    let mut types = match schema.instance_type.take() {
+        Some(SingleOrVec::Single(instance)) => vec![*instance],
+        Some(SingleOrVec::Vec(instances)) => instances,
+        None => Vec::new(),
+    };
+    types.push(InstanceType::Null);
+    schema.instance_type = Some(SingleOrVec::Vec(types));
+    schema.into()
 }
 
 #[allow(
@@ -278,6 +348,12 @@ pub fn verify_execution_journal_prefix(
     if prefix.worker_count != 1 || prefix.dynamic_fanout {
         return Err(MissionExchangeError::WorkerBoundary);
     }
+    if prefix.events.len() > MAXIMUM_PREFIX_EVENTS {
+        return Err(MissionExchangeError::EventLimitExceeded {
+            actual: prefix.events.len(),
+            limit: MAXIMUM_PREFIX_EVENTS,
+        });
+    }
     for (name, enabled) in [
         ("safe_to_execute", prefix.safe_to_execute),
         ("executes_work", prefix.executes_work),
@@ -319,6 +395,13 @@ pub fn verify_execution_journal_prefix(
         JournalEventKind::TerminalPublished { record_digest } => Some(record_digest),
         _ => None,
     });
+    if prefix
+        .terminal_record
+        .as_ref()
+        .is_some_and(|record| !record.is_object())
+    {
+        return Err(MissionExchangeError::TerminalContradiction);
+    }
     match (
         terminal_event_digest,
         prefix.terminal_digest.as_ref(),

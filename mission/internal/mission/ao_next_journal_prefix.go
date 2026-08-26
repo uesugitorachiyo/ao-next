@@ -774,7 +774,29 @@ func canonicalAONextJournalDigest(value any) (string, error) {
 	if err := encoder.Encode(normalizeAONextJournalNumbers(value)); err != nil {
 		return "", err
 	}
-	return digestBytes(bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))), nil
+	return digestBytes(rustCompatibleAONextJournalJSON(bytes.TrimSuffix(buffer.Bytes(), []byte("\n")))), nil
+}
+
+func rustCompatibleAONextJournalJSON(encoded []byte) []byte {
+	canonical := make([]byte, 0, len(encoded))
+	for index := 0; index < len(encoded); {
+		if index+6 <= len(encoded) && encoded[index] == '\\' && encoded[index+1] == 'u' &&
+			encoded[index+2] == '2' && encoded[index+3] == '0' && encoded[index+4] == '2' &&
+			(encoded[index+5] == '8' || encoded[index+5] == '9') {
+			precedingSlashes := 0
+			for previous := index; previous > 0 && encoded[previous-1] == '\\'; previous-- {
+				precedingSlashes++
+			}
+			if precedingSlashes%2 == 0 {
+				canonical = append(canonical, 0xe2, 0x80, 0xa8+encoded[index+5]-'8')
+				index += 6
+				continue
+			}
+		}
+		canonical = append(canonical, encoded[index])
+		index++
+	}
+	return canonical
 }
 
 func normalizeAONextJournalNumbers(value any) any {

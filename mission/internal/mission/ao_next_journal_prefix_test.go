@@ -492,6 +492,40 @@ func TestAONextJournalRustUnicodeCanonicalVector(t *testing.T) {
 	}
 }
 
+func TestRustCompatibleAONextJournalJSONEscapeParity(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"u2028-zero-preceding", `\u2028`, " "},
+		{"u2028-one-preceding", `\\u2028`, `\\u2028`},
+		{"u2028-two-preceding", `\\\u2028`, "\\\\ "},
+		{"u2028-three-preceding", `\\\\u2028`, `\\\\u2028`},
+		{"u2029-zero-preceding", `\u2029`, " "},
+		{"u2029-one-preceding", `\\u2029`, `\\u2029`},
+		{"u2029-two-preceding", `\\\u2029`, "\\\\ "},
+		{"u2029-three-preceding", `\\\\u2029`, `\\\\u2029`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := string(rustCompatibleAONextJournalJSON([]byte(test.input))); got != test.want {
+				t.Fatalf("canonical JSON=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalAONextJournalDigestRemovesEncoderNewline(t *testing.T) {
+	got, err := canonicalAONextJournalDigest("line\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := digestBytes([]byte(`"line\n"`)); got != want {
+		t.Fatalf("digest=%s want=%s", got, want)
+	}
+}
+
 func TestAONextJournalPrefixRejectsNestedNativeEffectDrift(t *testing.T) {
 	document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
 	terminal := document["terminal_record"].(map[string]any)

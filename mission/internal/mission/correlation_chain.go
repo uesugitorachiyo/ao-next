@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -1345,6 +1346,9 @@ func strictJSONTypeMatches(value any, want string) bool {
 }
 
 func decodeExactJSON(body []byte) (any, error) {
+	if err := validateExactJSONUnicode(body); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	value, err := decodeExactJSONValue(decoder, "$")
@@ -1359,6 +1363,52 @@ func decodeExactJSON(body []byte) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+func validateExactJSONUnicode(body []byte) error {
+	if !utf8.Valid(body) {
+		return errors.New("JSON contains invalid UTF-8")
+	}
+	inString := false
+	for index := 0; index < len(body); index++ {
+		switch body[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || index+1 >= len(body) {
+				continue
+			}
+			if body[index+1] != 'u' {
+				index++
+				continue
+			}
+			codepoint, ok := exactJSONUnicodeEscape(body, index)
+			if !ok {
+				return nil
+			}
+			switch {
+			case codepoint >= 0xd800 && codepoint <= 0xdbff:
+				low, ok := exactJSONUnicodeEscape(body, index+6)
+				if !ok || low < 0xdc00 || low > 0xdfff {
+					return fmt.Errorf("JSON string contains invalid Unicode surrogate escape at byte %d", index)
+				}
+				index += 11
+			case codepoint >= 0xdc00 && codepoint <= 0xdfff:
+				return fmt.Errorf("JSON string contains invalid Unicode surrogate escape at byte %d", index)
+			default:
+				index += 5
+			}
+		}
+	}
+	return nil
+}
+
+func exactJSONUnicodeEscape(body []byte, index int) (uint64, bool) {
+	if index+6 > len(body) || body[index] != '\\' || body[index+1] != 'u' {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(string(body[index+2:index+6]), 16, 16)
+	return value, err == nil
 }
 
 func decodeExactJSONValue(decoder *json.Decoder, path string) (any, error) {

@@ -3,6 +3,7 @@ package mission
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -397,6 +398,78 @@ func TestCorrelationChainExactJSONRejectsDuplicateCaseVariantAndNullFields(t *te
 				Path: path,
 			}}); err == nil {
 				t.Fatalf("%s was accepted", name)
+			}
+		})
+	}
+}
+
+func TestDecodeExactJSONRejectsRustIncompatibleUnicode(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{"invalid UTF-8", []byte("{\"value\":\"\xff\"}")},
+		{"lone high surrogate", []byte(`{"value":"\ud800"}`)},
+		{"lone low surrogate", []byte(`{"value":"\udc00"}`)},
+		{"high surrogate followed by non-low", []byte(`{"value":"\ud800\u0061"}`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeExactJSON(test.body); err == nil {
+				t.Fatalf("malformed Unicode was accepted: %q", test.body)
+			}
+		})
+	}
+}
+
+func TestDecodeExactJSONAcceptsRustCompatibleUnicode(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"valid surrogate pair", []byte(`{"value":"\ud83d\ude00"}`), "😀"},
+		{"escaped literal high surrogate", []byte(`{"value":"\\ud800"}`), `\ud800`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := decodeExactJSON(test.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := value.(map[string]any)["value"]; got != test.want {
+				t.Fatalf("value=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDecodeExactJSONPreservesUnicodeEscapeSlashParity(t *testing.T) {
+	tests := []struct {
+		precedingSlashes int
+		wantErr          bool
+		want             string
+	}{
+		{precedingSlashes: 0, wantErr: true},
+		{precedingSlashes: 1, want: `\ud800`},
+		{precedingSlashes: 2, wantErr: true},
+		{precedingSlashes: 3, want: `\\ud800`},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("preceding-slashes-%d", test.precedingSlashes), func(t *testing.T) {
+			body := []byte(`{"value":"` + strings.Repeat(`\`, test.precedingSlashes) + `\ud800"}`)
+			value, err := decodeExactJSON(body)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("real lone surrogate was accepted: %q", body)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := value.(map[string]any)["value"]; got != test.want {
+				t.Fatalf("value=%q want=%q", got, test.want)
 			}
 		})
 	}

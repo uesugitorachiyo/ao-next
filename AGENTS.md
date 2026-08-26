@@ -73,6 +73,22 @@ cargo build --workspace --release
 git diff --check
 ```
 
+Windows PowerShell 5.1 equivalents for the root Rust verification sequence
+are:
+
+```powershell
+cargo fmt --check
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo test --workspace
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo clippy --workspace --all-targets -- -D warnings
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo build --workspace --release
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git diff --check
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
 When `mission/` exists, also run:
 
 ```sh
@@ -82,6 +98,30 @@ When `mission/` exists, also run:
 (cd mission && go build ./cmd/ao-mission)
 (cd mission && go build ./cmd/ao-next-mission)
 (cd mission && python3 scripts/test_public_safety_scan.py)
+```
+
+On Windows PowerShell 5.1, use the same Mission checks without changing the
+caller location:
+
+```powershell
+Push-Location mission
+try {
+    gofmt -d cmd internal
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go test ./... -count=1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go vet ./...
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go build ./cmd/ao-mission
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go build ./cmd/ao-next-mission
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    py -3 scripts/test_public_safety_scan.py
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+finally {
+    Pop-Location
+}
 ```
 
 Run schema drift, deterministic replay, recovery, Mission compatibility, and independent evidence-manifest checks when their surfaces change. Record skipped, unavailable, networked, credentialed, or failed checks explicitly.

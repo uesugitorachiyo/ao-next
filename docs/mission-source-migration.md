@@ -51,6 +51,22 @@ git read-tree --prefix=mission/ -u \
 git commit -m "feat: import AO Mission source history"
 ```
 
+Windows contributors can perform the same import in Windows PowerShell 5.1:
+
+```powershell
+$AoMissionRepository = 'https://github.com/uesugitorachiyo/ao-mission.git'
+git remote add ao-mission-source $AoMissionRepository
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git fetch --no-tags ao-mission-source 05567fdd7c3fc64814ca4122b3f431d4ed9aaded
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git merge -s ours --no-commit --allow-unrelated-histories 05567fdd7c3fc64814ca4122b3f431d4ed9aaded
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git read-tree --prefix=mission/ -u 05567fdd7c3fc64814ca4122b3f431d4ed9aaded
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git commit -m 'feat: import AO Mission source history'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
 Preconditions are the exact AO Next source parent, the canonical Mission commit
 above, no existing `mission/` entry, and a verified compatibility corpus.
 
@@ -67,6 +83,33 @@ test "$(git rev-parse HEAD:mission)" = \
   "$(git -C "$AO_MISSION_CHECKOUT" rev-parse 'HEAD^{tree}')"
 ```
 
+Use the selected pre-import AO Next commit in `$ExpectedAoNextParent`; the
+following Windows PowerShell 5.1 checks fail on a command error, non-merge,
+wrong parent, missing Mission ancestry, or a different imported tree:
+
+```powershell
+$ExpectedAoNextParent = '<exact selected AO Next parent>'
+$AoMissionCheckout = 'C:\absolute\path\to\clean\ao-mission'
+$ExpectedMissionCommit = '05567fdd7c3fc64814ca4122b3f431d4ed9aaded'
+$Parents = git show -s --format=%P HEAD
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$ParentIds = $Parents -split ' '
+if ($ParentIds.Count -ne 2 -or $ParentIds[0] -ne $ExpectedAoNextParent -or $ParentIds[1] -ne $ExpectedMissionCommit) {
+    Write-Error 'HEAD does not have the required import parents.'
+    exit 1
+}
+git merge-base --is-ancestor $ExpectedMissionCommit HEAD
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$ImportedTree = git rev-parse HEAD:mission
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$MissionTree = git -C $AoMissionCheckout rev-parse 'HEAD^{tree}'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($ImportedTree -ne $MissionTree) {
+    Write-Error 'The imported mission tree does not equal the canonical Mission tree.'
+    exit 1
+}
+```
+
 This preserves every canonical Mission commit ID and parent edge. Git history
 before the merge remains at its original paths; the merge places the exact
 source tree under `mission/` without rewriting that history.
@@ -75,6 +118,14 @@ Rollback uses a normal first-parent revert of the exact import merge:
 
 ```sh
 git revert -m 1 "$IMPORT_COMMIT"
+```
+
+The Windows PowerShell 5.1 equivalent is:
+
+```powershell
+$ImportCommit = '<exact retained two-parent import merge>'
+git revert -m 1 $ImportCommit
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 `IMPORT_COMMIT` is the exact retained two-parent import merge. The revert

@@ -3,13 +3,20 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tests" / "mission-migration" / "replay.py"
+MISSION_SOURCE_HEAD = "05567fdd7c3fc64814ca4122b3f431d4ed9aaded"
+CANONICAL_ARCHIVE_COMMAND = (
+    'git -c core.autocrlf=input archive --format=tar '
+    '--output="$archive" "$mission_commit"'
+)
 
 
 def load_module():
@@ -17,6 +24,16 @@ def load_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def native_archive_commands(workflow):
+    native = workflow.split("  native:\n", 1)[1]
+    return [
+        line.strip()
+        for line in native.splitlines()
+        if line.lstrip().startswith("git ")
+        and " archive " in f" {line.strip()} "
+    ]
 
 
 class ReplayTests(unittest.TestCase):
@@ -284,15 +301,51 @@ class ReplayTests(unittest.TestCase):
         self.assertIn(f"          ref: {event_head}", native)
         self.assertIn(f"          EXPECTED_CANDIDATE_HEAD: {event_head}", native)
         self.assertIn('test "$observed_head" = "$EXPECTED_CANDIDATE_HEAD"', native)
-        self.assertIn(
-            'git -c core.autocrlf=false archive --format=tar --output="$archive" "$mission_commit"',
-            native,
-        )
+        marker = "      - name: Extract canonical Mission reference\n"
+        self.assertEqual(native.count(marker), 1)
+        reference_step = native.split(marker, 1)[1].split("\n      - name:", 1)[0]
+        self.assertEqual(native_archive_commands(workflow), [CANONICAL_ARCHIVE_COMMAND])
+        self.assertIn(f"          {CANONICAL_ARCHIVE_COMMAND}\n", reference_step)
         self.assertIn('"source_head": os.environ["EXPECTED_CANDIDATE_HEAD"]', native)
         self.assertIn(
             'value["candidate_source_head"] != os.environ["EXPECTED_CANDIDATE_HEAD"]',
             native,
         )
+
+    def test_native_workflow_archive_matches_git_blob_with_hostile_core_eol(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        commands = native_archive_commands(workflow)
+        self.assertEqual(len(commands), 1)
+        expected = subprocess.run(
+            ["git", "show", f"{MISSION_SOURCE_HEAD}:.gitattributes"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        hostile_environment = os.environ.copy()
+        hostile_environment.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="core.eol",
+            GIT_CONFIG_VALUE_0="crlf",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "mission.tar"
+            arguments = [
+                f"--output={archive}" if argument == "--output=$archive" else
+                MISSION_SOURCE_HEAD if argument == "$mission_commit" else argument
+                for argument in shlex.split(commands[0])
+            ]
+            subprocess.run(
+                arguments,
+                cwd=ROOT,
+                env=hostile_environment,
+                check=True,
+                capture_output=True,
+            )
+            with tarfile.open(archive, "r:") as source:
+                member = source.extractfile(".gitattributes")
+                self.assertIsNotNone(member)
+                self.assertEqual(member.read(), expected)
 
 
 if __name__ == "__main__":

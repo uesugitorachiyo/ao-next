@@ -108,7 +108,7 @@ jobs:
           git merge-base --is-ancestor "$mission_commit" HEAD
           archive="$RUNNER_TEMP/ao-mission-reference.tar"
           reference_root="$RUNNER_TEMP/AO Mission reference"
-          git -c core.autocrlf=false archive --format=tar --output="$archive" "$mission_commit"
+          git -c core.autocrlf=input archive --format=tar --output="$archive" "$mission_commit"
           python3 - "$archive" "$reference_root" <<'PY'
           import pathlib
           import sys

@@ -5,6 +5,7 @@ pub mod effects;
 pub mod engine;
 pub mod evidence;
 pub mod mission;
+pub mod mission_exchange;
 pub mod policy;
 pub mod recovery;
 pub mod strict_json;

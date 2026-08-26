@@ -366,6 +366,12 @@ fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycl
     })
 }
 
+pub(crate) fn validate_execution_prefix_lifecycle(
+    events: &[JournalEvent],
+) -> Result<(), RecoveryError> {
+    validate_journal_lifecycle(events).map(|_| ())
+}
+
 fn require_provider_ready(state: &ProviderJournalState) -> Result<(), RecoveryError> {
     if state.prepared_run_digest.is_some() && state.adapter_turn_digest.is_none() {
         return Err(RecoveryError::EventSequenceInvalid);
@@ -617,6 +623,32 @@ impl CheckpointJournal {
         }
         self.require_bound_request(request)?;
         provider_state_from_events(&self.load_execution_events()?)
+    }
+
+    /// Reads one exact, already retained journal prefix without creating,
+    /// repairing, or appending any journal artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] unless this journal was opened existing-only
+    /// and its request identity, event lifecycle, paths, and terminal bytes are
+    /// unchanged and valid.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the task-owned read-only interface returns the exact identity, events, and terminal bytes"
+    )]
+    pub fn verified_execution_prefix(
+        &self,
+        request: &RunRequest,
+    ) -> Result<(CheckpointIdentity, Vec<JournalEvent>, Option<Vec<u8>>), RecoveryError> {
+        if !matches!(self.mode, JournalMode::ExistingOnly(_)) {
+            return Err(RecoveryError::EventSequenceInvalid);
+        }
+        self.require_bound_request(request)?;
+        let events = self.load_execution_events()?;
+        validate_journal_lifecycle(&events)?;
+        let terminal = self.terminal_record(&events)?.map(|(_, bytes, _)| bytes);
+        Ok((CheckpointIdentity::from_request(request)?, events, terminal))
     }
 
     /// Confirms that no provider attempt or effect is already durable.

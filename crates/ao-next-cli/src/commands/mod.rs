@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub mod campaign;
 pub mod evaluate;
+pub mod export_journal_prefix;
 pub mod inspect;
 pub mod instantiate_corpus;
 pub mod live;
@@ -31,6 +32,7 @@ enum Command {
     RunDirectBaseline(LiveRunArgs),
     PrepareLive(PrepareLiveArgs),
     RecoverLive(RecoverLiveArgs),
+    ExportJournalPrefix(ExportJournalPrefixArgs),
     PreflightLiveInput(PreflightLiveInputArgs),
     QualifyLiveCampaign(QualifyLiveCampaignArgs),
     QualifyRecovery(QualifyRecoveryArgs),
@@ -81,6 +83,16 @@ pub struct RecoverLiveArgs {
     pub trusted_corpus_digest: String,
     #[arg(long)]
     pub trusted_verifier_profile_digest: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportJournalPrefixArgs {
+    #[arg(long)]
+    pub journal_root: PathBuf,
+    #[arg(long)]
+    pub request: PathBuf,
+    #[arg(long)]
+    pub out: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -281,6 +293,7 @@ pub fn execute(cli: Cli) -> Result<CommandOutput, CommandFailure> {
         Command::RunDirectBaseline(args) => live::execute(&args, live::LiveVariant::N4),
         Command::PrepareLive(args) => live_prepare::execute(&args),
         Command::RecoverLive(args) => live_recover::execute(&args),
+        Command::ExportJournalPrefix(args) => export_journal_prefix::execute(&args),
         Command::PreflightLiveInput(args) => live::preflight(&args),
         Command::QualifyLiveCampaign(args) => campaign::execute(&args),
         Command::QualifyRecovery(args) => campaign::execute_recovery(&args),

@@ -13,8 +13,9 @@ use ao_next_core::contracts::{
     VerifierProfile, WorkspaceIdentity, n7_requested_write_scope_digest,
 };
 use ao_next_core::evidence::digest_bytes;
+use ao_next_core::mission_exchange::{ExecutionJournalPrefix, verify_execution_journal_prefix};
 use ao_next_core::recovery::CheckpointJournal;
-use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes};
+use ao_next_core::strict_json::{canonical_digest, canonical_json_bytes, decode_strict_json};
 use ao_next_core::verifier::{CommandVerifierEntry, CommandVerifierProfile};
 use ao_next_eval::comparison::ComparisonRequest;
 use ao_next_eval::corpus::{
@@ -3331,4 +3332,494 @@ fn evaluate_live_cli_requires_authority_and_reaches_only_live_decision_path() {
         serde_json::from_slice(&output.stdout).expect("offline comparison");
     assert_eq!(offline["decision"], "AO_NEXT_READY_FOR_LIVE_EVALUATION");
     assert!(offline["recovery_qualification_digest"].is_string());
+}
+
+struct ExportJournalFixture {
+    _root: TempDir,
+    request_path: PathBuf,
+    journal_root: PathBuf,
+    output_path: PathBuf,
+    request: RunRequest,
+}
+
+fn journal_prefix_fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/mission-migration/journal-prefix")
+        .join(name)
+}
+
+fn export_journal_fixture() -> ExportJournalFixture {
+    let root = TempDir::new().expect("temporary export root");
+    #[cfg(unix)]
+    let safe = std::fs::canonicalize(root.path())
+        .expect("canonical temporary export root")
+        .join("safe space 日本語");
+    #[cfg(not(unix))]
+    let safe = root.path().join("safe space 日本語");
+    std::fs::create_dir(&safe).expect("safe directory");
+    let request_bytes =
+        std::fs::read(journal_prefix_fixture_path("run-request.json")).expect("request fixture");
+    let request: RunRequest =
+        decode_strict_json(&request_bytes, 1024 * 1024).expect("strict request fixture");
+    let request_path = safe.join("run request.json");
+    std::fs::write(&request_path, request_bytes).expect("request file");
+    let journal_root = safe.join("journal root");
+    let journal = CheckpointJournal::new(&journal_root, 16 * 1024 * 1024).expect("journal root");
+    journal.bind_request(&request).expect("request binding");
+    std::fs::create_dir(journal_root.join("execution-events")).expect("event directory");
+    ExportJournalFixture {
+        output_path: safe.join("prefix output.json"),
+        request_path,
+        journal_root,
+        request,
+        _root: root,
+    }
+}
+
+fn run_export_journal_prefix(request: &Path, journal: &Path, output: &Path) -> Output {
+    run(&[
+        "export-journal-prefix",
+        "--journal-root",
+        journal.to_str().expect("journal path"),
+        "--request",
+        request.to_str().expect("request path"),
+        "--out",
+        output.to_str().expect("output path"),
+    ])
+}
+
+fn snapshot_export_journal(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::<(PathBuf, Option<Vec<u8>>)>::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("snapshot directory") {
+            let path = entry.expect("snapshot entry").path();
+            if path.is_dir() {
+                files.push((
+                    path.strip_prefix(root).expect("relative snapshot").into(),
+                    None,
+                ));
+                pending.push(path);
+            } else {
+                files.push((
+                    path.strip_prefix(root).expect("relative snapshot").into(),
+                    Some(std::fs::read(&path).expect("snapshot file")),
+                ));
+            }
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+#[test]
+fn export_journal_prefix_is_provider_free_deterministic_and_create_only() {
+    let fixture = export_journal_fixture();
+    let journal_before = snapshot_export_journal(&fixture.journal_root);
+    let output = run_export_journal_prefix(
+        &fixture.request_path,
+        &fixture.journal_root,
+        &fixture.output_path,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let readback: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("export readback");
+    assert_eq!(
+        readback["schema_version"],
+        "ao.next.journal-prefix-export-readback.v1"
+    );
+    assert_eq!(readback["run_id"], fixture.request.run_id);
+    assert_eq!(readback["event_count"], 0);
+    assert_eq!(readback["safe_to_execute"], false);
+    assert_eq!(readback["executes_work"], false);
+    assert_eq!(readback["approves_work"], false);
+    let prefix_bytes = std::fs::read(&fixture.output_path).expect("prefix output");
+    let prefix: ExecutionJournalPrefix =
+        decode_strict_json(&prefix_bytes, 16 * 1024 * 1024).expect("strict prefix output");
+    verify_execution_journal_prefix(&prefix, &fixture.request).expect("verified prefix output");
+    assert_eq!(
+        prefix_bytes,
+        canonical_json_bytes(&prefix).expect("canonical prefix bytes")
+    );
+    assert_eq!(
+        snapshot_export_journal(&fixture.journal_root),
+        journal_before,
+        "export mutated the journal"
+    );
+
+    let unchanged = prefix_bytes.clone();
+    let repeated = run_export_journal_prefix(
+        &fixture.request_path,
+        &fixture.journal_root,
+        &fixture.output_path,
+    );
+    assert_json_error(&repeated, 3, "invalid_input");
+    assert_eq!(
+        std::fs::read(&fixture.output_path).expect("unchanged output"),
+        unchanged
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the locator table keeps every independent trust-boundary class explicit"
+)]
+fn export_journal_prefix_rejects_changed_request_oversize_and_unsafe_locators() {
+    let fixture = export_journal_fixture();
+    let mut changed = fixture.request.clone();
+    changed.objective.push_str(" drift");
+    write_json(&fixture.request_path, &changed);
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        7,
+        "evidence_failure",
+    );
+
+    let fixture = export_journal_fixture();
+    std::fs::write(&fixture.request_path, vec![b' '; 16 * 1024 * 1024 + 1])
+        .expect("oversized input");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        3,
+        "invalid_input",
+    );
+
+    let fixture = export_journal_fixture();
+    let parent = fixture.request_path.parent().expect("request parent");
+    let unsafe_cases = [
+        (
+            PathBuf::from("relative-request.json"),
+            fixture.journal_root.clone(),
+            fixture.output_path.clone(),
+        ),
+        (
+            fixture.request_path.clone(),
+            PathBuf::from("relative-journal"),
+            fixture.output_path.clone(),
+        ),
+        (
+            fixture.request_path.clone(),
+            fixture.journal_root.clone(),
+            PathBuf::from("relative-output.json"),
+        ),
+        (
+            PathBuf::from("C:drive-relative.json"),
+            fixture.journal_root.clone(),
+            fixture.output_path.clone(),
+        ),
+        (
+            PathBuf::from(r"\\server\share\request.json"),
+            fixture.journal_root.clone(),
+            fixture.output_path.clone(),
+        ),
+        (
+            PathBuf::from(r"\\?\C:\request.json"),
+            fixture.journal_root.clone(),
+            fixture.output_path.clone(),
+        ),
+        (
+            PathBuf::from(format!("{}/./run request.json", parent.display())),
+            fixture.journal_root.clone(),
+            fixture.output_path.clone(),
+        ),
+        (
+            PathBuf::from(format!("{}/child/../run request.json", parent.display())),
+            fixture.journal_root.clone(),
+            fixture.output_path.clone(),
+        ),
+        (
+            fixture.request_path.clone(),
+            fixture.journal_root.clone(),
+            fixture.journal_root.join("contained-prefix.json"),
+        ),
+    ];
+    for (index, (request, journal, output)) in unsafe_cases.into_iter().enumerate() {
+        let result = run_export_journal_prefix(&request, &journal, &output);
+        assert_eq!(
+            result.status.code(),
+            Some(3),
+            "unsafe case {index} succeeded: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_json_error(&result, 3, "invalid_input");
+    }
+
+    let missing_parent = parent.join("missing").join("prefix.json");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &missing_parent,
+        ),
+        3,
+        "invalid_input",
+    );
+    assert!(!missing_parent.exists());
+
+    let missing_journal = parent.join("missing-journal");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &missing_journal,
+            &fixture.output_path,
+        ),
+        3,
+        "invalid_input",
+    );
+    assert!(!missing_journal.exists());
+
+    let directory_input = parent.join("directory-input-all-platforms");
+    std::fs::create_dir(&directory_input).expect("directory input");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &directory_input,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        3,
+        "invalid_input",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn export_journal_prefix_rejects_links_nonregulars_and_unsafe_journal_leaves() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = export_journal_fixture();
+    let parent = fixture.request_path.parent().expect("request parent");
+    let request_link = parent.join("request-link.json");
+    symlink(&fixture.request_path, &request_link).expect("request symlink");
+    assert_json_error(
+        &run_export_journal_prefix(&request_link, &fixture.journal_root, &fixture.output_path),
+        3,
+        "invalid_input",
+    );
+
+    let journal_link = parent.join("journal-link");
+    symlink(&fixture.journal_root, &journal_link).expect("journal symlink");
+    assert_json_error(
+        &run_export_journal_prefix(&fixture.request_path, &journal_link, &fixture.output_path),
+        3,
+        "invalid_input",
+    );
+
+    let output_target = parent.join("output-target");
+    std::fs::create_dir(&output_target).expect("output target");
+    let output_link = parent.join("output-link");
+    symlink(&output_target, &output_link).expect("output ancestor link");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &output_link.join("prefix.json"),
+        ),
+        3,
+        "invalid_input",
+    );
+
+    let directory_input = parent.join("directory-input");
+    std::fs::create_dir(&directory_input).expect("directory input");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &directory_input,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        3,
+        "invalid_input",
+    );
+
+    let fifo = parent.join("request.fifo");
+    let status = Command::new("/usr/bin/mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo");
+    assert!(status.success());
+    assert_json_error(
+        &run_export_journal_prefix(&fifo, &fixture.journal_root, &fixture.output_path),
+        3,
+        "invalid_input",
+    );
+
+    let journal_file = parent.join("journal-file");
+    std::fs::write(&journal_file, b"not a directory").expect("journal file");
+    assert_json_error(
+        &run_export_journal_prefix(&fixture.request_path, &journal_file, &fixture.output_path),
+        3,
+        "invalid_input",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn export_journal_prefix_rejects_linked_event_and_terminal_files() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = export_journal_fixture();
+    let journal = CheckpointJournal::new(&fixture.journal_root, 16 * 1024 * 1024).expect("journal");
+    journal
+        .record_provider_request_intent(&fixture.request, &digest(ZERO_DIGEST), &digest(ONE_DIGEST))
+        .expect("provider intent");
+    let event = std::fs::read_dir(fixture.journal_root.join("execution-events"))
+        .expect("events")
+        .next()
+        .expect("one event")
+        .expect("event entry")
+        .path();
+    let event_target = fixture
+        .journal_root
+        .parent()
+        .expect("journal parent")
+        .join("event-target.json");
+    std::fs::copy(&event, &event_target).expect("event copy");
+    std::fs::remove_file(&event).expect("remove event");
+    symlink(&event_target, &event).expect("linked event");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        7,
+        "evidence_failure",
+    );
+
+    let fixture = export_journal_fixture();
+    let journal = CheckpointJournal::new(&fixture.journal_root, 16 * 1024 * 1024).expect("journal");
+    journal
+        .begin_verification(&fixture.request)
+        .expect("verification start");
+    journal
+        .record_verifier(&fixture.request, &digest(ONE_DIGEST))
+        .expect("verifier record");
+    journal
+        .publish_terminal_record(&fixture.request, br#"{"terminal":"passed"}"#)
+        .expect("terminal record");
+    let terminal = std::fs::read_dir(&fixture.journal_root)
+        .expect("journal root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("terminal-"))
+        })
+        .expect("terminal file");
+    let terminal_target = fixture
+        .journal_root
+        .parent()
+        .expect("journal parent")
+        .join("terminal-target.json");
+    std::fs::copy(&terminal, &terminal_target).expect("terminal copy");
+    std::fs::remove_file(&terminal).expect("remove terminal");
+    symlink(&terminal_target, &terminal).expect("linked terminal");
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        7,
+        "evidence_failure",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn export_journal_prefix_does_not_resolve_or_start_a_provider() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = export_journal_fixture();
+    let parent = fixture.output_path.parent().expect("output parent");
+    let marker = parent.join("provider-started");
+    let provider = parent.join("codex");
+    std::fs::write(
+        &provider,
+        format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+    )
+    .expect("fake provider");
+    let mut permissions = std::fs::metadata(&provider)
+        .expect("provider metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&provider, permissions).expect("provider permissions");
+    let output = run_with_live_environment(
+        &[
+            "export-journal-prefix",
+            "--journal-root",
+            fixture.journal_root.to_str().expect("journal path"),
+            "--request",
+            fixture.request_path.to_str().expect("request path"),
+            "--out",
+            fixture.output_path.to_str().expect("output path"),
+        ],
+        parent,
+        Some("operator-authorized"),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!marker.exists(), "export started a provider process");
+}
+
+#[cfg(windows)]
+#[test]
+fn export_journal_prefix_rejects_windows_junction_ancestors() {
+    let fixture = export_journal_fixture();
+    let parent = fixture.request_path.parent().expect("request parent");
+    let target = parent.join("junction-target");
+    let junction = parent.join("junction");
+    std::fs::create_dir(&target).expect("junction target");
+    std::fs::copy(&fixture.request_path, target.join("request.json")).expect("request copy");
+    let result = Command::new("cmd")
+        .args([
+            "/D",
+            "/C",
+            "mklink",
+            "/J",
+            junction.to_str().expect("junction path"),
+            target.to_str().expect("target path"),
+        ])
+        .output()
+        .expect("create junction");
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    assert_json_error(
+        &run_export_journal_prefix(
+            &junction.join("request.json"),
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        3,
+        "invalid_input",
+    );
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &junction.join("prefix.json"),
+        ),
+        3,
+        "invalid_input",
+    );
 }

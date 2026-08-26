@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -136,6 +137,131 @@ class ReplayTests(unittest.TestCase):
                 "stable_digest": "sha256:" + "a" * 64,
                 "not_a_timestamp": "2026-08-26",
             },
+        )
+
+    def test_archive_digest_is_recomputed_from_raw_archive_fields(self):
+        module = load_module()
+        wrong = "sha256:" + "0" * 64
+        raw = (
+            '{"schema":"ao.mission.archive.v0.1","archive_digest":"'
+            + wrong
+            + '","objective":"<日本>"}'
+        ).encode()
+        digest_input = (
+            '{"schema":"ao.mission.archive.v0.1","archive_digest":"",'
+            '"objective":"\\u003c日本\\u003e"}'
+        ).encode()
+        expected = "sha256:" + hashlib.sha256(digest_input).hexdigest()
+        self.assertEqual(module.archive_digest_from_raw(raw), expected)
+        self.assertNotEqual(module.archive_digest_from_raw(raw), wrong)
+
+    @unittest.skipIf(os.name == "nt", "Unix symlink boundary")
+    def test_cli_paths_reject_symlink_components_and_dangling_output(self):
+        module = load_module()
+        temporary_base = Path("/private/tmp")
+        if not temporary_base.is_dir():
+            temporary_base = Path(tempfile.gettempdir())
+        with tempfile.TemporaryDirectory(
+            prefix="AO Next 路径 boundary ", dir=temporary_base
+        ) as directory:
+            root = Path(directory)
+            real = root / "real root"
+            real.mkdir()
+            linked = root / "linked root"
+            linked.symlink_to(real, target_is_directory=True)
+            dangling_output = root / "dangling output.json"
+            dangling_output.symlink_to(root / "missing output.json")
+            clean = module.argparse.Namespace(
+                corpus=str(ROOT / "tests/fixtures/mission-migration/corpus-v1.json"),
+                reference_source=str(ROOT / "mission"),
+                candidate_source=str(ROOT / "mission"),
+                evidence_root=str(root / "证据 root with spaces"),
+                output=str(root / "result with spaces.json"),
+            )
+            paths = module.validate_cli_paths(clean)
+            self.assertEqual(paths["evidence_root"], root / "证据 root with spaces")
+            for field, value in (
+                ("corpus", linked / "corpus.json"),
+                ("reference_source", linked),
+                ("candidate_source", linked),
+                ("evidence_root", linked / "evidence"),
+                ("output", dangling_output),
+                ("output", linked / "output.json"),
+            ):
+                args = module.argparse.Namespace(**vars(clean))
+                setattr(args, field, str(value))
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    ValueError, "symlink or reparse"
+                ):
+                    module.validate_cli_paths(args)
+
+    def test_windows_reparse_attribute_is_rejected(self):
+        module = load_module()
+        metadata = type("Metadata", (), {"st_file_attributes": 0x400})()
+        self.assertTrue(module.is_symlink_or_reparse(metadata))
+
+    def test_process_capture_preserves_normal_stdout_and_stderr(self):
+        module = load_module()
+        interpreter = module.shutil.which("python3") or module.shutil.which("python")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = module.run_process(
+                [
+                    interpreter,
+                    "-c",
+                    "import sys; sys.stdout.write('out'); sys.stderr.write('err')",
+                ],
+                root,
+                root / "stdout",
+                root / "stderr",
+            )
+            self.assertEqual(
+                result, {"exit_code": 0, "stdout": "out", "stderr": "err"}
+            )
+            self.assertEqual((root / "stdout").read_bytes(), b"out")
+            self.assertEqual((root / "stderr").read_bytes(), b"err")
+
+    def test_process_capture_terminates_at_combined_output_limit(self):
+        module = load_module()
+        interpreter = module.shutil.which("python3") or module.shutil.which("python")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stdout = root / "stdout"
+            stderr = root / "stderr"
+            marker = root / "child-completed"
+            original_limit = module.OUTPUT_LIMIT
+            module.OUTPUT_LIMIT = 4096
+            try:
+                child = (
+                    "import pathlib,sys,time\n"
+                    "for _ in range(1000):\n"
+                    " sys.stdout.buffer.write(b'x'*1024)\n"
+                    " sys.stdout.buffer.flush()\n"
+                    " time.sleep(0.005)\n"
+                    f"pathlib.Path({str(marker)!r}).write_text('completed')\n"
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "process output exceeded 16 MiB"
+                ):
+                    module.run_process(
+                        [interpreter, "-c", child], root, stdout, stderr
+                    )
+            finally:
+                module.OUTPUT_LIMIT = original_limit
+            self.assertFalse(marker.exists())
+            self.assertLessEqual(stdout.stat().st_size + stderr.stat().st_size, 4096)
+
+    def test_native_workflow_binds_checkout_and_manifest_to_event_head(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = workflow.split("  native:\n", 1)[1]
+        event_head = "${{ github.event.pull_request.head.sha || github.sha }}"
+        self.assertIn(f"          ref: {event_head}", native)
+        self.assertIn(f"          EXPECTED_CANDIDATE_HEAD: {event_head}", native)
+        self.assertIn('test "$observed_head" = "$EXPECTED_CANDIDATE_HEAD"', native)
+        self.assertIn('"source_head": os.environ["EXPECTED_CANDIDATE_HEAD"]', native)
+        self.assertIn(
+            'value["candidate_source_head"] != os.environ["EXPECTED_CANDIDATE_HEAD"]',
+            native,
         )
 
 

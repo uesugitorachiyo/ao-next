@@ -78,6 +78,16 @@ def sha256_bytes(value):
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def archive_digest_from_raw(raw):
+    archive = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    archive["archive_digest"] = ""
+    encoded = json.dumps(
+        archive, ensure_ascii=False, separators=(",", ":")
+    ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    encoded = encoded.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return sha256_bytes(encoded.encode("utf-8"))
+
+
 def semantic_digest(corpus):
     return sha256_bytes(
         canonical_bytes(
@@ -110,6 +120,49 @@ def require_regular(path, description="input"):
 def require_directory(path, description="input"):
     if path.is_symlink() or not path.is_dir():
         raise ValueError(f"{description} must be a non-symlink directory")
+
+
+def is_symlink_or_reparse(metadata):
+    return bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+
+
+def safe_absolute_path(value, description, allow_missing=False):
+    raw = Path(value)
+    if ".." in raw.parts:
+        raise ValueError(f"{description} path must not contain parent traversal")
+    absolute = raw if raw.is_absolute() else Path.cwd() / raw
+    current = Path(absolute.anchor)
+    missing = False
+    for part in absolute.parts[1:]:
+        current /= part
+        if missing:
+            continue
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            missing = True
+            continue
+        if current.is_symlink() or is_symlink_or_reparse(metadata):
+            raise ValueError(f"{description} path contains a symlink or reparse component")
+    if missing and not allow_missing:
+        raise ValueError(f"{description} path does not exist")
+    return absolute
+
+
+def validate_cli_paths(args):
+    return {
+        "corpus": safe_absolute_path(args.corpus, "corpus"),
+        "reference_source": safe_absolute_path(
+            args.reference_source, "reference source"
+        ),
+        "candidate_source": safe_absolute_path(
+            args.candidate_source, "candidate source"
+        ),
+        "evidence_root": safe_absolute_path(
+            args.evidence_root, "evidence root", allow_missing=True
+        ),
+        "output": safe_absolute_path(args.output, "output", allow_missing=True),
+    }
 
 
 def validate_relative_path(value):
@@ -282,25 +335,45 @@ def provider_free_environment():
 
 
 def run_process(arguments, cwd, stdout_path, stderr_path):
-    process = subprocess.Popen(
-        [str(argument) for argument in arguments],
-        cwd=cwd,
-        env=provider_free_environment(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        raise RuntimeError("process exceeded 60-second timeout")
-    if len(stdout) > OUTPUT_LIMIT or len(stderr) > OUTPUT_LIMIT:
+    started = time.monotonic()
+    failure = None
+    with stdout_path.open("xb", buffering=0) as stdout_file, stderr_path.open(
+        "xb", buffering=0
+    ) as stderr_file:
+        process = subprocess.Popen(
+            [str(argument) for argument in arguments],
+            cwd=cwd,
+            env=provider_free_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            shell=False,
+        )
+        while process.poll() is None:
+            captured = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+                stderr_file.fileno()
+            ).st_size
+            if captured > OUTPUT_LIMIT:
+                process.kill()
+                process.wait()
+                failure = "output"
+                break
+            if time.monotonic() - started > TIMEOUT_SECONDS:
+                process.kill()
+                process.wait()
+                failure = "timeout"
+                break
+            time.sleep(0.005)
+        captured = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+            stderr_file.fileno()
+        ).st_size
+    if failure == "output" or captured > OUTPUT_LIMIT:
+        trim_process_output(stdout_path, stderr_path)
         raise RuntimeError("process output exceeded 16 MiB")
-    stdout_path.write_bytes(stdout)
-    stderr_path.write_bytes(stderr)
+    if failure == "timeout":
+        raise RuntimeError("process exceeded 60-second timeout")
+    stdout = stdout_path.read_bytes()
+    stderr = stderr_path.read_bytes()
     try:
         return {
             "exit_code": process.returncode,
@@ -309,6 +382,15 @@ def run_process(arguments, cwd, stdout_path, stderr_path):
         }
     except UnicodeDecodeError as error:
         raise RuntimeError("process output was not UTF-8") from error
+
+
+def trim_process_output(stdout_path, stderr_path):
+    remaining = OUTPUT_LIMIT
+    for path in (stdout_path, stderr_path):
+        size = min(path.stat().st_size, remaining)
+        with path.open("r+b") as output:
+            output.truncate(size)
+        remaining -= size
 
 
 def write_json_new(path, value):
@@ -529,18 +611,20 @@ def replay_archive_round_trip(context, vector):
     assert_fields(start, {"objective": "archive import round trip"}, "archive start")
     archive_path = Path(context["bindings"]["${archive_path}"])
     require_regular(archive_path, "Mission archive")
-    archive = json.loads(archive_path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
+    raw_archive = archive_path.read_bytes()
+    archive = json.loads(raw_archive.decode("utf-8"), object_pairs_hook=strict_object)
+    archive_digest = archive_digest_from_raw(raw_archive)
     assert_fields(
         archive,
-        {"schema": "ao.mission.archive.v0.1", "safe_to_execute": False, "executes_work": False, "approves_work": False},
+        {"schema": "ao.mission.archive.v0.1", "archive_digest": archive_digest, "safe_to_execute": False, "executes_work": False, "approves_work": False},
         "archive",
     )
     assert_fields(
         commands[2]["stdout"],
-        {"schema": "ao.mission.archive-validation.v0.1", "status": "ready", "safe_to_execute": False, "executes_work": False, "approves_work": False},
+        {"schema": "ao.mission.archive-validation.v0.1", "status": "ready", "archive_digest": archive_digest, "safe_to_execute": False, "executes_work": False, "approves_work": False},
         "archive validation",
     )
-    assert_fields(commands[3]["stdout"], {"schema": "ao.mission.archive-import-readback.v0.1", "status": "ready"}, "archive import")
+    assert_fields(commands[3]["stdout"], {"schema": "ao.mission.archive-import-readback.v0.1", "status": "ready", "archive_digest": archive_digest}, "archive import")
     assert_fields(commands[4]["stdout"], {"objective": "archive import round trip"}, "archive inspect")
     restored = load_state_record(Path(context["bindings"]["${import_home}"]), start["mission_id"])
     assert_fields(restored, {"objective": "archive import round trip"}, "restored archive record")
@@ -671,17 +755,18 @@ def prepare_empty_directory(path, description):
         path.mkdir(parents=True)
 
 
-def replay(args):
-    corpus_path = Path(args.corpus).resolve()
+def replay(args, paths=None):
+    paths = paths or validate_cli_paths(args)
+    corpus_path = paths["corpus"]
     fixture_root = corpus_path.parent
     corpus = load_corpus(corpus_path, fixture_root)
-    reference_source = Path(args.reference_source).resolve()
-    candidate_source = Path(args.candidate_source).resolve()
+    reference_source = paths["reference_source"]
+    candidate_source = paths["candidate_source"]
     require_directory(reference_source, "reference source")
     require_directory(candidate_source, "candidate source")
     reference_head = validate_reference_head(git_head(reference_source))
-    evidence_root = Path(args.evidence_root).resolve()
-    output = Path(args.output).resolve()
+    evidence_root = paths["evidence_root"]
+    output = paths["output"]
     if output.exists() or output.is_symlink():
         raise ValueError("output must not already exist")
     prepare_empty_directory(evidence_root, "evidence root")
@@ -754,9 +839,10 @@ def parse_args():
 
 def main():
     args = parse_args()
-    output = Path(args.output).resolve()
+    paths = validate_cli_paths(args)
+    output = paths["output"]
     try:
-        replay(args)
+        replay(args, paths)
     except Exception as error:
         if not output.exists() and not output.is_symlink():
             write_json_new(

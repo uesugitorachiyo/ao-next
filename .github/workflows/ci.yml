@@ -23,6 +23,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Bind exact candidate head
+        id: candidate-head
+        shell: bash
+        env:
+          EXPECTED_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          observed_head=$(git rev-parse HEAD)
+          test "$observed_head" = "$EXPECTED_CANDIDATE_HEAD"
+          printf 'head=%s\n' "$observed_head" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -63,6 +75,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Bind exact candidate head
+        id: candidate-head
+        shell: bash
+        env:
+          EXPECTED_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          observed_head=$(git rev-parse HEAD)
+          test "$observed_head" = "$EXPECTED_CANDIDATE_HEAD"
+          printf 'head=%s\n' "$observed_head" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -178,6 +202,8 @@ jobs:
 
       - name: Write sanitized Mission gate manifest
         shell: bash
+        env:
+          EXPECTED_CANDIDATE_HEAD: ${{ steps.candidate-head.outputs.head }}
         run: |
           python3 - \
             "${{ steps.mission-equivalence.outputs.readback }}" \
@@ -190,11 +216,15 @@ jobs:
 
           readback = pathlib.Path(sys.argv[1])
           value = json.loads(readback.read_text(encoding="utf-8"))
-          if value["status"] != "passed" or value["provider_calls"] != 0:
+          if (
+              value["status"] != "passed"
+              or value["provider_calls"] != 0
+              or value["candidate_source_head"] != os.environ["EXPECTED_CANDIDATE_HEAD"]
+          ):
               raise SystemExit("Mission equivalence did not pass provider-free")
           manifest = {
               "schema_version": "ao.next.mission-native-gate.v1",
-              "source_head": os.environ["GITHUB_SHA"],
+              "source_head": os.environ["EXPECTED_CANDIDATE_HEAD"],
               "runner_os": os.environ["RUNNER_OS"],
               "runner_arch": os.environ["RUNNER_ARCH"],
               "equivalence_readback_digest": "sha256:" + hashlib.sha256(readback.read_bytes()).hexdigest(),

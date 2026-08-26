@@ -74,6 +74,57 @@ jobs:
         with:
           go-version: '1.26.4'
 
+      - name: Extract canonical Mission reference
+        id: mission-reference
+        shell: bash
+        run: |
+          set -eu
+          mission_commit=05567fdd7c3fc64814ca4122b3f431d4ed9aaded
+          git cat-file -e "$mission_commit^{commit}"
+          git merge-base --is-ancestor "$mission_commit" HEAD
+          archive="$RUNNER_TEMP/ao-mission-reference.tar"
+          reference_root="$RUNNER_TEMP/AO Mission reference"
+          git archive --format=tar --output="$archive" "$mission_commit"
+          python3 - "$archive" "$reference_root" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          archive = pathlib.Path(sys.argv[1])
+          root = pathlib.Path(sys.argv[2])
+          root.mkdir()
+          with tarfile.open(archive, "r:") as source:
+              members = source.getmembers()
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts or "\\" in member.name:
+                      raise SystemExit(f"unsafe archive member: {member.name}")
+                  if not (member.isdir() or member.isfile()):
+                      raise SystemExit(f"non-regular archive member: {member.name}")
+              source.extractall(root, members=members)
+          PY
+          printf 'root=%s\n' "$reference_root" >> "$GITHUB_OUTPUT"
+
+      - name: Replay Mission old/new equivalence
+        id: mission-equivalence
+        shell: bash
+        run: |
+          set -eu
+          test -z "${AO_NEXT_LIVE_PROVIDER_CALLS:-}"
+          test -z "${AO_NEXT_PROVIDER_FREE_PROGRAM:-}"
+          test -z "${AO_NEXT_PROVIDER_FREE_PROGRAM_DIGEST:-}"
+          gate_root="$RUNNER_TEMP/AO Next Mission equivalence"
+          mkdir "$gate_root"
+          python3 tests/mission-migration/test_replay.py
+          python3 tests/mission-migration/replay.py \
+            --corpus tests/fixtures/mission-migration/corpus-v1.json \
+            --reference-source "${{ steps.mission-reference.outputs.root }}" \
+            --candidate-source mission \
+            --evidence-root "$gate_root/private evidence with spaces" \
+            --output "$gate_root/equivalence-readback.json"
+          printf 'readback=%s\n' "$gate_root/equivalence-readback.json" >> "$GITHUB_OUTPUT"
+          printf 'manifest=%s\n' "$gate_root/gate-manifest.json" >> "$GITHUB_OUTPUT"
+
       - name: Validate Windows PowerShell 5.1 recovery harness
         if: matrix.os == 'windows-latest'
         shell: powershell
@@ -88,12 +139,31 @@ jobs:
       - name: Test provider recovery evidence
         run: cargo test -p ao-next-core --test evidence_recovery provider_ -- --nocapture
 
+      - name: Test Mission schemas and exchange
+        run: |
+          cargo test -p ao-next-eval --test mission_migration_corpus
+          cargo test -p ao-next-core --test mission_exchange
+          cargo test -p ao-next-core --test evidence_recovery
+
+      - name: Test Mission CLI exchange and recovery
+        run: |
+          cargo test -p ao-next-cli --test cli export_journal_prefix -- --nocapture
+          cargo test -p ao-next-cli --test cli recover_live -- --nocapture
+
       - name: Test recover-live
         run: cargo test -p ao-next-cli --test cli recover_live -- --nocapture
 
       - name: Test Mission
         shell: bash
         run: (cd mission && go test ./... -count=1)
+
+      - name: Vet Mission
+        shell: bash
+        run: (cd mission && go vet ./...)
+
+      - name: Test Mission public safety
+        shell: bash
+        run: (cd mission && python3 scripts/test_public_safety_scan.py)
 
       - name: Build Mission compatibility command
         shell: bash
@@ -105,3 +175,48 @@ jobs:
 
       - name: Build release
         run: cargo build --locked --workspace --release
+
+      - name: Write sanitized Mission gate manifest
+        shell: bash
+        run: |
+          python3 - \
+            "${{ steps.mission-equivalence.outputs.readback }}" \
+            "${{ steps.mission-equivalence.outputs.manifest }}" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          readback = pathlib.Path(sys.argv[1])
+          value = json.loads(readback.read_text(encoding="utf-8"))
+          if value["status"] != "passed" or value["provider_calls"] != 0:
+              raise SystemExit("Mission equivalence did not pass provider-free")
+          manifest = {
+              "schema_version": "ao.next.mission-native-gate.v1",
+              "source_head": os.environ["GITHUB_SHA"],
+              "runner_os": os.environ["RUNNER_OS"],
+              "runner_arch": os.environ["RUNNER_ARCH"],
+              "equivalence_readback_digest": "sha256:" + hashlib.sha256(readback.read_bytes()).hexdigest(),
+              "case_count": value["case_count"],
+              "provider_calls": 0,
+              "safe_to_execute": False,
+              "executes_work": False,
+              "approves_work": False,
+              "publishes_artifacts": False,
+              "status": "passed",
+          }
+          pathlib.Path(sys.argv[2]).write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload sanitized Mission gate evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mission-equivalence-${{ matrix.os }}
+          path: |
+            ${{ steps.mission-equivalence.outputs.readback }}
+            ${{ steps.mission-equivalence.outputs.manifest }}
+          if-no-files-found: error

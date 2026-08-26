@@ -67,6 +67,12 @@ The provider-gated live commands accept one [strict sealed-trial input](docs/liv
 
 The hosted Linux, macOS, and Windows matrix runs provider-free retained-capture recovery checks. The additional physical Windows NTFS procedure is in [tests/cross-platform/README.md](tests/cross-platform/README.md).
 
-AO Mission's current canonical terminal-index consumer requires lease, root, and lineage evidence that a single AO Next readback does not contain. [The bounded compatibility proposal](docs/mission-compatibility.md) defines a separate read-only, digest-idempotent importer; this candidate does not change Mission or fabricate the missing artifacts.
+The [Mission source migration contract](docs/mission-source-migration.md)
+defines the imported Go Mission source, separate process and state boundaries,
+read-only journal-prefix exchange, and provider-free equivalence procedure.
+Stage 1 remains incomplete until the exact candidate head passes reviewed
+native CI and physical macOS, Ubuntu, and Windows qualification. Source
+co-location alone grants no packaging, release, deployment, publication,
+provider, adoption, or AO2-retirement authority.
 
 Offline harness qualification may establish `AO_NEXT_LIVE_HARNESS_READY`. This means the harness is ready for a separately authorized pilot. It is not a live result, a superiority finding, or permission to replace current AO.

@@ -423,6 +423,8 @@ struct ExistingJournalBinding {
     event_files: BTreeMap<PathBuf, OpenedJournalPath>,
     #[cfg(unix)]
     terminal_files: BTreeMap<PathBuf, OpenedJournalPath>,
+    #[cfg(unix)]
+    descriptor_reads: bool,
     initializing: bool,
 }
 
@@ -475,14 +477,60 @@ impl CheckpointJournal {
     ) -> Result<Self, RecoveryError> {
         let root = root.as_ref().to_path_buf();
         let root_opened = open_journal_path(&root, true)?;
+        Self::open_bound_from_opened(root, maximum_bytes, request, root_opened, false)
+    }
+
+    /// Opens an existing Unix journal through one already accepted root descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] when descriptor-relative identity, event, or
+    /// terminal reads fail validation.
+    #[cfg(unix)]
+    pub fn open_bound_from_unix_root(
+        root: impl AsRef<Path>,
+        root_anchor: File,
+        maximum_bytes: u64,
+        request: &RunRequest,
+    ) -> Result<Self, RecoveryError> {
+        let root = root.as_ref().to_path_buf();
+        let root_opened = opened_unix_journal_path(root_anchor, &root, true)?;
+        Self::open_bound_from_opened(root, maximum_bytes, request, root_opened, true)
+    }
+
+    fn open_bound_from_opened(
+        root: PathBuf,
+        maximum_bytes: u64,
+        request: &RunRequest,
+        root_opened: OpenedJournalPath,
+        #[allow(unused_variables)] descriptor_reads: bool,
+    ) -> Result<Self, RecoveryError> {
         let provisional = Self {
             root: root.clone(),
             maximum_bytes,
             mode: JournalMode::CreateCapable,
         };
         let (identity, identity_bytes) = provisional.request_identity(request)?;
+        #[cfg(unix)]
+        let identity_opened = open_existing_journal_entry(
+            &root_opened,
+            &root,
+            OsStr::new("execution-identity.json"),
+            false,
+            !descriptor_reads,
+        )?;
+        #[cfg(not(unix))]
         let identity_opened = open_journal_path(&root.join("execution-identity.json"), false)?;
         validate_identity_bytes(&identity_opened, &identity, &identity_bytes, maximum_bytes)?;
+        #[cfg(unix)]
+        let events_opened = open_existing_journal_entry(
+            &root_opened,
+            &root,
+            OsStr::new("execution-events"),
+            true,
+            !descriptor_reads,
+        )?;
+        #[cfg(not(unix))]
         let events_opened = open_journal_path(&root.join("execution-events"), true)?;
         let binding = Arc::new(Mutex::new(ExistingJournalBinding {
             request_identity: identity_bytes,
@@ -492,6 +540,8 @@ impl CheckpointJournal {
             event_files: BTreeMap::new(),
             #[cfg(unix)]
             terminal_files: BTreeMap::new(),
+            #[cfg(unix)]
+            descriptor_reads,
             initializing: true,
         }));
         let journal = Self {
@@ -550,6 +600,15 @@ impl CheckpointJournal {
                 .map_err(|error| RecoveryError::Io(error.to_string()))?;
             if expected.request_identity != bytes {
                 return Err(RecoveryError::IdentityMismatch);
+            }
+            #[cfg(unix)]
+            if expected.descriptor_reads {
+                return validate_identity_bytes(
+                    &expected.identity,
+                    &identity,
+                    &bytes,
+                    self.maximum_bytes,
+                );
             }
             let root = expected.root.clone();
             let identity_path = expected.identity.clone();
@@ -1115,12 +1174,15 @@ impl CheckpointJournal {
     fn terminal_files(&self) -> Result<Vec<(PathBuf, Option<OpenedJournalPath>)>, RecoveryError> {
         #[cfg(unix)]
         if let JournalMode::ExistingOnly(binding) = &self.mode {
-            let root = binding
-                .lock()
-                .map_err(|error| RecoveryError::Io(error.to_string()))?
-                .root
-                .clone();
-            require_same_journal_path(&self.root, true, &root)?;
+            let (root, descriptor_reads) = {
+                let binding = binding
+                    .lock()
+                    .map_err(|error| RecoveryError::Io(error.to_string()))?;
+                (binding.root.clone(), binding.descriptor_reads)
+            };
+            if !descriptor_reads {
+                require_same_journal_path(&self.root, true, &root)?;
+            }
             let mut directory =
                 rustix::fs::Dir::read_from(root.anchor.as_ref()).map_err(std::io::Error::from)?;
             let mut names = Vec::<OsString>::new();
@@ -1136,12 +1198,15 @@ impl CheckpointJournal {
             let mut observed = BTreeSet::new();
             for name in names {
                 let path = self.root.join(&name);
-                let opened = open_existing_terminal_file(&root, &self.root, &name)?;
+                let opened =
+                    open_existing_terminal_file(&root, &self.root, &name, !descriptor_reads)?;
                 self.validate_terminal_path(&path, &opened)?;
                 observed.insert(path.clone());
                 files.push((path, Some(opened)));
             }
-            require_same_journal_path(&self.root, true, &root)?;
+            if !descriptor_reads {
+                require_same_journal_path(&self.root, true, &root)?;
+            }
             if binding
                 .lock()
                 .map_err(|error| RecoveryError::Io(error.to_string()))?
@@ -1259,9 +1324,7 @@ impl CheckpointJournal {
         &self,
         directory: &Path,
     ) -> Result<Vec<JournalEvent>, RecoveryError> {
-        let mut paths = std::fs::read_dir(directory)?
-            .map(|entry| entry.map(|value| value.path()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut paths = self.execution_event_paths(directory)?;
         paths.sort();
         let observed_paths = paths.iter().cloned().collect::<BTreeSet<_>>();
         let mut events = Vec::with_capacity(paths.len());
@@ -1279,7 +1342,7 @@ impl CheckpointJournal {
             {
                 return Err(RecoveryError::EventSequenceInvalid);
             }
-            let opened = open_journal_path(&path, false)?;
+            let opened = self.open_execution_event_path(directory, &path)?;
             self.validate_event_path(&path, &opened)?;
             let metadata = opened.anchor.metadata()?;
             total_bytes = total_bytes.saturating_add(metadata.len());
@@ -1322,6 +1385,61 @@ impl CheckpointJournal {
         Ok(events)
     }
 
+    fn execution_event_paths(&self, directory: &Path) -> Result<Vec<PathBuf>, RecoveryError> {
+        #[cfg(unix)]
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let (events, descriptor_reads) = {
+                let binding = binding
+                    .lock()
+                    .map_err(|error| RecoveryError::Io(error.to_string()))?;
+                (binding.events.clone(), binding.descriptor_reads)
+            };
+            if !descriptor_reads {
+                require_same_journal_path(directory, true, &events)?;
+            }
+            let mut entries =
+                rustix::fs::Dir::read_from(events.anchor.as_ref()).map_err(std::io::Error::from)?;
+            let mut paths = Vec::new();
+            for entry in &mut entries {
+                let entry = entry.map_err(std::io::Error::from)?;
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    paths.push(directory.join(OsStr::from_bytes(name)));
+                }
+            }
+            if !descriptor_reads {
+                require_same_journal_path(directory, true, &events)?;
+            }
+            return Ok(paths);
+        }
+
+        Ok(std::fs::read_dir(directory)?
+            .map(|entry| entry.map(|value| value.path()))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn open_execution_event_path(
+        &self,
+        #[allow(unused_variables)] directory: &Path,
+        path: &Path,
+    ) -> Result<OpenedJournalPath, RecoveryError> {
+        #[cfg(unix)]
+        if let JournalMode::ExistingOnly(binding) = &self.mode {
+            let (events, descriptor_reads) = {
+                let binding = binding
+                    .lock()
+                    .map_err(|error| RecoveryError::Io(error.to_string()))?;
+                (binding.events.clone(), binding.descriptor_reads)
+            };
+            let name = path
+                .file_name()
+                .ok_or_else(|| RecoveryError::UnsafePath(path.to_path_buf()))?;
+            return open_existing_journal_entry(&events, directory, name, false, !descriptor_reads);
+        }
+
+        open_journal_path(path, false)
+    }
+
     fn execution_event_directory(&self) -> Result<PathBuf, RecoveryError> {
         let directory = self.root.join("execution-events");
         if matches!(self.mode, JournalMode::CreateCapable) {
@@ -1332,16 +1450,22 @@ impl CheckpointJournal {
 
     fn existing_execution_event_directory(&self) -> Result<PathBuf, RecoveryError> {
         let directory = self.root.join("execution-events");
-        let opened = open_journal_path(&directory, true)?;
         if let JournalMode::ExistingOnly(binding) = &self.mode {
-            let expected = binding
+            let binding = binding
                 .lock()
-                .map_err(|error| RecoveryError::Io(error.to_string()))?
-                .events
-                .clone();
+                .map_err(|error| RecoveryError::Io(error.to_string()))?;
+            #[cfg(unix)]
+            if binding.descriptor_reads {
+                return Ok(directory);
+            }
+            let expected = binding.events.clone();
+            drop(binding);
+            let opened = open_journal_path(&directory, true)?;
             if opened.fingerprint != expected.fingerprint {
                 return Err(RecoveryError::IdentityMismatch);
             }
+        } else {
+            open_journal_path(&directory, true)?;
         }
         Ok(directory)
     }
@@ -1675,23 +1799,38 @@ const fn run_existing_terminal_create_test_hook() {}
 const fn run_existing_append_test_hook() {}
 
 #[cfg(unix)]
+fn open_existing_journal_entry(
+    retained: &OpenedJournalPath,
+    public_root: &Path,
+    name: &OsStr,
+    directory: bool,
+    verify_public_path: bool,
+) -> Result<OpenedJournalPath, RecoveryError> {
+    if verify_public_path {
+        require_same_journal_path(public_root, true, retained)?;
+    }
+    let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    if directory {
+        flags |= OFlags::DIRECTORY;
+    }
+    let file = rustix::fs::openat(retained.anchor.as_ref(), name, flags, Mode::empty())
+        .map(File::from)
+        .map_err(std::io::Error::from)?;
+    let opened = opened_unix_journal_path(file, &public_root.join(name), directory)?;
+    if verify_public_path {
+        require_same_journal_path(public_root, true, retained)?;
+    }
+    Ok(opened)
+}
+
+#[cfg(unix)]
 fn open_existing_terminal_file(
     retained: &OpenedJournalPath,
     public_root: &Path,
     name: &OsStr,
+    verify_public_path: bool,
 ) -> Result<OpenedJournalPath, RecoveryError> {
-    require_same_journal_path(public_root, true, retained)?;
-    let file = rustix::fs::openat(
-        retained.anchor.as_ref(),
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(std::io::Error::from)?;
-    let opened = opened_unix_journal_path(file, &public_root.join(name), false)?;
-    require_same_journal_path(public_root, true, retained)?;
-    Ok(opened)
+    open_existing_journal_entry(retained, public_root, name, false, verify_public_path)
 }
 
 #[cfg(unix)]

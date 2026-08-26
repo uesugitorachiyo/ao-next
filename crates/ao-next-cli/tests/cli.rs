@@ -3779,45 +3779,123 @@ fn export_journal_prefix_does_not_resolve_or_start_a_provider() {
 
 #[cfg(windows)]
 #[test]
-fn export_journal_prefix_rejects_windows_junction_ancestors() {
+fn export_journal_prefix_rejects_windows_request_and_terminal_reparse_leaves() {
+    use std::os::windows::fs::symlink_file;
+
     let fixture = export_journal_fixture();
     let parent = fixture.request_path.parent().expect("request parent");
-    let target = parent.join("junction-target");
-    let junction = parent.join("junction");
-    std::fs::create_dir(&target).expect("junction target");
-    std::fs::copy(&fixture.request_path, target.join("request.json")).expect("request copy");
-    let result = Command::new("cmd")
-        .args([
-            "/D",
-            "/C",
-            "mklink",
-            "/J",
-            junction.to_str().expect("junction path"),
-            target.to_str().expect("target path"),
-        ])
-        .output()
-        .expect("create junction");
-    assert!(
-        result.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-
+    let request_target = parent.join("request-target.json");
+    std::fs::copy(&fixture.request_path, &request_target).expect("request target");
+    std::fs::remove_file(&fixture.request_path).expect("remove request leaf");
+    symlink_file(&request_target, &fixture.request_path).expect("request reparse leaf");
     assert_json_error(
         &run_export_journal_prefix(
-            &junction.join("request.json"),
+            &fixture.request_path,
             &fixture.journal_root,
             &fixture.output_path,
         ),
         3,
         "invalid_input",
     );
+
+    let fixture = export_journal_fixture();
+    let journal = CheckpointJournal::new(&fixture.journal_root, 16 * 1024 * 1024).expect("journal");
+    journal
+        .begin_verification(&fixture.request)
+        .expect("verification start");
+    journal
+        .record_verifier(&fixture.request, &digest(ONE_DIGEST))
+        .expect("verifier record");
+    journal
+        .publish_terminal_record(&fixture.request, br#"{"terminal":"passed"}"#)
+        .expect("terminal record");
+    let terminal = std::fs::read_dir(&fixture.journal_root)
+        .expect("journal root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("terminal-"))
+        })
+        .expect("terminal file");
+    let terminal_target = terminal.with_file_name("terminal-target.json");
+    std::fs::copy(&terminal, &terminal_target).expect("terminal target");
+    std::fs::remove_file(&terminal).expect("remove terminal leaf");
+    symlink_file(&terminal_target, &terminal).expect("terminal reparse leaf");
     assert_json_error(
         &run_export_journal_prefix(
             &fixture.request_path,
             &fixture.journal_root,
-            &junction.join("prefix.json"),
+            &fixture.output_path,
+        ),
+        7,
+        "evidence_failure",
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn export_journal_prefix_rejects_windows_journal_event_and_terminal_junction_ancestors() {
+    for state in ["journal", "terminal"] {
+        let fixture = export_journal_fixture();
+        if state == "terminal" {
+            let journal = CheckpointJournal::new(&fixture.journal_root, 16 * 1024 * 1024)
+                .expect("terminal journal");
+            journal
+                .begin_verification(&fixture.request)
+                .expect("verification start");
+            journal
+                .record_verifier(&fixture.request, &digest(ONE_DIGEST))
+                .expect("verifier record");
+            journal
+                .publish_terminal_record(&fixture.request, br#"{"terminal":"passed"}"#)
+                .expect("terminal record");
+        }
+        let parent = fixture.journal_root.parent().expect("journal parent");
+        let target_parent = parent.join(format!("{state}-ancestor-target"));
+        let target_journal = target_parent.join("journal root");
+        let junction = parent.join(format!("{state}-ancestor-junction"));
+        std::fs::create_dir(&target_parent).expect("target parent");
+        std::fs::rename(&fixture.journal_root, &target_journal).expect("move journal");
+        create_junction(&junction, &target_parent);
+        assert_json_error(
+            &run_export_journal_prefix(
+                &fixture.request_path,
+                &junction.join("journal root"),
+                &fixture.output_path,
+            ),
+            3,
+            "invalid_input",
+        );
+    }
+
+    let fixture = export_journal_fixture();
+    let event_directory = fixture.journal_root.join("execution-events");
+    let event_target = fixture.journal_root.join("event-directory-target");
+    std::fs::rename(&event_directory, &event_target).expect("move event directory");
+    create_junction(&event_directory, &event_target);
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &fixture.output_path,
+        ),
+        7,
+        "evidence_failure",
+    );
+
+    let fixture = export_journal_fixture();
+    let parent = fixture.output_path.parent().expect("output parent");
+    let output_target = parent.join("output-junction-target");
+    let output_junction = parent.join("output-junction");
+    std::fs::create_dir(&output_target).expect("output junction target");
+    create_junction(&output_junction, &output_target);
+    assert_json_error(
+        &run_export_journal_prefix(
+            &fixture.request_path,
+            &fixture.journal_root,
+            &output_junction.join("prefix.json"),
         ),
         3,
         "invalid_input",

@@ -9,8 +9,8 @@ use ao_next_core::contracts::{
     RunLimits, RunRequest, SourceIdentity, StructuredCommand, VerifierProfile, WorkspaceIdentity,
 };
 use ao_next_core::mission_exchange::{
-    ExecutionJournalPrefix, build_execution_journal_prefix, verify_execution_journal_prefix,
-    write_execution_journal_prefix,
+    ExecutionJournalPrefix, MissionExchangeError, build_execution_journal_prefix,
+    verify_execution_journal_prefix, write_execution_journal_prefix,
 };
 use ao_next_core::recovery::{CheckpointJournal, JournalEvent, JournalEventKind};
 use ao_next_core::strict_json::{
@@ -20,8 +20,12 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
+
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const ONE_DIGEST: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const MAXIMUM_PREFIX_BYTES: usize = 16 * 1024 * 1024;
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -256,6 +260,68 @@ fn built_prefix(state: PrefixState) -> ExecutionJournalPrefix {
     build_execution_journal_prefix(&opened, &request).expect("prefix")
 }
 
+fn prepared_prefix_for_request(
+    request: &RunRequest,
+) -> Result<ExecutionJournalPrefix, ao_next_core::mission_exchange::MissionExchangeError> {
+    let temporary = TempDir::new().expect("temporary sized journal");
+    let root = temporary.path().join("journal");
+    let journal = CheckpointJournal::new(&root, 32 * 1024 * 1024).expect("sized journal");
+    journal
+        .bind_request(request)
+        .expect("sized request binding");
+    std::fs::create_dir(root.join("execution-events")).expect("sized event directory");
+    let opened = CheckpointJournal::open_bound(&root, 32 * 1024 * 1024, request)
+        .expect("sized bound journal");
+    build_execution_journal_prefix(&opened, request)
+}
+
+fn prepared_prefix_with_size(
+    target: usize,
+) -> Result<ExecutionJournalPrefix, ao_next_core::mission_exchange::MissionExchangeError> {
+    let mut sized_request = request();
+    sized_request.run_id = "x".into();
+    let base = prepared_prefix_for_request(&sized_request).expect("base sized prefix");
+    let base_size = canonical_json_bytes(&base)
+        .expect("base prefix bytes")
+        .len();
+    assert!(target >= base_size);
+    sized_request.run_id = "x".repeat(target - base_size + 1);
+    prepared_prefix_for_request(&sized_request)
+}
+
+fn refresh_prefix_digest(prefix: &mut ExecutionJournalPrefix) {
+    prefix.prefix_digest = canonical_digest(&json!([
+        &prefix.schema_version,
+        &prefix.run_id,
+        &prefix.request_digest,
+        &prefix.journal_identity,
+        prefix.worker_count,
+        prefix.dynamic_fanout,
+        prefix.first_sequence,
+        prefix.last_sequence,
+        &prefix.preceding_prefix_digest,
+        &prefix.events_digest,
+        &prefix.events,
+        &prefix.terminal_digest,
+        &prefix.terminal_record,
+        prefix.safe_to_execute,
+        prefix.executes_work,
+        prefix.approves_work,
+        prefix.mutates_repositories,
+        prefix.grants_provider_access,
+        prefix.publishes_artifacts,
+        prefix.releases,
+        prefix.deploys,
+        prefix.advances_authority
+    ]))
+    .expect("refreshed prefix digest");
+}
+
+fn refresh_event_and_prefix_digests(prefix: &mut ExecutionJournalPrefix) {
+    prefix.events_digest = canonical_digest(&prefix.events).expect("refreshed event digest");
+    refresh_prefix_digest(prefix);
+}
+
 #[test]
 fn valid_prepared_prefix_verifies_deterministically() {
     let bytes = fixture("valid-prepared.json");
@@ -340,17 +406,30 @@ fn checked_in_negative_vectors_fail_closed() {
         ),
         Err(StrictJsonError::Deserialize(message)) if message.contains("unknown field")
     ));
-    for name in [
-        "invalid-sequence-gap.json",
-        "invalid-digest-drift.json",
-        "invalid-identity-drift.json",
-        "invalid-terminal-contradiction.json",
+    for (name, expected) in [
+        ("invalid-sequence-gap.json", "sequence"),
+        ("invalid-digest-drift.json", "event-digest"),
+        ("invalid-identity-drift.json", "identity"),
+        ("invalid-terminal-contradiction.json", "terminal"),
     ] {
-        let prefix: ExecutionJournalPrefix =
+        let mut prefix: ExecutionJournalPrefix =
             decode_strict_json(&fixture(name), 16 * 1024 * 1024).expect("strict negative");
+        let supplied_prefix_digest = prefix.prefix_digest.clone();
+        refresh_prefix_digest(&mut prefix);
+        assert_eq!(
+            supplied_prefix_digest, prefix.prefix_digest,
+            "{name} is masked by stale prefix digest"
+        );
+        let error = verify_execution_journal_prefix(&prefix, &request).expect_err(name);
         assert!(
-            verify_execution_journal_prefix(&prefix, &request).is_err(),
-            "verified {name}"
+            match expected {
+                "sequence" => matches!(error, MissionExchangeError::EventSequenceInvalid),
+                "event-digest" => matches!(error, MissionExchangeError::EventsDigestMismatch),
+                "identity" => matches!(error, MissionExchangeError::JournalIdentityMismatch),
+                "terminal" => matches!(error, MissionExchangeError::TerminalContradiction),
+                _ => unreachable!(),
+            },
+            "{name} reached {error}"
         );
     }
 }
@@ -386,34 +465,66 @@ fn strict_decode_rejects_oversized_trailing_and_wrong_typed_prefixes() {
 }
 
 #[test]
-fn identity_worker_authority_sequence_lifecycle_and_digest_drift_fail_closed() {
+fn identity_worker_and_authority_mutations_reach_exact_semantic_gates() {
     let request = request();
     let prepared = built_prefix(PrefixState::Prepared);
-    let provider = built_prefix(PrefixState::ProviderOutcomeUnknown);
-    let passed = built_prefix(PrefixState::Passed);
 
-    let mut mutations = Vec::new();
     let mut changed = prepared.clone();
     changed.schema_version = "ao.next.execution-journal-prefix.v2".into();
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::UnsupportedSchema)
+    ));
+
     let mut changed = prepared.clone();
     changed.run_id.clear();
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::RunIdentityMismatch)
+    ));
+
     let mut changed = prepared.clone();
     changed.run_id = "changed-run".into();
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::RunIdentityMismatch)
+    ));
+
     let mut changed = prepared.clone();
     changed.request_digest = digest(ZERO_DIGEST);
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::RequestDigestMismatch)
+    ));
+
     let mut changed = prepared.clone();
     changed.journal_identity.request_digest = digest(ZERO_DIGEST);
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::JournalIdentityMismatch)
+    ));
+
     let mut changed = prepared.clone();
     changed.worker_count = 2;
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::WorkerBoundary)
+    ));
+
     let mut changed = prepared.clone();
     changed.dynamic_fanout = true;
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::WorkerBoundary)
+    ));
+
     for field in [
         "safe_to_execute",
         "executes_work",
@@ -438,23 +549,72 @@ fn identity_worker_authority_sequence_lifecycle_and_digest_drift_fail_closed() {
             "advances_authority" => changed.advances_authority = true,
             _ => unreachable!(),
         }
-        mutations.push(changed);
+        refresh_prefix_digest(&mut changed);
+        assert!(matches!(
+            verify_execution_journal_prefix(&changed, &request),
+            Err(MissionExchangeError::AuthorityEnabled(observed)) if observed == field
+        ));
     }
+
     let mut changed = prepared.clone();
     changed.preceding_prefix_digest = Some(digest(ZERO_DIGEST));
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::PrecedingPrefixUnsupported)
+    ));
+
+    let mut changed = prepared;
+    changed.prefix_digest = digest(ZERO_DIGEST);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::PrefixDigestMismatch)
+    ));
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "each lifecycle and terminal mutation must retain its exact dependent digests and error assertion"
+)]
+fn sequence_lifecycle_event_and_terminal_mutations_reach_exact_semantic_gates() {
+    let request = request();
+    let prepared = built_prefix(PrefixState::Prepared);
+    let provider = built_prefix(PrefixState::ProviderOutcomeUnknown);
+    let passed = built_prefix(PrefixState::Passed);
+
     let mut changed = provider.clone();
     changed.first_sequence = 1;
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::EventSequenceInvalid)
+    ));
+
     let mut changed = provider.clone();
     changed.last_sequence = Some(0);
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::EventSequenceInvalid)
+    ));
+
     let mut changed = provider.clone();
     changed.events[1].sequence = 3;
-    mutations.push(changed);
+    refresh_event_and_prefix_digests(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::EventSequenceInvalid)
+    ));
+
     let mut changed = provider.clone();
     changed.events_digest = digest(ZERO_DIGEST);
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::EventsDigestMismatch)
+    ));
+
     let mut changed = passed.clone();
     changed.events.push(JournalEvent {
         schema_version: "ao.next.journal-event.v1".into(),
@@ -462,29 +622,31 @@ fn identity_worker_authority_sequence_lifecycle_and_digest_drift_fail_closed() {
         kind: JournalEventKind::VerificationStarted { attempt: 1 },
     });
     changed.last_sequence = Some(3);
-    mutations.push(changed);
+    refresh_event_and_prefix_digests(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::Recovery(
+            ao_next_core::recovery::RecoveryError::EventSequenceInvalid
+        ))
+    ));
+
     let mut changed = passed.clone();
     changed.terminal_record = None;
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::TerminalContradiction)
+    ));
+
     let mut changed = passed.clone();
     changed.terminal_digest = Some(digest(ZERO_DIGEST));
-    mutations.push(changed);
-    let mut changed = prepared;
-    changed.prefix_digest = digest(ZERO_DIGEST);
-    mutations.push(changed);
+    refresh_prefix_digest(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::TerminalContradiction)
+    ));
 
-    for (index, changed) in mutations.iter().enumerate() {
-        assert!(
-            verify_execution_journal_prefix(changed, &request).is_err(),
-            "accepted mutation {index}"
-        );
-    }
-}
-
-#[test]
-fn invalid_effect_and_terminal_lifecycles_fail_before_digest_checks() {
-    let request = request();
-    let mut prefix = built_prefix(PrefixState::Prepared);
+    let mut changed = prepared.clone();
     let observation = EffectObservation {
         effect_id: "effect-01".into(),
         status: 0,
@@ -492,16 +654,22 @@ fn invalid_effect_and_terminal_lifecycles_fail_before_digest_checks() {
         stderr: Vec::new(),
         output_digest: digest(ZERO_DIGEST),
     };
-    prefix.events = vec![JournalEvent {
+    changed.events = vec![JournalEvent {
         schema_version: "ao.next.journal-event.v1".into(),
         sequence: 0,
         kind: JournalEventKind::EffectCompleted { observation },
     }];
-    prefix.last_sequence = Some(0);
-    assert!(verify_execution_journal_prefix(&prefix, &request).is_err());
+    changed.last_sequence = Some(0);
+    refresh_event_and_prefix_digests(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::Recovery(
+            ao_next_core::recovery::RecoveryError::EventSequenceInvalid
+        ))
+    ));
 
-    let mut prefix = built_prefix(PrefixState::Prepared);
-    prefix.events = vec![
+    let mut changed = prepared.clone();
+    changed.events = vec![
         JournalEvent {
             schema_version: "ao.next.journal-event.v1".into(),
             sequence: 0,
@@ -516,19 +684,33 @@ fn invalid_effect_and_terminal_lifecycles_fail_before_digest_checks() {
             kind: JournalEventKind::VerificationStarted { attempt: 0 },
         },
     ];
-    prefix.last_sequence = Some(1);
-    assert!(verify_execution_journal_prefix(&prefix, &request).is_err());
+    changed.last_sequence = Some(1);
+    refresh_event_and_prefix_digests(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::Recovery(
+            ao_next_core::recovery::RecoveryError::EventSequenceInvalid
+        ))
+    ));
 
-    let mut prefix = built_prefix(PrefixState::Prepared);
-    prefix.events = vec![JournalEvent {
+    let mut changed = prepared;
+    changed.events = vec![JournalEvent {
         schema_version: "ao.next.journal-event.v1".into(),
         sequence: 0,
         kind: JournalEventKind::TerminalPublished {
             record_digest: digest(ZERO_DIGEST),
         },
     }];
-    prefix.last_sequence = Some(0);
-    assert!(verify_execution_journal_prefix(&prefix, &request).is_err());
+    changed.last_sequence = Some(0);
+    changed.terminal_digest = Some(digest(ZERO_DIGEST));
+    changed.terminal_record = Some(json!({}));
+    refresh_event_and_prefix_digests(&mut changed);
+    assert!(matches!(
+        verify_execution_journal_prefix(&changed, &request),
+        Err(MissionExchangeError::Recovery(
+            ao_next_core::recovery::RecoveryError::EventSequenceInvalid
+        ))
+    ));
 }
 
 #[test]
@@ -549,6 +731,40 @@ fn repeated_builds_and_writes_are_deterministic_and_create_only() {
         canonical_json_bytes(&first).expect("canonical prefix")
     );
     assert!(write_execution_journal_prefix(&path, &second).is_err());
+}
+
+#[test]
+fn final_prefix_bound_accepts_below_and_equal_and_rejects_one_byte_over() {
+    let temporary = TempDir::new().expect("sized outputs");
+    for target in [MAXIMUM_PREFIX_BYTES - 1, MAXIMUM_PREFIX_BYTES] {
+        let prefix = prepared_prefix_with_size(target).expect("bounded prefix");
+        assert_eq!(
+            canonical_json_bytes(&prefix).expect("bounded bytes").len(),
+            target
+        );
+        let output = temporary.path().join(format!("prefix-{target}.json"));
+        write_execution_journal_prefix(&output, &prefix).expect("bounded write");
+        assert_eq!(
+            std::fs::metadata(output).expect("bounded output").len(),
+            target as u64
+        );
+    }
+
+    assert!(matches!(
+        prepared_prefix_with_size(MAXIMUM_PREFIX_BYTES + 1),
+        Err(MissionExchangeError::Oversized { actual, limit })
+            if actual == MAXIMUM_PREFIX_BYTES + 1 && limit == MAXIMUM_PREFIX_BYTES
+    ));
+
+    let mut oversized = prepared_prefix_with_size(MAXIMUM_PREFIX_BYTES).expect("equal prefix");
+    oversized.run_id.push('x');
+    let output = temporary.path().join("oversized-prefix.json");
+    assert!(matches!(
+        write_execution_journal_prefix(&output, &oversized),
+        Err(MissionExchangeError::Oversized { actual, limit })
+            if actual == MAXIMUM_PREFIX_BYTES + 1 && limit == MAXIMUM_PREFIX_BYTES
+    ));
+    assert!(!output.exists(), "oversized write created an output leaf");
 }
 
 #[test]
@@ -588,4 +804,50 @@ fn build_rejects_orphan_and_noncanonical_terminal_bytes_without_repair() {
             "accepted orphan={orphan} noncanonical terminal"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn accepted_journal_descriptor_cannot_export_aba_substitute_bytes() {
+    let temporary = TempDir::new().expect("temporary journals");
+    let request = request();
+    let public_root = temporary.path().join("journal");
+    let retained_root = temporary.path().join("retained-journal");
+    let substitute_root = temporary.path().join("substitute-journal");
+
+    let original =
+        CheckpointJournal::new(&public_root, 16 * 1024 * 1024).expect("original journal");
+    original.bind_request(&request).expect("original binding");
+    std::fs::create_dir(public_root.join("execution-events")).expect("original events");
+    let accepted = rustix::fs::open(
+        &public_root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(std::fs::File::from)
+    .expect("accepted journal descriptor");
+
+    let substitute =
+        CheckpointJournal::new(&substitute_root, 16 * 1024 * 1024).expect("substitute journal");
+    substitute
+        .bind_request(&request)
+        .expect("substitute binding");
+    substitute
+        .record_provider_request_intent(&request, &digest(ZERO_DIGEST), &digest(ONE_DIGEST))
+        .expect("substitute provider intent");
+
+    std::fs::rename(&public_root, &retained_root).expect("retain accepted journal");
+    std::fs::rename(&substitute_root, &public_root).expect("install substitute journal");
+    let opened = CheckpointJournal::open_bound_from_unix_root(
+        &public_root,
+        accepted,
+        16 * 1024 * 1024,
+        &request,
+    )
+    .expect("descriptor-bound journal");
+    let prefix = build_execution_journal_prefix(&opened, &request).expect("descriptor prefix");
+    std::fs::rename(&public_root, &substitute_root).expect("remove substitute journal");
+    std::fs::rename(&retained_root, &public_root).expect("restore accepted journal");
+
+    assert!(prefix.events.is_empty(), "exported substitute event bytes");
 }

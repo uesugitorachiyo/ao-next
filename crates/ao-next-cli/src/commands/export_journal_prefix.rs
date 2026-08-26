@@ -54,6 +54,18 @@ pub fn execute(args: &ExportJournalPrefixArgs) -> Result<CommandOutput, CommandF
 
     let journal_anchor = SafeDirectory::open(&journal_root)?;
     let output = SafeOutput::new(&output_path)?;
+    #[cfg(unix)]
+    let journal = CheckpointJournal::open_bound_from_unix_root(
+        &journal_root,
+        journal_anchor
+            .file
+            .try_clone()
+            .map_err(|error| invalid_path(error.to_string()))?,
+        MAXIMUM_PREFIX_BYTES,
+        &request,
+    )
+    .map_err(|error| CommandFailure::evidence(error.to_string()))?;
+    #[cfg(not(unix))]
     let journal = CheckpointJournal::open_bound(&journal_root, MAXIMUM_PREFIX_BYTES, &request)
         .map_err(|error| CommandFailure::evidence(error.to_string()))?;
     let prefix = build_execution_journal_prefix(&journal, &request)
@@ -629,6 +641,7 @@ impl SafeOutput {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(unix, windows))]
     use super::clean_absolute_local;
 
     #[cfg(unix)]
@@ -638,6 +651,23 @@ mod tests {
         use std::os::unix::ffi::OsStringExt as _;
 
         let path = std::path::PathBuf::from(OsString::from_vec(b"/tmp/bad\0path".to_vec()));
+        assert!(clean_absolute_local(&path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clean_windows_locator_rejects_nul() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let path = std::path::PathBuf::from(OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            b'b' as u16,
+            0,
+            b'd' as u16,
+        ]));
         assert!(clean_absolute_local(&path).is_err());
     }
 }

@@ -76,6 +76,8 @@ pub enum MissionExchangeError {
     TerminalContradiction,
     #[error("execution journal prefix digest mismatched")]
     PrefixDigestMismatch,
+    #[error("execution journal prefix is oversized: {actual} bytes exceeds {limit}")]
+    Oversized { actual: usize, limit: usize },
     #[error("execution journal prefix I/O failed: {0}")]
     Io(String),
     #[error("recovery validation failed: {0}")]
@@ -180,6 +182,17 @@ fn calculated_prefix_digest(
     })?)
 }
 
+fn bounded_prefix_bytes(prefix: &ExecutionJournalPrefix) -> Result<Vec<u8>, MissionExchangeError> {
+    let bytes = canonical_json_bytes(prefix)?;
+    if bytes.len() > MAXIMUM_PREFIX_BYTES {
+        return Err(MissionExchangeError::Oversized {
+            actual: bytes.len(),
+            limit: MAXIMUM_PREFIX_BYTES,
+        });
+    }
+    Ok(bytes)
+}
+
 /// Builds one immutable, request-bound execution journal prefix.
 ///
 /// # Errors
@@ -236,6 +249,7 @@ pub fn build_execution_journal_prefix(
     };
     prefix.prefix_digest = calculated_prefix_digest(&prefix)?;
     verify_execution_journal_prefix(&prefix, request)?;
+    bounded_prefix_bytes(&prefix)?;
     Ok(prefix)
 }
 
@@ -332,7 +346,7 @@ pub fn write_execution_journal_prefix(
     path: &Path,
     prefix: &ExecutionJournalPrefix,
 ) -> Result<(), MissionExchangeError> {
-    let bytes = canonical_json_bytes(prefix)?;
+    let bytes = bounded_prefix_bytes(prefix)?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;

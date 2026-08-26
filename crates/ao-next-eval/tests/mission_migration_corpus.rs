@@ -574,6 +574,7 @@ fn initialize_source_repository(source_root: &Path) -> String {
         ("commit.gpgsign", "false"),
         ("core.autocrlf", "false"),
         ("core.filemode", "false"),
+        ("core.longpaths", "true"),
     ] {
         run(Command::new("git").args(["-C", root, "config", key, value]));
     }

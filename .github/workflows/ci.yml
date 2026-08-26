@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -28,11 +30,22 @@ jobs:
           toolchain: 1.95.0
           components: clippy,rustfmt
 
+      - name: Install Go 1.26.4
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.4'
+
       - name: Verify public contract
         run: bash tests/bootstrap_contract.sh
 
       - name: Check formatting
         run: cargo fmt --check
+
+      - name: Check Mission formatting
+        run: test -z "$(cd mission && gofmt -d cmd internal)"
+
+      - name: Vet Mission
+        run: (cd mission && go vet ./...)
 
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -48,11 +61,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.95.0
+
+      - name: Install Go 1.26.4
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.4'
 
       - name: Validate Windows PowerShell 5.1 recovery harness
         if: matrix.os == 'windows-latest'
@@ -70,6 +90,18 @@ jobs:
 
       - name: Test recover-live
         run: cargo test -p ao-next-cli --test cli recover_live -- --nocapture
+
+      - name: Test Mission
+        shell: bash
+        run: (cd mission && go test ./... -count=1)
+
+      - name: Build Mission compatibility command
+        shell: bash
+        run: (cd mission && go build ./cmd/ao-mission)
+
+      - name: Build Mission candidate command
+        shell: bash
+        run: (cd mission && go build ./cmd/ao-next-mission)
 
       - name: Build release
         run: cargo build --locked --workspace --release

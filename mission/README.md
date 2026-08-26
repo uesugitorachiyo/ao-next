@@ -22,6 +22,19 @@ and the
 [AO Mission component page](https://github.com/uesugitorachiyo/ao-architecture/blob/main/components/ao-mission.md)
 for the cross-repository flow.
 
+## AO Next Stage 1 command
+
+`ao-next-mission` is the Stage 1 candidate command in the AO Next repository.
+It accepts the same arguments as Mission, including `--home <dir>`, and calls
+the same Mission entry point. `ao-mission` remains available here only as the
+temporary compatibility command used to verify equivalent behavior.
+
+Run the candidate and compatibility commands with separate state roots. The
+Go Mission and Rust Engine remain separate processes, state roots, and failure
+domains. Repository co-location grants neither process authority to inspect or
+mutate the other's private state, execute providers or effects, publish,
+release, deploy, promote AO Next, or retire AO2.
+
 ## Install v0.1.6
 
 Prebuilt archives are available for Linux x86_64, macOS aarch64, and Windows

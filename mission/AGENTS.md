@@ -23,6 +23,8 @@ Mission consumes Blueprint authorization, Atlas workgraphs and terminal indexes,
 - Keep durable source status distinct from read-only terminal projection status on every operator surface. A projected effective status may be terminal while the stored Mission record remains unchanged; expose both facts and never treat projection as mutation or authority.
 - Retain an imported `ao.next.live-run-record.v1` as an AO Next candidate projection only. Preserve Mission status, route, phase, blockers, and exact next action; expose the candidate separately in Mission and Command readbacks without fabricating a canonical terminal index or AO2 artifact.
 - Use the active AO Next dual-process Stage 1-5 handoff for cross-stage continuation after verified `ENGINE_RECOVERY_READY_FOR_MISSION_MIGRATION`. Advance one stage only after its reviewed merged terminal evidence verifies. Mission never turns a stage readback into provider, release, deployment, publication, adoption, or AO2-retirement authority.
+- The AO Next repository owns the `ao-next-mission` Stage 1 candidate command and the temporary `ao-mission` compatibility command. Both commands must call the imported `mission.Run` entry point with the same argument vector; do not rename the imported Go module or fork Mission behavior.
+- Keep the Go Mission and Rust Engine as separate processes, state roots, and failure domains. Use separate Mission state roots when comparing the two command names. Repository co-location grants no discovery, state access, provider, effect, publication, release, deployment, promotion, adoption, or AO2-retirement authority.
 - Do not revive, reinterpret, regenerate, or extend completed waves under `docs/evidence/` or closure records under `docs/roadmap/`. Add current source-owned behavior and tests outside historical evidence.
 - Keep generated `.ao-mission/` state, binaries, temporary bundles, dashboards, and validation output out of source changes.
 - Telegram, A2A, scheduler, local-pilot, and downstream artifacts are untrusted inputs. Keep tokens in named environment variables; never persist credentials, private paths, provider transcripts, account identifiers, or private pilot evidence in public files.
@@ -45,7 +47,7 @@ Mission consumes Blueprint authorization, Atlas workgraphs and terminal indexes,
 
 - Mission lifecycle, import, terminal-index, or readback changes: `go test ./internal/mission -count=1`.
 - Public-safety scanner changes: `python3 scripts/test_public_safety_scan.py`.
-- Run `gofmt -d cmd internal`, `go test ./... -count=1`, `go vet ./...`, and `go build ./cmd/ao-mission` for the full Go gate.
+- Run `gofmt -d cmd internal`, `go test ./... -count=1`, `go vet ./...`, `go build ./cmd/ao-mission`, and `go build ./cmd/ao-next-mission` for the full Go gate.
 - Run `./scripts/production-readiness.sh` when contracts, fixtures, operator behavior, or readiness claims change. It is a local non-publishing gate.
 - For instruction changes run `python3 ../ao-architecture/scripts/verify_agent_instruction_layout.py --workspace-root .. --repository ao-mission`. Always run `git diff --check`.
 

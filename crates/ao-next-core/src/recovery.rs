@@ -1385,6 +1385,7 @@ impl CheckpointJournal {
         Ok(events)
     }
 
+    #[cfg_attr(not(unix), allow(clippy::unused_self))]
     fn execution_event_paths(&self, directory: &Path) -> Result<Vec<PathBuf>, RecoveryError> {
         #[cfg(unix)]
         if let JournalMode::ExistingOnly(binding) = &self.mode {
@@ -1418,6 +1419,7 @@ impl CheckpointJournal {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    #[cfg_attr(not(unix), allow(clippy::unused_self))]
     fn open_execution_event_path(
         &self,
         #[allow(unused_variables)] directory: &Path,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -16,8 +17,8 @@ const (
 
 var aoNextJournalPrefixFields = map[string]string{
 	"schema_version": "string", "run_id": "string", "request_digest": "string",
-	"journal_identity": "object", "worker_count": "integer", "dynamic_fanout": "boolean",
-	"first_sequence": "integer", "last_sequence": "integer|null",
+	"journal_identity": "object", "worker_count": "uint32", "dynamic_fanout": "boolean",
+	"first_sequence": "uint64", "last_sequence": "uint64|null",
 	"preceding_prefix_digest": "string|null", "events_digest": "string", "events": "array",
 	"terminal_digest": "string|null", "terminal_record": "object|null",
 	"safe_to_execute": "boolean", "executes_work": "boolean", "approves_work": "boolean",
@@ -32,7 +33,7 @@ var aoNextJournalIdentityFields = map[string]string{
 }
 
 var aoNextJournalEventFields = map[string]string{
-	"schema_version": "string", "sequence": "integer", "kind": "object",
+	"schema_version": "string", "sequence": "uint64", "kind": "object",
 }
 
 var aoNextJournalEventKindFields = map[string]map[string]string{
@@ -47,13 +48,13 @@ var aoNextJournalEventKindFields = map[string]map[string]string{
 	"effect_intent":                    {"kind": "string", "effect_id": "string", "effect_digest": "string"},
 	"effect_committed":                 {"kind": "string", "effect_id": "string"},
 	"effect_completed":                 {"kind": "string", "observation": "object"},
-	"verification_started":             {"kind": "string", "attempt": "integer"},
+	"verification_started":             {"kind": "string", "attempt": "uint32"},
 	"verifier_recorded":                {"kind": "string", "report_digest": "string"},
 	"terminal_published":               {"kind": "string", "record_digest": "string"},
 }
 
 var aoNextJournalEffectObservationFields = map[string]string{
-	"effect_id": "string", "output_digest": "string", "status": "integer",
+	"effect_id": "string", "output_digest": "string", "status": "int32",
 	"stderr": "array", "stdout": "array",
 }
 
@@ -66,9 +67,30 @@ var aoNextJournalTerminalFields = map[string]string{
 }
 
 var aoNextJournalTokenFields = map[string]string{
-	"input_tokens": "integer|null", "cached_input_tokens": "integer|null",
-	"reasoning_tokens": "integer|null", "output_tokens": "integer|null",
-	"reported_total_tokens": "integer",
+	"input_tokens": "uint64|null", "cached_input_tokens": "uint64|null",
+	"reasoning_tokens": "uint64|null", "output_tokens": "uint64|null",
+	"reported_total_tokens": "uint64",
+}
+
+var aoNextJournalMeasurementFields = map[string]string{
+	"schema_version": "string", "corpus_digest": "string", "run_id": "string",
+	"trial_id": "string", "trial_index": "uint32", "schedule_position": "uint32",
+	"raw_capture_digest": "string", "raw_capture_digests": "array",
+	"workspace_instance_id": "string", "task_id": "string", "variant": "string",
+	"source_digest": "string", "objective_digest": "string", "workspace_seed_digest": "string",
+	"visible_fixtures_digest": "string", "hidden_tests_digest": "string",
+	"verifier_profile_digest": "string", "runtime": "string", "runtime_digest": "string",
+	"model_identifier": "string", "model_digest": "string", "prompt_digest": "string",
+	"policy_digest": "string", "adapter_version": "string", "adapter_digest": "string",
+	"measurement_origin": "string", "provider_usage_trusted": "boolean", "tokens": "object",
+	"wall_clock_ms": "uint64", "model_wait_ms": "uint64", "worker_turns": "uint32",
+	"repair_attempts": "uint32", "operator_interventions": "uint32", "changed_files": "uint32",
+	"accepted_changed_files": "uint32", "task_success": "boolean",
+	"hidden_tests_passed": "uint32", "hidden_tests_total": "uint32", "regressions": "uint32",
+	"unauthorized_effects": "uint32", "evidence_complete": "boolean",
+	"evidence_digest_valid": "boolean", "recovery_attempted": "boolean",
+	"recovery_no_duplicate_effect": "boolean", "cross_runtime_agreement": "boolean",
+	"worker_count": "uint32", "dynamic_fanout": "boolean", "hidden_test_exposure": "boolean",
 }
 
 var aoNextJournalGitWorkspaceFields = map[string]string{
@@ -141,19 +163,87 @@ type aoNextJournalEffectObservation struct {
 	Stdout       []byte `json:"stdout"`
 }
 
+type aoNextJournalTokenRow struct {
+	InputTokens         *uint64 `json:"input_tokens"`
+	CachedInputTokens   *uint64 `json:"cached_input_tokens"`
+	ReasoningTokens     *uint64 `json:"reasoning_tokens"`
+	OutputTokens        *uint64 `json:"output_tokens"`
+	ReportedTotalTokens uint64  `json:"reported_total_tokens"`
+}
+
+type aoNextJournalMeasurement struct {
+	SchemaVersion             string                `json:"schema_version"`
+	CorpusDigest              string                `json:"corpus_digest"`
+	RunID                     string                `json:"run_id"`
+	TrialID                   string                `json:"trial_id"`
+	TrialIndex                uint32                `json:"trial_index"`
+	SchedulePosition          uint32                `json:"schedule_position"`
+	RawCaptureDigest          string                `json:"raw_capture_digest"`
+	RawCaptureDigests         []string              `json:"raw_capture_digests"`
+	WorkspaceInstanceID       string                `json:"workspace_instance_id"`
+	TaskID                    string                `json:"task_id"`
+	Variant                   string                `json:"variant"`
+	SourceDigest              string                `json:"source_digest"`
+	ObjectiveDigest           string                `json:"objective_digest"`
+	WorkspaceSeedDigest       string                `json:"workspace_seed_digest"`
+	VisibleFixturesDigest     string                `json:"visible_fixtures_digest"`
+	HiddenTestsDigest         string                `json:"hidden_tests_digest"`
+	VerifierProfileDigest     string                `json:"verifier_profile_digest"`
+	Runtime                   string                `json:"runtime"`
+	RuntimeDigest             string                `json:"runtime_digest"`
+	ModelIdentifier           string                `json:"model_identifier"`
+	ModelDigest               string                `json:"model_digest"`
+	PromptDigest              string                `json:"prompt_digest"`
+	PolicyDigest              string                `json:"policy_digest"`
+	AdapterVersion            string                `json:"adapter_version"`
+	AdapterDigest             string                `json:"adapter_digest"`
+	MeasurementOrigin         string                `json:"measurement_origin"`
+	ProviderUsageTrusted      bool                  `json:"provider_usage_trusted"`
+	Tokens                    aoNextJournalTokenRow `json:"tokens"`
+	WallClockMS               uint64                `json:"wall_clock_ms"`
+	ModelWaitMS               uint64                `json:"model_wait_ms"`
+	WorkerTurns               uint32                `json:"worker_turns"`
+	RepairAttempts            uint32                `json:"repair_attempts"`
+	OperatorInterventions     uint32                `json:"operator_interventions"`
+	ChangedFiles              uint32                `json:"changed_files"`
+	AcceptedChangedFiles      uint32                `json:"accepted_changed_files"`
+	TaskSuccess               bool                  `json:"task_success"`
+	HiddenTestsPassed         uint32                `json:"hidden_tests_passed"`
+	HiddenTestsTotal          uint32                `json:"hidden_tests_total"`
+	Regressions               uint32                `json:"regressions"`
+	UnauthorizedEffects       uint32                `json:"unauthorized_effects"`
+	EvidenceComplete          bool                  `json:"evidence_complete"`
+	EvidenceDigestValid       bool                  `json:"evidence_digest_valid"`
+	RecoveryAttempted         bool                  `json:"recovery_attempted"`
+	RecoveryNoDuplicateEffect bool                  `json:"recovery_no_duplicate_effect"`
+	CrossRuntimeAgreement     bool                  `json:"cross_runtime_agreement"`
+	WorkerCount               uint32                `json:"worker_count"`
+	DynamicFanout             bool                  `json:"dynamic_fanout"`
+	HiddenTestExposure        bool                  `json:"hidden_test_exposure"`
+}
+
+type aoNextJournalGitWorkspace struct {
+	RepositoryRoot string `json:"repository_root"`
+	CommonDir      string `json:"common_dir"`
+	HeadCommit     string `json:"head_commit"`
+	Branch         string `json:"branch"`
+	ControlDigest  string `json:"control_digest"`
+	IndexDigest    string `json:"index_digest"`
+}
+
 type aoNextJournalTerminalRecord struct {
-	SchemaVersion              string         `json:"schema_version"`
-	Variant                    string         `json:"variant"`
-	TerminalState              string         `json:"terminal_state"`
-	Measurement                map[string]any `json:"measurement"`
-	CaptureDigests             []string       `json:"capture_digests"`
-	RawCaptureIndexDigest      string         `json:"raw_capture_index_digest"`
-	VerifierReportDigest       *string        `json:"verifier_report_digest"`
-	N7ExecutionAuthorityDigest *string        `json:"n7_execution_authority_digest"`
-	GitWorkspace               map[string]any `json:"git_workspace"`
-	AO2ControlDiagnostics      []any          `json:"ao2_control_diagnostics"`
-	NativeEffectObservations   []any          `json:"native_effect_observations"`
-	RecordDigest               string         `json:"record_digest"`
+	SchemaVersion              string                           `json:"schema_version"`
+	Variant                    string                           `json:"variant"`
+	TerminalState              string                           `json:"terminal_state"`
+	Measurement                aoNextJournalMeasurement         `json:"measurement"`
+	CaptureDigests             []string                         `json:"capture_digests"`
+	RawCaptureIndexDigest      string                           `json:"raw_capture_index_digest"`
+	VerifierReportDigest       *string                          `json:"verifier_report_digest"`
+	N7ExecutionAuthorityDigest *string                          `json:"n7_execution_authority_digest"`
+	GitWorkspace               aoNextJournalGitWorkspace        `json:"git_workspace"`
+	AO2ControlDiagnostics      []any                            `json:"ao2_control_diagnostics"`
+	NativeEffectObservations   []aoNextJournalEffectObservation `json:"native_effect_observations"`
+	RecordDigest               string                           `json:"record_digest"`
 }
 
 type aoNextJournalLifecycle struct {
@@ -162,6 +252,7 @@ type aoNextJournalLifecycle struct {
 	verificationSeen bool
 	verificationOpen bool
 	verifierRecords  uint32
+	verifierDigest   string
 	terminalState    string
 }
 
@@ -250,7 +341,7 @@ func validateAONextJournalNestedFields(document map[string]any) error {
 		return err
 	}
 	measurement, _ := terminal["measurement"].(map[string]any)
-	if err := validateAONextCandidateFields(measurement, aoNextCandidateMeasurementFields, mapKeys(aoNextCandidateMeasurementFields), "AO Next journal measurement"); err != nil {
+	if err := validateAONextCandidateFields(measurement, aoNextJournalMeasurementFields, mapKeys(aoNextJournalMeasurementFields), "AO Next journal measurement"); err != nil {
 		return err
 	}
 	tokens, _ := measurement["tokens"].(map[string]any)
@@ -447,6 +538,7 @@ func validateAONextJournalLifecycle(events []aoNextJournalEvent) (aoNextJournalL
 			}
 			state.verificationOpen = false
 			state.verifierRecords++
+			state.verifierDigest = kind.ReportDigest
 		case "terminal_published":
 			if state.verificationOpen || state.verifierRecords == 0 || !validJournalDigests(kind.RecordDigest) {
 				return state, fmt.Errorf("AO Next journal lifecycle is invalid")
@@ -476,11 +568,17 @@ func validateAONextJournalTerminal(prefix aoNextJournalPrefix, document map[stri
 		return fmt.Errorf("AO Next journal terminal record is contradictory")
 	}
 	terminal := prefix.TerminalRecord
+	typedMeasurement := terminal.Measurement
 	measurement := terminalDocument["measurement"].(map[string]any)
 	if terminal.SchemaVersion != "ao.next.live-run-record.v1" || terminal.Variant != "N7" ||
-		stringFromAny(measurement["schema_version"]) != "ao.next.run-measurement.v2" ||
-		stringFromAny(measurement["variant"]) != "N7" || stringFromAny(measurement["run_id"]) != prefix.RunID {
+		typedMeasurement.SchemaVersion != "ao.next.run-measurement.v2" ||
+		typedMeasurement.Variant != "N7" || typedMeasurement.RunID != prefix.RunID {
 		return fmt.Errorf("AO Next journal terminal schema or run identity is unsupported")
+	}
+	if typedMeasurement.MeasurementOrigin != "synthetic" &&
+		typedMeasurement.MeasurementOrigin != "offline_fixture" &&
+		typedMeasurement.MeasurementOrigin != "live_provider" {
+		return fmt.Errorf("AO Next journal terminal measurement_origin is unsupported")
 	}
 	if terminal.TerminalState != "passed" && terminal.TerminalState != "failed" && terminal.TerminalState != "denied" && terminal.TerminalState != "interrupted" {
 		return fmt.Errorf("AO Next journal terminal state is unsupported")
@@ -495,24 +593,16 @@ func validateAONextJournalTerminal(prefix aoNextJournalPrefix, document map[stri
 			return fmt.Errorf("AO Next journal terminal measurement identity is required")
 		}
 	}
-	for field, kind := range aoNextCandidateMeasurementFields {
-		if kind == "integer" {
-			value, ok := strictJSONInteger(measurement[field])
-			if !ok || value < 0 {
-				return fmt.Errorf("AO Next journal measurement field %q must be a non-negative integer", field)
-			}
-		}
-	}
-	if intFromJSONNumber(measurement["worker_count"]) != 1 || boolFromAny(measurement["dynamic_fanout"]) ||
-		boolFromAny(measurement["hidden_test_exposure"]) || intFromJSONNumber(measurement["unauthorized_effects"]) != 0 ||
-		!boolFromAny(measurement["cross_runtime_agreement"]) {
+	if typedMeasurement.WorkerCount != 1 || typedMeasurement.DynamicFanout ||
+		typedMeasurement.HiddenTestExposure || typedMeasurement.UnauthorizedEffects != 0 ||
+		!typedMeasurement.CrossRuntimeAgreement {
 		return fmt.Errorf("AO Next journal terminal violates the one-worker safety boundary")
 	}
-	taskSuccess := boolFromAny(measurement["task_success"])
+	taskSuccess := typedMeasurement.TaskSuccess
 	if taskSuccess != (terminal.TerminalState == "passed") {
 		return fmt.Errorf("AO Next journal terminal state contradicts task success")
 	}
-	if terminal.TerminalState == "passed" && (!boolFromAny(measurement["evidence_complete"]) || !boolFromAny(measurement["evidence_digest_valid"])) {
+	if terminal.TerminalState == "passed" && (!typedMeasurement.EvidenceComplete || !typedMeasurement.EvidenceDigestValid) {
 		return fmt.Errorf("passed AO Next journal terminal lacks complete valid evidence")
 	}
 	if err := validateAONextJournalTokens(measurement["tokens"].(map[string]any)); err != nil {
@@ -526,6 +616,9 @@ func validateAONextJournalTerminal(prefix aoNextJournalPrefix, document map[stri
 			return fmt.Errorf("AO Next journal terminal optional digest is invalid")
 		}
 	}
+	if terminal.VerifierReportDigest == nil || *terminal.VerifierReportDigest != lifecycle.verifierDigest {
+		return fmt.Errorf("AO Next journal terminal verifier digest mismatched")
+	}
 	workspace := terminalDocument["git_workspace"].(map[string]any)
 	if !validJournalDigests(stringFromAny(workspace["control_digest"]), stringFromAny(workspace["index_digest"])) {
 		return fmt.Errorf("AO Next journal terminal Git workspace digest is invalid")
@@ -535,8 +628,8 @@ func validateAONextJournalTerminal(prefix aoNextJournalPrefix, document map[stri
 			return fmt.Errorf("AO Next journal terminal Git workspace identity is required")
 		}
 	}
-	rawCaptureDigests, ok := stringArray(measurement["raw_capture_digests"])
-	if !ok || len(rawCaptureDigests) == 0 || !validJournalDigests(rawCaptureDigests...) {
+	rawCaptureDigests := typedMeasurement.RawCaptureDigests
+	if len(rawCaptureDigests) == 0 || !validJournalDigests(rawCaptureDigests...) {
 		return fmt.Errorf("AO Next journal terminal raw capture evidence is invalid")
 	}
 	rawDigest, err := canonicalAONextJournalDigest(measurement["raw_capture_digests"])
@@ -570,20 +663,20 @@ func validateAONextJournalTokens(tokens map[string]any) error {
 			allPresent = false
 			continue
 		}
-		value, ok := strictJSONInteger(tokens[field])
-		if !ok || value < 0 {
+		value, ok := strictJSONUnsigned(tokens[field], 64)
+		if !ok {
 			return fmt.Errorf("AO Next journal token field %q must be a non-negative integer or null", field)
 		}
-		if math.MaxUint64-total < uint64(value) {
+		if math.MaxUint64-total < value {
 			return fmt.Errorf("AO Next journal token total overflowed")
 		}
-		total += uint64(value)
+		total += value
 	}
-	reported, ok := strictJSONInteger(tokens["reported_total_tokens"])
-	if !ok || reported < 0 {
+	reported, ok := strictJSONUnsigned(tokens["reported_total_tokens"], 64)
+	if !ok {
 		return fmt.Errorf("AO Next journal token reported total must be a non-negative integer")
 	}
-	if allPresent && total != uint64(reported) {
+	if allPresent && total != reported {
 		return fmt.Errorf("AO Next journal token reported total %d differs from calculated %d", reported, total)
 	}
 	return nil
@@ -644,9 +737,13 @@ func strictJSONInteger(value any) (int64, bool) {
 	return parsed, err == nil
 }
 
-func intFromJSONNumber(value any) int64 {
-	parsed, _ := strictJSONInteger(value)
-	return parsed
+func strictJSONUnsigned(value any, bits int) (uint64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseUint(number.String(), 10, bits)
+	return parsed, err == nil
 }
 
 func validJournalDigests(digests ...string) bool {
@@ -656,22 +753,6 @@ func validJournalDigests(digests ...string) bool {
 		}
 	}
 	return true
-}
-
-func stringArray(value any) ([]string, bool) {
-	raw, ok := value.([]any)
-	if !ok {
-		return nil, false
-	}
-	strings := make([]string, len(raw))
-	for index, value := range raw {
-		stringValue, ok := value.(string)
-		if !ok {
-			return nil, false
-		}
-		strings[index] = stringValue
-	}
-	return strings, true
 }
 
 func equalStrings(left, right []string) bool {

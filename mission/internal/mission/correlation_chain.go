@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -1312,6 +1313,27 @@ func strictJSONTypeMatches(value any, want string) bool {
 			number, ok := value.(json.Number)
 			if ok {
 				if _, err := number.Int64(); err == nil {
+					matched = true
+				}
+			}
+		case "int32":
+			number, ok := value.(json.Number)
+			if ok {
+				if _, err := strconv.ParseInt(number.String(), 10, 32); err == nil {
+					matched = true
+				}
+			}
+		case "uint32":
+			number, ok := value.(json.Number)
+			if ok {
+				if _, err := strconv.ParseUint(number.String(), 10, 32); err == nil {
+					matched = true
+				}
+			}
+		case "uint64":
+			number, ok := value.(json.Number)
+			if ok {
+				if _, err := strconv.ParseUint(number.String(), 10, 64); err == nil {
 					matched = true
 				}
 			}

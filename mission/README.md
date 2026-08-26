@@ -193,7 +193,7 @@ legacy records continue to omit that optional field.
 By default state is stored under `.ao-mission/`. Use `AO_MISSION_HOME` to choose another state root.
 Every command also accepts `--home <dir>` before the command name for explicit local state routing.
 
-The AO Next journal-prefix import accepts one immutable `ao.next.execution-journal-prefix.v1` at a clean absolute locator outside the Mission state root. Mission retains the exact bytes and original locator, then exposes a separate read-only `ao_next_journal_projection` without changing durable Mission lifecycle state or the existing AO Next terminal candidate projection. Exact-byte reimport is idempotent; a changed digest for the same run fails before retention. See [AO Next candidate and journal-prefix imports](docs/contracts/ao-next-candidate-terminal-import.md).
+The AO Next journal-prefix import accepts one immutable `ao.next.execution-journal-prefix.v1` at a clean absolute locator outside the Mission state root. Mission retains the exact bytes and original locator, then exposes a separate read-only `ao_next_journal_projection`. The record-only transaction leaves `updated_at_utc`, checkpoints, event decisions, durable Mission lifecycle state, and the existing AO Next terminal candidate projection unchanged. Exact-byte reimport is idempotent; the Mission lock rejects a concurrent changed digest for the same run before retention. See [AO Next candidate and journal-prefix imports](docs/contracts/ao-next-candidate-terminal-import.md).
 
 Pass `--evidence-root <dir>` to recommendation-bearing final commands. When it
 is omitted, Mission emits `<evidence-root>` rather than selecting a

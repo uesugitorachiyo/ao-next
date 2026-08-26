@@ -110,16 +110,19 @@ func ValidateContractFile(path string) (ContractValidation, error) {
 }
 
 func contractDiscriminator(doc map[string]any) (string, error) {
-	values := []string{
-		stringFromAny(doc["schema"]),
-		stringFromAny(doc["schema_version"]),
-		stringFromAny(doc["contract_version"]),
-	}
 	selected := ""
-	for _, value := range values {
+	for _, field := range []string{"schema", "schema_version", "contract_version"} {
+		raw, present := doc[field]
+		if !present {
+			continue
+		}
+		value, ok := raw.(string)
+		if !ok {
+			return "", fmt.Errorf("contract discriminator field %s must be a string", field)
+		}
 		value = strings.TrimSpace(value)
 		if value == "" {
-			continue
+			return "", fmt.Errorf("contract discriminator field %s must be a non-empty string", field)
 		}
 		if selected != "" && selected != value {
 			return "", fmt.Errorf("contract discriminator fields conflict")
@@ -379,12 +382,11 @@ func requiredFieldsForContract(schema string) []string {
 	case ArtifactRefSchema:
 		return []string{"schema", "ref"}
 	default:
-		return []string{"schema"}
+		return nil
 	}
 }
 
 func propertyTypesForContract(schema string) map[string]string {
-	commonString := map[string]string{"schema": "string"}
 	switch schema {
 	case "ao.next.execution-journal-prefix.v1":
 		return nil
@@ -431,7 +433,7 @@ func propertyTypesForContract(schema string) map[string]string {
 	case ArtifactRefSchema:
 		return map[string]string{"schema": "string", "ref": "string", "content_ref": "string", "digest": "string", "kind": "string"}
 	default:
-		return commonString
+		return nil
 	}
 }
 

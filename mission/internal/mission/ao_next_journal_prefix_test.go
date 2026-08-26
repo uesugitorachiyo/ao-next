@@ -11,7 +11,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const journalTestZeroDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -72,7 +74,10 @@ func TestAONextJournalImportIsReadOnlyAndDigestIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := record
+	beforeRecord := journalTestReadOptional(t, store.path(record.MissionID))
+	beforeCheckpoint := journalTestReadOptional(t, store.checkpointPath(record.MissionID))
 	beforeEvent := journalTestReadOptional(t, store.eventLoopPath(record.MissionID))
+	store.Clock = func() time.Time { return time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC) }
 
 	body := validAONextJournalPrefix(t, "passed")
 	path := filepath.Join(externalDirectory, "Engine exports", "prefix 日本語.json")
@@ -95,6 +100,16 @@ func TestAONextJournalImportIsReadOnlyAndDigestIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertJournalLifecycleUnchanged(t, before, imported)
+	afterRecord := journalTestReadOptional(t, store.path(record.MissionID))
+	if imported.UpdatedAtUTC != before.UpdatedAtUTC {
+		t.Fatalf("journal import changed updated_at_utc: before=%q after=%q", before.UpdatedAtUTC, imported.UpdatedAtUTC)
+	}
+	if !journalTestRecordDiffIsOnlyImport(t, beforeRecord, afterRecord) {
+		t.Fatal("journal import changed record fields outside projection and artifact_refs")
+	}
+	if afterCheckpoint := journalTestReadOptional(t, store.checkpointPath(record.MissionID)); !bytes.Equal(beforeCheckpoint, afterCheckpoint) {
+		t.Fatal("read-only import rewrote checkpoint bytes")
+	}
 	projection := imported.Evidence.AONextJournalProjection
 	if projection == nil || projection.Schema != "ao.mission.ao-next-journal-projection.v1" ||
 		projection.RunID != "run-stage1-export" || projection.Status != "passed" ||
@@ -139,6 +154,119 @@ func TestAONextJournalImportIsReadOnlyAndDigestIdempotent(t *testing.T) {
 	}
 	if reimported.ArtifactRefs[len(reimported.ArtifactRefs)-1].Ref != path || len(reimported.ArtifactRefs) != len(imported.ArtifactRefs) {
 		t.Fatalf("exact digest reimport replaced provenance or duplicated refs: %#v", reimported)
+	}
+}
+
+func TestAONextJournalConcurrentConflictRetainsOnlyWinner(t *testing.T) {
+	directory := t.TempDir()
+	store := NewStore(filepath.Join(directory, "home"))
+	record, err := store.Start("concurrent AO Next journal imports")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		filepath.Join(journalTestResolvedTempDir(t), "prepared.json"),
+		filepath.Join(journalTestResolvedTempDir(t), "intent.json"),
+	}
+	for index, body := range [][]byte{validAONextJournalPrefix(t, "prepared"), validAONextJournalPrefix(t, "provider_intent_recorded")} {
+		if err := os.WriteFile(paths[index], body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	originalHook := beforeAONextJournalImportLock
+	defer func() { beforeAONextJournalImportLock = originalHook }()
+	var mutex sync.Mutex
+	arrived := 0
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	beforeAONextJournalImportLock = func() {
+		mutex.Lock()
+		arrived++
+		if arrived == 2 {
+			close(ready)
+		}
+		mutex.Unlock()
+		<-release
+	}
+
+	type result struct {
+		readback ImportReadback
+		err      error
+	}
+	results := make(chan result, 2)
+	for _, path := range paths {
+		go func() {
+			readback, err := ImportArtifact(store, record.MissionID, aoNextJournalPrefixImportKind, path)
+			results <- result{readback: readback, err: err}
+		}()
+	}
+	<-ready
+	close(release)
+
+	var winner ImportReadback
+	succeeded := 0
+	failed := 0
+	for range paths {
+		result := <-results
+		if result.err == nil {
+			succeeded++
+			winner = result.readback
+		} else if strings.Contains(result.err.Error(), "already bound to a different digest") {
+			failed++
+		} else {
+			t.Fatalf("unexpected concurrent import error: %v", result.err)
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Fatalf("concurrent results: succeeded=%d failed=%d", succeeded, failed)
+	}
+	objects := journalTestArtifactObjects(t, store.Root)
+	if len(objects) != 1 || objects[0] != strings.TrimPrefix(winner.Artifact.Digest, "sha256:") {
+		t.Fatalf("retained objects=%v winner=%s", objects, winner.Artifact.Digest)
+	}
+}
+
+func TestAONextJournalRecordOnlyTransactionRecoversWithoutSidecarDrift(t *testing.T) {
+	directory := t.TempDir()
+	store := NewStore(filepath.Join(directory, "home"))
+	record, err := store.Start("recover AO Next journal record-only transaction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = Continue(store, record.MissionID, ContinueOptions{MaxIterations: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRecord := journalTestReadOptional(t, store.path(record.MissionID))
+	beforeCheckpoint := journalTestReadOptional(t, store.checkpointPath(record.MissionID))
+	beforeEvent := journalTestReadOptional(t, store.eventLoopPath(record.MissionID))
+	path := filepath.Join(journalTestResolvedTempDir(t), "prefix.json")
+	if err := os.WriteFile(path, validAONextJournalPrefix(t, "prepared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.transactionFault = func(stage string, _ missionTransactionPaths) error {
+		if stage == "before_journal_commit" {
+			return fmt.Errorf("injected record-only interruption")
+		}
+		return nil
+	}
+	if _, err := ImportArtifact(store, record.MissionID, aoNextJournalPrefixImportKind, path); err == nil ||
+		!strings.Contains(err.Error(), "injected record-only interruption") {
+		t.Fatalf("interrupted import error=%v", err)
+	}
+	store.transactionFault = nil
+	if _, err := store.Load(record.MissionID); err != nil {
+		t.Fatal(err)
+	}
+	if after := journalTestReadOptional(t, store.path(record.MissionID)); !bytes.Equal(beforeRecord, after) {
+		t.Fatal("recovery did not restore exact record bytes")
+	}
+	if after := journalTestReadOptional(t, store.checkpointPath(record.MissionID)); !bytes.Equal(beforeCheckpoint, after) {
+		t.Fatal("recovery changed checkpoint bytes")
+	}
+	if after := journalTestReadOptional(t, store.eventLoopPath(record.MissionID)); !bytes.Equal(beforeEvent, after) {
+		t.Fatal("recovery changed event-decision bytes")
 	}
 }
 
@@ -301,7 +429,7 @@ func TestAONextJournalPrefixRejectsExactJSONClasses(t *testing.T) {
 		{"duplicate-key", []byte(strings.Replace(string(valid), `"schema_version":`, `"schema_version":"ao.next.execution-journal-prefix.v1","schema_version":`, 1)), `duplicate key "schema_version"`},
 		{"casing", []byte(strings.Replace(string(valid), `"schema_version":`, `"Schema_Version":`, 1)), `contract field "Schema_Version" must use exact lowercase spelling "schema_version"`},
 		{"trailing", append(append([]byte(nil), valid...), []byte("\n{}")...), "trailing JSON is not allowed"},
-		{"integer-type", []byte(strings.Replace(string(valid), `"worker_count":1`, `"worker_count":"1"`, 1)), `field "worker_count" must be integer`},
+		{"integer-type", []byte(strings.Replace(string(valid), `"worker_count":1`, `"worker_count":"1"`, 1)), `field "worker_count" must be uint32`},
 		{"unknown-field", []byte(strings.Replace(string(valid), "{", `{"extra":false,`, 1)), `contains unknown field "extra"`},
 	}
 	for _, test := range tests {
@@ -325,6 +453,62 @@ func TestAONextJournalPrefixRejectsNestedNativeEffectDrift(t *testing.T) {
 		!strings.Contains(err.Error(), `contains unknown field "extra"`) {
 		t.Fatalf("nested native effect drift error=%v", err)
 	}
+}
+
+func TestAONextJournalTerminalMatchesProducerSchemaAndVerifier(t *testing.T) {
+	t.Run("measurement-origin-enum", func(t *testing.T) {
+		document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
+		journalTestMeasurement(t, document)["measurement_origin"] = "invented"
+		journalTestRefreshTerminalPrefix(t, document)
+		if _, err := parseAONextJournalPrefix(journalTestJSON(t, document)); err == nil ||
+			!strings.Contains(err.Error(), "measurement_origin") {
+			t.Fatalf("invalid measurement origin error=%v", err)
+		}
+	})
+
+	t.Run("u32-overflow", func(t *testing.T) {
+		document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
+		journalTestMeasurement(t, document)["worker_turns"] = json.Number("4294967296")
+		journalTestRefreshTerminalPrefix(t, document)
+		if _, err := parseAONextJournalPrefix(journalTestJSON(t, document)); err == nil ||
+			!strings.Contains(err.Error(), "worker_turns") {
+			t.Fatalf("u32 overflow error=%v", err)
+		}
+	})
+
+	t.Run("u64-maximum", func(t *testing.T) {
+		document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
+		journalTestMeasurement(t, document)["wall_clock_ms"] = json.Number("18446744073709551615")
+		journalTestRefreshTerminalPrefix(t, document)
+		if _, err := parseAONextJournalPrefix(journalTestJSON(t, document)); err != nil {
+			t.Fatalf("producer-valid u64 maximum rejected: %v", err)
+		}
+	})
+
+	t.Run("native-effect-int32-overflow", func(t *testing.T) {
+		document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
+		terminal := document["terminal_record"].(map[string]any)
+		terminal["native_effect_observations"] = []any{map[string]any{
+			"effect_id": "effect-1", "output_digest": journalTestZeroDigest,
+			"status": json.Number("2147483648"), "stdout": []any{}, "stderr": []any{},
+		}}
+		journalTestRefreshTerminalPrefix(t, document)
+		if _, err := parseAONextJournalPrefix(journalTestJSON(t, document)); err == nil ||
+			!strings.Contains(err.Error(), "status") {
+			t.Fatalf("native effect int32 overflow error=%v", err)
+		}
+	})
+
+	t.Run("verifier-digest-mismatch", func(t *testing.T) {
+		document := journalTestDocument(t, validAONextJournalPrefix(t, "passed"))
+		terminal := document["terminal_record"].(map[string]any)
+		terminal["verifier_report_digest"] = journalTestZeroDigest
+		journalTestRefreshTerminalPrefix(t, document)
+		if _, err := parseAONextJournalPrefix(journalTestJSON(t, document)); err == nil ||
+			!strings.Contains(err.Error(), "verifier") {
+			t.Fatalf("verifier mismatch error=%v", err)
+		}
+	})
 }
 
 func TestAONextJournalTokenRowNullableContract(t *testing.T) {
@@ -553,6 +737,19 @@ func journalTestTokens(t *testing.T, document map[string]any) map[string]any {
 	return tokens
 }
 
+func journalTestMeasurement(t *testing.T, document map[string]any) map[string]any {
+	t.Helper()
+	terminal, ok := document["terminal_record"].(map[string]any)
+	if !ok {
+		t.Fatal("terminal record is not an object")
+	}
+	measurement, ok := terminal["measurement"].(map[string]any)
+	if !ok {
+		t.Fatal("measurement is not an object")
+	}
+	return measurement
+}
+
 func readJournalPrefixFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	path := filepath.Join("..", "..", "..", "tests", "fixtures", "mission-migration", "journal-prefix", name)
@@ -606,6 +803,42 @@ func journalTestResolvedTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return resolved
+}
+
+func journalTestRecordDiffIsOnlyImport(t *testing.T, beforeBody, afterBody []byte) bool {
+	t.Helper()
+	before := journalTestDocument(t, beforeBody)
+	after := journalTestDocument(t, afterBody)
+	after["artifact_refs"] = before["artifact_refs"]
+	beforeEvidence, _ := before["evidence"].(map[string]any)
+	afterEvidence, _ := after["evidence"].(map[string]any)
+	delete(afterEvidence, "ao_next_journal_projection")
+	if beforeEvidence == nil {
+		beforeEvidence = map[string]any{}
+	}
+	if afterEvidence == nil {
+		afterEvidence = map[string]any{}
+	}
+	before["evidence"] = beforeEvidence
+	after["evidence"] = afterEvidence
+	return reflect.DeepEqual(before, after)
+}
+
+func journalTestArtifactObjects(t *testing.T, root string) []string {
+	t.Helper()
+	directory := filepath.Join(root, retainedArtifactDirectory)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			objects = append(objects, entry.Name())
+		}
+	}
+	sort.Strings(objects)
+	return objects
 }
 
 type journalTestSnapshotEntry struct {

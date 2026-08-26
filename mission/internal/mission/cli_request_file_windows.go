@@ -9,9 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unsafe"
 )
 
 const aoNextJournalWindowsBackupSemantics = 0x0200_0000
+
+var beforeAONextJournalWindowsComponentOpen = func(string, string) error { return nil }
+
+var getFinalPathNameByHandle = syscall.NewLazyDLL("kernel32.dll").NewProc("GetFinalPathNameByHandleW")
 
 func readBoundedRegularFile(path string, limit int64) ([]byte, error) {
 	pathInfo, err := os.Lstat(path)
@@ -70,40 +75,27 @@ func readBoundedAbsoluteRegularFileOutsideRoot(path, excludedRoot string, limit 
 	}
 	parts := strings.FieldsFunc(remainder, func(r rune) bool { return r == '\\' || r == '/' })
 	current := volume + string(filepath.Separator)
+	ancestors := make([]syscall.Handle, 0, len(parts)-1)
+	defer func() {
+		for _, handle := range ancestors {
+			_ = syscall.CloseHandle(handle)
+		}
+	}()
 	var leaf *os.File
 	var before syscall.ByHandleFileInformation
 	for index, part := range parts {
+		parent := current
 		current = filepath.Join(current, part)
-		pointer, err := syscall.UTF16PtrFromString(current)
-		if err != nil {
-			return "", nil, err
-		}
-		handle, err := syscall.CreateFile(
-			pointer,
-			syscall.GENERIC_READ,
-			syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
-			nil,
-			syscall.OPEN_EXISTING,
-			syscall.FILE_ATTRIBUTE_NORMAL|syscall.FILE_FLAG_OPEN_REPARSE_POINT|aoNextJournalWindowsBackupSemantics,
-			0,
-		)
-		if err != nil {
-			return "", nil, err
-		}
-		var information syscall.ByHandleFileInformation
-		if err := syscall.GetFileInformationByHandle(handle, &information); err != nil {
-			_ = syscall.CloseHandle(handle)
+		if err := beforeAONextJournalWindowsComponentOpen(parent, current); err != nil {
 			return "", nil, err
 		}
 		last := index == len(parts)-1
-		if information.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
-			(!last && information.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0) ||
-			(last && information.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0) {
-			_ = syscall.CloseHandle(handle)
-			return "", nil, fmt.Errorf("AO Next journal locator contains a reparse or non-regular component")
+		handle, information, err := openAONextJournalWindowsComponent(current, last)
+		if err != nil {
+			return "", nil, err
 		}
 		if !last {
-			_ = syscall.CloseHandle(handle)
+			ancestors = append(ancestors, handle)
 			continue
 		}
 		leaf = os.NewFile(uintptr(handle), path)
@@ -114,6 +106,9 @@ func readBoundedAbsoluteRegularFileOutsideRoot(path, excludedRoot string, limit 
 		before = information
 	}
 	defer leaf.Close()
+	if err := rejectAONextJournalWindowsCanonicalContainment(syscall.Handle(leaf.Fd()), excludedRoot); err != nil {
+		return "", nil, err
+	}
 	info, err := leaf.Stat()
 	if err != nil {
 		return "", nil, err
@@ -136,7 +131,93 @@ func readBoundedAbsoluteRegularFileOutsideRoot(path, excludedRoot string, limit 
 		before.FileIndexLow != after.FileIndexLow || before.FileSizeHigh != after.FileSizeHigh || before.FileSizeLow != after.FileSizeLow {
 		return "", nil, fmt.Errorf("AO Next journal prefix identity changed while reading")
 	}
+	for _, handle := range ancestors {
+		var information syscall.ByHandleFileInformation
+		if err := syscall.GetFileInformationByHandle(handle, &information); err != nil {
+			return "", nil, err
+		}
+		if information.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+			information.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			return "", nil, fmt.Errorf("AO Next journal ancestor changed while reading")
+		}
+	}
 	return path, body, nil
+}
+
+func openAONextJournalWindowsComponent(path string, leaf bool) (syscall.Handle, syscall.ByHandleFileInformation, error) {
+	pointer, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, syscall.ByHandleFileInformation{}, err
+	}
+	handle, err := syscall.CreateFile(
+		pointer,
+		syscall.GENERIC_READ,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL|syscall.FILE_FLAG_OPEN_REPARSE_POINT|aoNextJournalWindowsBackupSemantics,
+		0,
+	)
+	if err != nil {
+		return 0, syscall.ByHandleFileInformation{}, err
+	}
+	var information syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(handle, &information); err != nil {
+		_ = syscall.CloseHandle(handle)
+		return 0, syscall.ByHandleFileInformation{}, err
+	}
+	if information.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		(!leaf && information.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0) ||
+		(leaf && information.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0) {
+		_ = syscall.CloseHandle(handle)
+		return 0, syscall.ByHandleFileInformation{}, fmt.Errorf("AO Next journal locator contains a reparse or non-regular component")
+	}
+	return handle, information, nil
+}
+
+func rejectAONextJournalWindowsCanonicalContainment(leaf syscall.Handle, excludedRoot string) error {
+	root, _, err := openAONextJournalWindowsComponent(excludedRoot, false)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(root)
+	rootPath, err := aoNextJournalWindowsFinalPath(root)
+	if err != nil {
+		return err
+	}
+	leafPath, err := aoNextJournalWindowsFinalPath(leaf)
+	if err != nil {
+		return err
+	}
+	if windowsPathWithin(rootPath, leafPath) {
+		return fmt.Errorf("AO Next journal locator resolves inside the Mission state root")
+	}
+	return nil
+}
+
+func aoNextJournalWindowsFinalPath(handle syscall.Handle) (string, error) {
+	length, _, callErr := getFinalPathNameByHandle.Call(uintptr(handle), 0, 0, 0)
+	if length == 0 {
+		return "", callErr
+	}
+	buffer := make([]uint16, length+1)
+	written, _, callErr := getFinalPathNameByHandle.Call(
+		uintptr(handle), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), 0,
+	)
+	if written == 0 || written >= uintptr(len(buffer)) {
+		return "", callErr
+	}
+	path := syscall.UTF16ToString(buffer[:written])
+	switch {
+	case strings.HasPrefix(path, `\\?\UNC\`):
+		path = `\\` + strings.TrimPrefix(path, `\\?\UNC\`)
+	case strings.HasPrefix(path, `\\?\`):
+		path = strings.TrimPrefix(path, `\\?\`)
+	}
+	return filepath.Clean(path), nil
 }
 
 func windowsPathWithin(root, path string) bool {

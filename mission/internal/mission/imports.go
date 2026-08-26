@@ -1,6 +1,7 @@
 package mission
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 )
 
 const correlationEvidenceImportKind = "correlation-evidence"
+
+var beforeAONextJournalImportLock = func() {}
 
 var atlasWorkgraphNodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 
@@ -158,7 +161,6 @@ func importArtifact(
 		aoNextProjection = &projection
 	}
 	var aoNextJournalProjection *AONextJournalProjection
-	var aoNextJournalRunID string
 	if kind == aoNextJournalPrefixImportKind {
 		prefix, parseErr := parseAONextJournalPrefix(body)
 		if parseErr != nil {
@@ -168,7 +170,6 @@ func importArtifact(
 		if projectErr != nil {
 			return ImportReadback{}, projectErr
 		}
-		aoNextJournalRunID = prefix.RunID
 		aoNextJournalProjection = &AONextJournalProjection{
 			Schema:       "ao.mission.ao-next-journal-projection.v1",
 			RunID:        prefix.RunID,
@@ -190,30 +191,6 @@ func importArtifact(
 			return ImportReadback{}, err
 		}
 	}
-	if kind == aoNextJournalPrefixImportKind && existing.Evidence.AONextJournalProjection != nil {
-		current := existing.Evidence.AONextJournalProjection
-		candidateDigest := digestBytes(body)
-		if current.RunID == aoNextJournalRunID && current.ArtifactDigest != candidateDigest {
-			return ImportReadback{}, fmt.Errorf("AO Next journal run already bound to a different digest")
-		}
-		if current.ArtifactDigest == candidateDigest {
-			for _, existingRef := range existing.ArtifactRefs {
-				if existingRef.Kind == kind && existingRef.Digest == candidateDigest {
-					return ImportReadback{
-						Schema:          "ao.mission.import-readback.v0.1",
-						MissionID:       existing.MissionID,
-						CorrelationID:   existing.CorrelationID,
-						Kind:            kind,
-						Status:          "recorded",
-						Artifact:        existingRef,
-						ExactNextAction: existing.ExactNextAction,
-						GeneratedAtUTC:  now(nil),
-					}, nil
-				}
-			}
-			return ImportReadback{}, fmt.Errorf("AO Next journal projection is missing its retained artifact reference")
-		}
-	}
 	if existing.CorrelationID != "" && chainReference == nil && kind != aoNextJournalPrefixImportKind {
 		correlationID := stringFromAny(doc["correlation_id"])
 		if correlationID == "" {
@@ -233,6 +210,9 @@ func importArtifact(
 			return ImportReadback{}, err
 		}
 	}
+	if kind == aoNextJournalPrefixImportKind {
+		return importAONextJournalPrefixLocked(s, missionID, refPath, body, *aoNextJournalProjection)
+	}
 	contentRef, digest, err := s.retainArtifact(body)
 	if err != nil {
 		return ImportReadback{}, err
@@ -249,14 +229,6 @@ func importArtifact(
 			}
 			if rec.Evidence.AONextCandidate.RunID == aoNextProjection.RunID {
 				return fmt.Errorf("AO Next candidate run already bound to a different digest")
-			}
-		}
-		if kind == aoNextJournalPrefixImportKind && rec.Evidence.AONextJournalProjection != nil {
-			if rec.Evidence.AONextJournalProjection.ArtifactDigest == ref.Digest {
-				return nil
-			}
-			if rec.Evidence.AONextJournalProjection.RunID == aoNextJournalRunID {
-				return fmt.Errorf("AO Next journal run already bound to a different digest")
 			}
 		}
 		for _, existingRef := range rec.ArtifactRefs {
@@ -465,10 +437,6 @@ func importArtifact(
 			projection.OriginalRef = ref.Ref
 			projection.GeneratedAtUTC = now(nil)
 			rec.Evidence.AONextCandidate = &projection
-		case kind == aoNextJournalPrefixImportKind:
-			projection := *aoNextJournalProjection
-			projection.ArtifactDigest = ref.Digest
-			rec.Evidence.AONextJournalProjection = &projection
 		default:
 			return fmt.Errorf("unsupported import kind %q", kind)
 		}
@@ -495,6 +463,154 @@ func importArtifact(
 		ExecutesWork:           false,
 		ApprovesWork:           false,
 		GeneratedAtUTC:         now(nil),
+	}, nil
+}
+
+func importAONextJournalPrefixLocked(
+	s Store,
+	missionID, locator string,
+	body []byte,
+	projection AONextJournalProjection,
+) (ImportReadback, error) {
+	beforeAONextJournalImportLock()
+	var result Record
+	var ref ArtifactRef
+	err := s.withMissionLock(missionID, func() error {
+		if err := s.recoverMissionTransactionLocked(missionID); err != nil {
+			return err
+		}
+		paths := s.transactionPaths(missionID)
+		beforeRecord, err := os.ReadFile(paths.Record)
+		if err != nil {
+			return err
+		}
+		if err := decodeRecordBytes(beforeRecord, &result); err != nil {
+			return err
+		}
+		candidateDigest := digestBytes(body)
+		if current := result.Evidence.AONextJournalProjection; current != nil {
+			if current.RunID == projection.RunID && current.ArtifactDigest != candidateDigest {
+				return fmt.Errorf("AO Next journal run already bound to a different digest")
+			}
+			if current.ArtifactDigest == candidateDigest {
+				for _, existingRef := range result.ArtifactRefs {
+					if existingRef.Kind == aoNextJournalPrefixImportKind && existingRef.Digest == candidateDigest {
+						ref = existingRef
+						return nil
+					}
+				}
+				return fmt.Errorf("AO Next journal projection is missing its retained artifact reference")
+			}
+		}
+
+		contentRef := filepath.Join(s.Root, retainedArtifactDirectory, strings.TrimPrefix(candidateDigest, "sha256:"))
+		ref = ArtifactRef{
+			Schema: ArtifactRefSchema, Ref: locator, ContentRef: contentRef,
+			Digest: candidateDigest, Kind: aoNextJournalPrefixImportKind,
+		}
+		for _, existingRef := range result.ArtifactRefs {
+			if existingRef.Ref != ref.Ref || existingRef.Kind != ref.Kind {
+				continue
+			}
+			if existingRef.Digest != ref.Digest {
+				return fmt.Errorf("artifact path already bound to a different digest")
+			}
+			ref = existingRef
+			return nil
+		}
+
+		candidate := result
+		candidate.ArtifactRefs = append(append([]ArtifactRef(nil), candidate.ArtifactRefs...), ref)
+		projection.ArtifactDigest = candidateDigest
+		candidate.Evidence.AONextJournalProjection = &projection
+		if err := validateRecordWorkflowContract(candidate); err != nil {
+			return err
+		}
+		candidateRecord, err := marshalIndentedLine(candidate)
+		if err != nil {
+			return err
+		}
+		beforeCheckpoint, err := os.ReadFile(paths.Checkpoint)
+		if err != nil {
+			return err
+		}
+		if err := validateTransactionCheckpointPreimage(beforeCheckpoint, result); err != nil {
+			return fmt.Errorf("validate Mission checkpoint before journal import: %w", err)
+		}
+		if err := validateTransactionCheckpointPreimage(beforeCheckpoint, candidate); err != nil {
+			return fmt.Errorf("journal import would invalidate Mission checkpoint: %w", err)
+		}
+		if err := s.runTransactionFault("before_record_cas", paths); err != nil {
+			return err
+		}
+		currentRecord, err := os.ReadFile(paths.Record)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(currentRecord, beforeRecord) {
+			return fmt.Errorf("Mission import compare-and-swap conflict")
+		}
+		retainedRef, retainedDigest, err := s.retainArtifact(body)
+		if err != nil {
+			return err
+		}
+		if retainedRef != ref.ContentRef || retainedDigest != ref.Digest {
+			return fmt.Errorf("retained AO Next journal identity mismatched")
+		}
+
+		journal := missionTransactionJournal{
+			Schema:                    missionTransactionJournalSchema,
+			State:                     missionTransactionStatePrepared,
+			MissionID:                 missionID,
+			BeforeRecord:              beforeRecord,
+			BeforeCheckpoint:          beforeCheckpoint,
+			BeforeCheckpointExists:    true,
+			CandidateRecordDigest:     digestBytes(candidateRecord),
+			CandidateCheckpointDigest: digestBytes(beforeCheckpoint),
+		}
+		journalBody, err := marshalIndentedLine(journal)
+		if err != nil {
+			return err
+		}
+		if err := writeAtomicFile(paths.Journal, journalBody, 0o600); err != nil {
+			return fmt.Errorf("persist Mission transaction journal: %w", err)
+		}
+		if err := writeAtomicFile(paths.Record, candidateRecord, 0o644); err != nil {
+			return fmt.Errorf("persist Mission transaction record: %w", err)
+		}
+		if err := s.runTransactionFault("before_journal_commit", paths); err != nil {
+			return err
+		}
+		journal.State = missionTransactionStateCommitted
+		journalBody, err = marshalIndentedLine(journal)
+		if err != nil {
+			return err
+		}
+		committed, cleanupAllowed, err := s.writeCommittedTransactionJournal(paths, journalBody)
+		if err != nil {
+			return fmt.Errorf("commit Mission transaction journal: %w", err)
+		}
+		if !committed {
+			return fmt.Errorf("Mission transaction journal did not reach its commit point")
+		}
+		if cleanupAllowed {
+			s.cleanupCommittedJournal(paths)
+		}
+		result = candidate
+		return nil
+	})
+	if err != nil {
+		return ImportReadback{}, err
+	}
+	return ImportReadback{
+		Schema:          "ao.mission.import-readback.v0.1",
+		MissionID:       result.MissionID,
+		CorrelationID:   result.CorrelationID,
+		Kind:            aoNextJournalPrefixImportKind,
+		Status:          "recorded",
+		Artifact:        ref,
+		ExactNextAction: result.ExactNextAction,
+		GeneratedAtUTC:  now(nil),
 	}, nil
 }
 

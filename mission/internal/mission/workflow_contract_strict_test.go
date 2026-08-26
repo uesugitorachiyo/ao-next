@@ -375,6 +375,56 @@ func TestValidateContractAcceptsRepositoryDiscriminatorsAndRejectsConflict(t *te
 		t.Fatalf("schema_version validation: result=%#v err=%v", result, err)
 	}
 
+	atlas, err := os.ReadFile(filepath.Join("..", "..", "examples", "valid", "atlas-final-synthesis-readback.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, atlas, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = ValidateContractFile(path)
+	if err != nil || result.Contract != "ao.atlas.ao-mission-final-synthesis-readback.v0.1" {
+		t.Fatalf("contract_version validation: result=%#v err=%v", result, err)
+	}
+
+	identical := []byte(`{"schema":"example.unknown.v1","schema_version":"example.unknown.v1","contract_version":"example.unknown.v1","value":true}`)
+	if err := os.WriteFile(path, identical, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = ValidateContractFile(path)
+	if err != nil || result.Contract != "example.unknown.v1" {
+		t.Fatalf("identical discriminator validation: result=%#v err=%v", result, err)
+	}
+
+	unknown := []byte(`{"schema_version":"example.repository-document.v1","value":true}`)
+	if err := os.WriteFile(path, unknown, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = ValidateContractFile(path)
+	if err != nil || result.Contract != "example.repository-document.v1" {
+		t.Fatalf("unknown repository contract validation: result=%#v err=%v", result, err)
+	}
+
+	for _, invalid := range []struct {
+		name string
+		body []byte
+	}{
+		{"non-string-schema", []byte(`{"schema":7,"schema_version":"example.v1"}`)},
+		{"non-string-schema-version", []byte(`{"schema":"example.v1","schema_version":false}`)},
+		{"non-string-contract-version", []byte(`{"schema":"example.v1","contract_version":{}}`)},
+		{"empty-discriminator", []byte(`{"schema":""}`)},
+		{"unknown-discriminator-key", []byte(`{"schema_type":"example.v1"}`)},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			if err := os.WriteFile(path, invalid.body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateContractFile(path); err == nil {
+				t.Fatal("invalid discriminator passed")
+			}
+		})
+	}
+
 	var value map[string]any
 	if err := json.Unmarshal(prefix, &value); err != nil {
 		t.Fatal(err)

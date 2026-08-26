@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 use ao_next_core::contracts::Digest;
 use ao_next_core::evidence::digest_bytes;
 use ao_next_core::strict_json::{StrictJsonError, canonical_digest, decode_strict_json};
@@ -328,7 +331,11 @@ fn load_snapshot(
     corpus_root: &Path,
 ) -> Result<MissionCorpus, MissionCorpusError> {
     require_directory(corpus_root)?;
-    let manifest_bytes = read_regular_bounded(manifest_path, MANIFEST_LIMIT as u64)?;
+    let manifest_relative = manifest_path
+        .strip_prefix(corpus_root)
+        .map_err(|_| MissionCorpusError::UnsafePath(manifest_path.display().to_string()))?;
+    let manifest_bytes =
+        read_regular_bounded(corpus_root, manifest_relative, MANIFEST_LIMIT as u64)?;
     let manifest: MissionCorpus = decode_strict_json(&manifest_bytes, MANIFEST_LIMIT)?;
     manifest.validate()?;
     verify_vectors(&manifest, corpus_root)?;
@@ -358,7 +365,7 @@ fn verify_vectors(manifest: &MissionCorpus, corpus_root: &Path) -> Result<(), Mi
     }
     let mut total = 0_u64;
     for vector in &manifest.vectors {
-        let bytes = read_regular_bounded(&corpus_root.join(&vector.fixture_path), FILE_LIMIT)?;
+        let bytes = read_regular_bounded(corpus_root, Path::new(&vector.fixture_path), FILE_LIMIT)?;
         total = total
             .checked_add(bytes.len() as u64)
             .ok_or(MissionCorpusError::Oversized)?;
@@ -398,7 +405,7 @@ fn verify_source(manifest: &MissionCorpus, source_root: &Path) -> Result<(), Mis
     }
     let mut total = 0_u64;
     for entry in &manifest.source_files {
-        let bytes = read_regular_bounded(&source_root.join(&entry.path), FILE_LIMIT)?;
+        let bytes = read_regular_bounded(source_root, Path::new(&entry.path), FILE_LIMIT)?;
         total = total
             .checked_add(bytes.len() as u64)
             .ok_or(MissionCorpusError::Oversized)?;
@@ -464,14 +471,12 @@ fn collect_files(root: &Path, directory: &Path) -> Result<Vec<String>, MissionCo
     let mut pending = vec![directory.to_path_buf()];
     let mut files = Vec::new();
     while let Some(current) = pending.pop() {
+        require_directory(&current)?;
         let mut entries = fs::read_dir(&current)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(fs::DirEntry::file_name);
         for entry in entries.into_iter().rev() {
             let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() {
-                return Err(MissionCorpusError::UnsafeFile(path.display().to_string()));
-            }
+            let metadata = safe_metadata(&path)?;
             if metadata.is_dir() {
                 pending.push(path);
             } else if metadata.is_file() {
@@ -495,22 +500,67 @@ fn collect_files(root: &Path, directory: &Path) -> Result<Vec<String>, MissionCo
 }
 
 fn require_directory(path: &Path) -> Result<(), MissionCorpusError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    let metadata = safe_metadata(path)?;
+    if !metadata.is_dir() {
         return Err(MissionCorpusError::UnsafeFile(path.display().to_string()));
     }
     Ok(())
 }
 
-fn read_regular_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, MissionCorpusError> {
+fn read_regular_bounded(
+    root: &Path,
+    relative: &Path,
+    limit: u64,
+) -> Result<Vec<u8>, MissionCorpusError> {
+    let mut components = relative.components().peekable();
+    if components.peek().is_none() {
+        return Err(MissionCorpusError::UnsafePath(
+            relative.display().to_string(),
+        ));
+    }
+    let mut path = root.to_path_buf();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            return Err(MissionCorpusError::UnsafePath(
+                relative.display().to_string(),
+            ));
+        };
+        path.push(component);
+        let metadata = safe_metadata(&path)?;
+        if components.peek().is_some() {
+            if !metadata.is_dir() {
+                return Err(MissionCorpusError::UnsafeFile(path.display().to_string()));
+            }
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(MissionCorpusError::UnsafeFile(path.display().to_string()));
+        }
+        if metadata.len() > limit {
+            return Err(MissionCorpusError::Oversized);
+        }
+        return Ok(fs::read(path)?);
+    }
+    unreachable!("a non-empty path has a final component")
+}
+
+fn safe_metadata(path: &Path) -> Result<fs::Metadata, MissionCorpusError> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if unsafe_metadata(&metadata) {
         return Err(MissionCorpusError::UnsafeFile(path.display().to_string()));
     }
-    if metadata.len() > limit {
-        return Err(MissionCorpusError::Oversized);
-    }
-    Ok(fs::read(path)?)
+    Ok(metadata)
+}
+
+#[cfg(windows)]
+fn unsafe_metadata(metadata: &fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn unsafe_metadata(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn validate_relative_path(path: &str) -> Result<(), MissionCorpusError> {

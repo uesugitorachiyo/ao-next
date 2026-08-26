@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -19,6 +20,31 @@ def load_module():
 
 
 class ReplayTests(unittest.TestCase):
+    def test_digest_bound_fixtures_disable_checkout_conversion(self):
+        fixture_root = "tests/fixtures/mission-migration"
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", fixture_root],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        fixture_paths = [
+            path for path in listed.stdout.decode().split("\0") if path
+        ]
+        self.assertTrue(fixture_paths)
+        checked = subprocess.run(
+            ["git", "check-attr", "-z", "--stdin", "text"],
+            cwd=ROOT,
+            input=("\0".join(fixture_paths) + "\0").encode(),
+            check=True,
+            capture_output=True,
+        )
+        fields = checked.stdout.decode().split("\0")
+        self.assertEqual(fields[-1], "")
+        self.assertEqual(len(fields) - 1, len(fixture_paths) * 3)
+        values = {fields[index + 2] for index in range(0, len(fields) - 1, 3)}
+        self.assertEqual(values, {"unset"})
+
     def test_frozen_operations_have_exact_handlers(self):
         spec = importlib.util.spec_from_file_location("mission_replay", MODULE_PATH)
         module = importlib.util.module_from_spec(spec)

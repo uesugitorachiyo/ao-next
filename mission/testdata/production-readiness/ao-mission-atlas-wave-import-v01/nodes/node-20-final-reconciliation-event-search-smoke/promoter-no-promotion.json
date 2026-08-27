@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-20-final-reconciliation-event-search-smoke",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node verifies event-search readback and does not request promotion."
+}

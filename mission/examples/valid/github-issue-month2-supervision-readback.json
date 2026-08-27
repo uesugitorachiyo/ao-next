@@ -1,0 +1,46 @@
+{
+  "schema": "ao.mission.github-issue-month2-supervision-readback.v0.1",
+  "status": "ready",
+  "month": 2,
+  "roadmap": "github-issue-to-draft-pr",
+  "objective": "Determine authentic reproducible bugs before isolated repair.",
+  "truth_set": {
+    "total": 13,
+    "authentic_bug": 2,
+    "non_bug_or_blocked": 11,
+    "precision": 1.0,
+    "recall": 1.0,
+    "thresholds_passed": true
+  },
+  "closure_gate": {
+    "failing_pre_patch_reproduction_required": true,
+    "authentic_bug_fixtures_reproduce_before_patch": true,
+    "non_bug_fixtures_avoid_mutation": true,
+    "security_sensitive_fixtures_enter_public_repair": false,
+    "interruption_resume_without_duplicate_mutation": true,
+    "evidence_repeatable": true
+  },
+  "implementation_prs_required": [
+    "ao-blueprint",
+    "ao2",
+    "ao-covenant",
+    "ao-forge",
+    "ao-arena",
+    "ao-crucible",
+    "ao2-control-plane",
+    "ao-command",
+    "ao-sentinel",
+    "ao-mission"
+  ],
+  "denied_actions": {
+    "feature_generated_pr_auto_merge": false,
+    "feature_generated_pr_mark_ready": false,
+    "feature_generated_pr_review_approval": false,
+    "issue_write_performed": false,
+    "maintainer_contacted": false,
+    "provider_pilot": false,
+    "release_selected": false,
+    "rsi_authorized": false
+  },
+  "exact_next_action": "Continue to Month 3 isolated repair, verification, rollback, and replay only after all Month 2 implementation PRs are green, merged, synced, and recorded."
+}

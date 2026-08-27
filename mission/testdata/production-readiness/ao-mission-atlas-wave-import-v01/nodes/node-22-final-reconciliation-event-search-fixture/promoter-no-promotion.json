@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-22-final-reconciliation-event-search-fixture",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node adds event-search readback evidence and does not request promotion."
+}

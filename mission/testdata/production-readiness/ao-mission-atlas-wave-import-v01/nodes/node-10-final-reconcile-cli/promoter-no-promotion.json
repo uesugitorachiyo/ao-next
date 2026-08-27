@@ -1,0 +1,8 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-10-final-reconcile-cli",
+  "status": "no_promotion",
+  "promotion_claimed": false,
+  "rsi_remains_denied": true,
+  "reason": "The node exposes reconciliation readback through CLI; it does not claim promotion."
+}

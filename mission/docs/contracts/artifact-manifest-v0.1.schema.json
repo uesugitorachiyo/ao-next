@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.artifact-manifest.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "mission_id",
+    "artifact_refs",
+    "manifest_digest",
+    "signature",
+    "safe_to_execute",
+    "executes_work",
+    "approves_work"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.artifact-manifest.v0.1" },
+    "mission_id": { "type": "string" },
+    "artifact_refs": { "type": "array" },
+    "manifest_digest": { "type": "string" },
+    "signature": { "type": "string" },
+    "safe_to_execute": { "type": "boolean" },
+    "executes_work": { "type": "boolean" },
+    "approves_work": { "type": "boolean" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

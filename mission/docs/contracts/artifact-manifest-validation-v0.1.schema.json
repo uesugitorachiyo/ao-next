@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.artifact-manifest-validation.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "mission_id", "artifact_count", "manifest_digest", "executes_work", "approves_work"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.artifact-manifest-validation.v0.1" },
+    "status": { "type": "string" },
+    "mission_id": { "type": "string" },
+    "artifact_count": { "type": "integer" },
+    "manifest_digest": { "type": "string" },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

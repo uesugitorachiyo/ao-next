@@ -1,0 +1,14 @@
+{
+  "schema": "ao.mission.readiness-bundle-readback.v0.1",
+  "status": "ready",
+  "repo_count": 1,
+  "ready_repos": 1,
+  "blocked_repos": 0,
+  "repos": [],
+  "safe_to_execute": true,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "exact_next_action": "invalid fixture: readiness bundle must not execute",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

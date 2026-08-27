@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-23-wave-boundary-readiness-scan",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node validates no-promotion boundaries and does not request promotion."
+}

@@ -1,0 +1,171 @@
+{
+  "schema": "ao.atlas.workgraph.v0.1",
+  "mission": "ao-mission-doubled-wave-v01",
+  "status": "active",
+  "minimum_nodes": 60,
+  "target_minutes": 120,
+  "max_minutes": 180,
+  "completed_nodes": 26,
+  "ready_nodes": 34,
+  "blocked_nodes": 0,
+  "final_response_allowed": false,
+  "exact_next_action": "Continue node-27: AO Atlas prompt-readback quality pass over current Mission final rollup.",
+  "nodes": [
+    {
+      "node_id": "node-01-final-synthesis-cli",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add generated final synthesis CLI output from live Mission state and evidence-root workgraph."
+    },
+    {
+      "node_id": "node-02-duration-ledger",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Record 2-3 hour lease timing fields and keep final response denied while the minimum duration is unmet."
+    },
+    {
+      "node_id": "node-03-session-duration-readback",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Record metadata-only Codex session-duration readback without reading log contents or secrets."
+    },
+    {
+      "node_id": "node-04-atlas-final-synthesis-roundtrip",
+      "owner": "ao-atlas",
+      "status": "completed",
+      "objective": "Roundtrip Mission final synthesis into Atlas and verify zero ready nodes."
+    },
+    {
+      "node_id": "node-05-route-readback-reconciliation",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Reconcile stale route/readback state across Atlas final synthesis, Command, Promoter, and Mission route artifacts."
+    },
+    {
+      "node_id": "node-06-import-checkpoint-bundle",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Persist a durable checkpoint/resume bundle after imported node evidence updates Mission state."
+    },
+    {
+      "node_id": "node-07-atlas-prompt-packet",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Generate an Atlas continuation prompt packet from readiness, final rollup, and event index evidence."
+    },
+    {
+      "node_id": "node-08-feature-depth-contract",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Require Feature Depth recommendations to carry concrete gates, evidence, continuation commands, and minimum time budgets."
+    },
+    {
+      "node_id": "node-09-doctor-risk-readback",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Extend AO Mission doctor with detailed lease health, checkpoint freshness, stale route, and early-return risk readback."
+    },
+    {
+      "node_id": "node-10-event-evidence-aliases",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Expose route, node, PR, CI, rollup, and blocker evidence as searchable Mission event aliases."
+    },
+    {
+      "node_id": "node-11-atlas-continuation-contract",
+      "owner": "ao-atlas",
+      "status": "completed",
+      "objective": "Require Atlas continuation contracts to refuse final response while ready nodes or exact next actions remain."
+    },
+    {
+      "node_id": "node-12-atlas-final-state-reconciliation-packet",
+      "owner": "ao-atlas",
+      "status": "completed",
+      "objective": "Emit Atlas final-state reconciliation packets comparing workgraph, Foundry rollup, Promoter verdict, and Command readback."
+    },
+    {
+      "node_id": "node-13-foundry-terminal-rollup-readiness-binding",
+      "owner": "ao-foundry",
+      "status": "completed",
+      "objective": "Bind Foundry final rollup readiness summaries for promoted, completed, denied, and blocked terminal states."
+    },
+    {
+      "node_id": "node-14-command-long-run-status-readback",
+      "owner": "ao-command",
+      "status": "completed",
+      "objective": "Expose compact AO Command long-run Mission status readback."
+    },
+    {
+      "node_id": "node-15-operator-long-run-runbook",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Document when to use Mission, Atlas, Blueprint, Foundry, and Command for 2-3 hour work."
+    },
+    {
+      "node_id": "node-16-until-done-cli-regression",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add CLI regression proving continue --until-done does not stop after one governed handoff."
+    },
+    {
+      "node_id": "node-17-promoted-rollup-cli-regression",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add CLI regression proving promoted Foundry rollups can close a mission when counts agree."
+    },
+    {
+      "node_id": "node-18-feature-depth-cli-regression",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add CLI regression proving Feature Depth Recommendations return at least 10 actionable tasks."
+    },
+    {
+      "node_id": "node-19-final-response-ready-nodes-cli",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add CLI regression proving final response is denied while ready nodes remain."
+    },
+    {
+      "node_id": "node-20-readiness-safety-closure",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Record production readiness verification and public-safety wording scans over changed docs, fixtures, and evidence."
+    },
+    {
+      "node_id": "node-21-event-alias-fixture",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add event-search fixture proving route, node, PR, CI, rollup, and blocker aliases."
+    },
+    {
+      "node_id": "node-22-checkpoint-replay-smoke",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add checkpoint inspect replay smoke after Atlas readback import."
+    },
+    {
+      "node_id": "node-23-doctor-command-risk-fixture",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add doctor JSON fixture binding Command compact early-return risk."
+    },
+    {
+      "node_id": "node-24-atlas-prompt-depth-regression",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add final atlas-prompt regression rejecting shallow Feature Depth output."
+    },
+    {
+      "node_id": "node-25-final-rollup-ready-denial",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add final rollup schema fixture for ready-node denial."
+    },
+    {
+      "node_id": "node-26-command-status-lease-checkpoint",
+      "owner": "ao-mission",
+      "status": "completed",
+      "objective": "Add command status fixture binding long-run lease and checkpoint freshness."
+    }
+  ]
+}

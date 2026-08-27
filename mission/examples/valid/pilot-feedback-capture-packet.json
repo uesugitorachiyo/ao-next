@@ -1,0 +1,31 @@
+{
+  "schema": "ao.mission.pilot-feedback-capture-packet.v0.1",
+  "mission_id": "mission-demo",
+  "status": "ready",
+  "pilot_id": "pilot-alpha",
+  "feedback_window": "month6-beta-readiness",
+  "capture_channels": ["operator_note", "issue_link", "readback_attachment"],
+  "questions": [
+    "What step required manual state repair?",
+    "Which readback was unclear or stale?",
+    "What rollback or stop-rule evidence was missing?"
+  ],
+  "evidence_required": [
+    "Mission timeline readback",
+    "Command compact status readback",
+    "Sentinel public-safety result",
+    "Promoter no-promotion readback"
+  ],
+  "exact_next_action": "Collect pilot feedback as read-only evidence before any beta execution or live run.",
+  "read_only": true,
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "provider_calls_allowed": false,
+  "credential_use_allowed": false,
+  "release_or_publish_allowed": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "generated_at_utc": "2026-07-12T00:00:00Z"
+}

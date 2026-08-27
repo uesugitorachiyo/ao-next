@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-19-command-final-reconcile-operator-flow",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node documents readback verification and does not request promotion."
+}

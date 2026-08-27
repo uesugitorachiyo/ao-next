@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.a2a-agent-card.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "name",
+    "protocol_version",
+    "description",
+    "endpoint",
+    "methods",
+    "capabilities",
+    "capabilities_detail",
+    "skills",
+    "mutation_authority"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.a2a-agent-card.v0.1" },
+    "name": { "type": "string" },
+    "protocol_version": { "type": "string" },
+    "description": { "type": "string" },
+    "endpoint": { "type": "string" },
+    "methods": { "type": "array", "items": { "type": "string" } },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "capabilities_detail": {
+      "type": "object",
+      "required": ["streaming", "push_notifications", "state_transition_history", "artifact_readbacks"],
+      "properties": {
+        "streaming": { "type": "boolean" },
+        "push_notifications": { "type": "boolean" },
+        "state_transition_history": { "type": "boolean" },
+        "artifact_readbacks": { "type": "boolean" }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "description", "tags"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "mutation_authority": { "type": "boolean" }
+  }
+}

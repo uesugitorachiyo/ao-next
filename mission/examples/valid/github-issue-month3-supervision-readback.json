@@ -1,0 +1,40 @@
+{
+  "schema": "ao.mission.github-issue-month3-supervision-readback.v0.1",
+  "status": "ready",
+  "month": 3,
+  "roadmap": "github-issue-to-draft-pr",
+  "objective": "Repair authentic bugs in isolated workspaces with regression, rollback, replay, and resume evidence.",
+  "repair_gate": {
+    "authentic_bug_fixture": "deterministic_authentic_bug",
+    "bounded_repair_workgraph_exists": true,
+    "pre_patch_regression_failed_expected": true,
+    "negative_control_passed": true,
+    "post_patch_verification_passed": true,
+    "rollback_exact_state_restored": true,
+    "replay_digest_match": true,
+    "resume_without_duplicate_edits": true,
+    "false_fixes_rejected": true,
+    "feature_generated_draft_pr_exists": false
+  },
+  "implementation_prs_required": [
+    "ao-foundry",
+    "ao-forge",
+    "ao-arena",
+    "ao2",
+    "ao2-control-plane",
+    "ao-command",
+    "ao-sentinel",
+    "ao-mission"
+  ],
+  "denied_actions": {
+    "feature_generated_pr_auto_merge": false,
+    "feature_generated_pr_mark_ready": false,
+    "feature_generated_pr_review_approval": false,
+    "issue_write_performed": false,
+    "maintainer_contacted": false,
+    "provider_pilot": false,
+    "release_selected": false,
+    "rsi_authorized": false
+  },
+  "exact_next_action": "Continue to Month 4 AO repository issue-to-draft-PR workflow only after all Month 3 implementation PRs are green, merged, synced, and recorded."
+}

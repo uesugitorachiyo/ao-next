@@ -1,0 +1,8 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-02-nonterminal-atlas-readback-gate",
+  "status": "no_promotion",
+  "promotion_claimed": false,
+  "rsi_remains_denied": true,
+  "reason": "The node improves denial specificity for early-return prevention; it does not claim authority promotion."
+}

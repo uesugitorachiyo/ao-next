@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "id": "invalid-unknown-method",
+  "method": "mission.mutate",
+  "params": {
+    "mission_id": "mission-demo"
+  }
+}

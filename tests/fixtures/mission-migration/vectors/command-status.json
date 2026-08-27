@@ -1,0 +1,15 @@
+{
+  "schema": "ao.command.mission-status.v0.1",
+  "mission_id": "mission-demo",
+  "status": "active",
+  "current_route": "ao-blueprint",
+  "current_phase": "routing",
+  "exact_next_action": "send objective to AO Blueprint",
+  "read_only": true,
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "blockers": [],
+  "generated_at_utc": "2026-01-01T00:00:00Z"
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ao.mission.dashboard-readback.v0.1",
+  "status": "ready",
+  "mission_id": "mission-demo",
+  "mission_status": "active",
+  "current_phase": "routing",
+  "current_route": "ao-atlas",
+  "latest_route": "ao-atlas",
+  "event_count": 1,
+  "event_index_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "compact": true,
+  "recent_events": [
+    {
+      "schema": "ao.mission.event.v0.1",
+      "mission_id": "mission-demo",
+      "kind": "mission_record",
+      "sequence": 0,
+      "status": "active",
+      "route": "ao-atlas",
+      "summary": "mission mission-demo status active route ao-atlas",
+      "generated_at_utc": "2026-07-03T00:00:00Z"
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "exact_next_action": "send authorized pack to AO Atlas",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

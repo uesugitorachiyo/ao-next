@@ -1,0 +1,464 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CheckpointIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "model_profile_digest": {
+          "type": "string"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "request_digest": {
+          "type": "string"
+        },
+        "source_digest": {
+          "type": "string"
+        },
+        "verifier_profile_digest": {
+          "type": "string"
+        },
+        "workspace_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_profile_digest",
+        "policy_digest",
+        "request_digest",
+        "source_digest",
+        "verifier_profile_digest",
+        "workspace_digest"
+      ],
+      "type": "object"
+    },
+    "EffectObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_id": {
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+          "type": "string"
+        },
+        "output_digest": {
+          "type": "string"
+        },
+        "status": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "stderr": {
+          "items": {
+            "format": "uint8",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "stdout": {
+          "items": {
+            "format": "uint8",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "effect_id",
+        "output_digest",
+        "status",
+        "stderr",
+        "stdout"
+      ],
+      "type": "object"
+    },
+    "JournalEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/JournalEventKind"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "schema_version",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "JournalEventKind": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "execution_authority_digest": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "provider_request_intent"
+              ],
+              "type": "string"
+            },
+            "prepared_run_digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution_authority_digest",
+            "kind",
+            "prepared_run_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "invocation_digest": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "provider_process_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "invocation_digest",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "provider_output_retained"
+              ],
+              "type": "string"
+            },
+            "raw_capture_digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "raw_capture_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index_digest": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "provider_capture_index_published"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "index_digest",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index_digest": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "provider_capture_verified"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "index_digest",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "adapter_turn_normalized"
+              ],
+              "type": "string"
+            },
+            "turn_digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "turn_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "effect_digest": {
+              "type": "string"
+            },
+            "effect_id": {
+              "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "effect_intent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "effect_digest",
+            "effect_id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "effect_id": {
+              "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "effect_committed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "effect_id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "effect_completed"
+              ],
+              "type": "string"
+            },
+            "observation": {
+              "$ref": "#/definitions/EffectObservation"
+            }
+          },
+          "required": [
+            "kind",
+            "observation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "verification_started"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "attempt",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "verifier_recorded"
+              ],
+              "type": "string"
+            },
+            "report_digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "report_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "terminal_published"
+              ],
+              "type": "string"
+            },
+            "record_digest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "record_digest"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "advances_authority": {
+      "type": "boolean"
+    },
+    "approves_work": {
+      "type": "boolean"
+    },
+    "deploys": {
+      "type": "boolean"
+    },
+    "dynamic_fanout": {
+      "type": "boolean"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/definitions/JournalEvent"
+      },
+      "maxItems": 4096,
+      "type": "array"
+    },
+    "events_digest": {
+      "type": "string"
+    },
+    "executes_work": {
+      "type": "boolean"
+    },
+    "first_sequence": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "grants_provider_access": {
+      "type": "boolean"
+    },
+    "journal_identity": {
+      "$ref": "#/definitions/CheckpointIdentity"
+    },
+    "last_sequence": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "mutates_repositories": {
+      "type": "boolean"
+    },
+    "preceding_prefix_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "prefix_digest": {
+      "type": "string"
+    },
+    "publishes_artifacts": {
+      "type": "boolean"
+    },
+    "releases": {
+      "type": "boolean"
+    },
+    "request_digest": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "safe_to_execute": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "terminal_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "terminal_record": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "worker_count": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "advances_authority",
+    "approves_work",
+    "deploys",
+    "dynamic_fanout",
+    "events",
+    "events_digest",
+    "executes_work",
+    "first_sequence",
+    "grants_provider_access",
+    "journal_identity",
+    "last_sequence",
+    "mutates_repositories",
+    "preceding_prefix_digest",
+    "prefix_digest",
+    "publishes_artifacts",
+    "releases",
+    "request_digest",
+    "run_id",
+    "safe_to_execute",
+    "schema_version",
+    "terminal_digest",
+    "terminal_record",
+    "worker_count"
+  ],
+  "title": "ExecutionJournalPrefix",
+  "type": "object"
+}

@@ -537,7 +537,7 @@ fn canonical_digest_uses_sorted_compact_json() {
 }
 
 #[test]
-fn checked_in_contract_schemas_match_generated_types() {
+fn generated_schemas_match_checked_in_contracts() {
     let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let generated_contracts = generated_contract_schemas();
     assert!(
@@ -547,6 +547,10 @@ fn checked_in_contract_schemas_match_generated_types() {
     assert!(
         generated_contracts.contains_key("prepared-run-v1.schema.json"),
         "prepared-run receipt contract must be checked in"
+    );
+    assert!(
+        generated_contracts.contains_key("execution-journal-prefix-v1.schema.json"),
+        "execution journal prefix contract must be checked in"
     );
     for (file_name, generated) in generated_contracts {
         let path = repository_root.join("docs/contracts").join(file_name);

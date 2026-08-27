@@ -1,0 +1,8 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-05-atlas-recommendation-event-index",
+  "status": "no_promotion",
+  "promotion_claimed": false,
+  "rsi_remains_denied": true,
+  "reason": "The node exposes evidence in search readbacks; it does not claim promotion."
+}

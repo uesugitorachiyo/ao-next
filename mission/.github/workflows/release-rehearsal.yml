@@ -1,0 +1,1445 @@
+name: Release rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact AO Mission release version without the v prefix.
+        required: true
+        type: string
+      tag:
+        description: Exact release tag, which must match v<version>.
+        required: true
+        type: string
+      source_sha:
+        description: Exact dispatch-head source commit for every candidate and plan.
+        required: true
+        type: string
+      approved_manifest_digest:
+        description: SHA-256 of the exact decoded approved release manifest bytes.
+        required: true
+        type: string
+      approved_manifest_base64:
+        description: Base64-encoded approved manifest JSON, at most 32 KiB decoded.
+        required: true
+        type: string
+      dry_run:
+        description: Keep public mutation disabled and retain private rehearsal artifacts.
+        required: true
+        default: true
+        type: boolean
+      live_confirmation:
+        description: Required only for a future live publication.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bind-release-inputs:
+    name: Bind exact source and approved manifest bytes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.validate-manifest.outputs.version }}
+      tag: ${{ steps.validate-manifest.outputs.tag }}
+      source_sha: ${{ steps.validate-manifest.outputs.source_sha }}
+      approved_manifest_digest: ${{ steps.validate-manifest.outputs.approved_manifest_digest }}
+      release_notes_path: ${{ steps.release-notes.outputs.release_notes_path }}
+      release_notes_sha256: ${{ steps.release-notes.outputs.release_notes_sha256 }}
+      version_source_path: ${{ steps.validate-manifest.outputs.version_source_path }}
+      version_source_sha256: ${{ steps.validate-manifest.outputs.version_source_sha256 }}
+      verifier_sha256: ${{ steps.release-verifier.outputs.verifier_sha256 }}
+    steps:
+      - name: Check out the dispatch head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Verify exact dispatch-head binding
+        shell: bash
+        env:
+          DISPATCH_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$SOURCE_SHA" = "$DISPATCH_SHA" ]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Reconstruct bounded approved manifest bytes
+        shell: bash
+        env:
+          APPROVED_MANIFEST_BASE64: ${{ inputs.approved_manifest_base64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/release-rehearsal/binding
+          python3 - target/release-rehearsal/binding/approved-release-manifest.json <<'PY'
+          # approved-manifest-decoder-begin
+          import base64
+          import binascii
+          import os
+          import sys
+          from pathlib import Path
+
+          encoded = os.environ["APPROVED_MANIFEST_BASE64"]
+          if len(encoded) > 49152:
+              raise SystemExit("approved manifest base64 input exceeds 49152 bytes")
+          try:
+              manifest_bytes = base64.b64decode(encoded, validate=True)
+          except (binascii.Error, ValueError) as error:
+              raise SystemExit(f"approved manifest is not strict base64: {error}")
+          if not manifest_bytes or len(manifest_bytes) > 32768:
+              raise SystemExit("decoded approved manifest must contain 1..32768 bytes")
+          if b"\x00" in manifest_bytes:
+              raise SystemExit("decoded approved manifest contains a NUL byte")
+          Path(sys.argv[1]).write_bytes(manifest_bytes)
+          # approved-manifest-decoder-end
+          PY
+
+      - id: validate-manifest
+        name: Hash and validate approved manifest schema and inventory
+        shell: bash
+        env:
+          APPROVED_MANIFEST_DIGEST: ${{ inputs.approved_manifest_digest }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python3 - \
+            target/release-rehearsal/binding/approved-release-manifest.json \
+            docs/sdd/AO-MISSION-V0.1.md \
+            "$GITHUB_OUTPUT" <<'PY'
+          # release-manifest-validator-begin
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          manifest_path = Path(sys.argv[1])
+          version_source_path = Path(sys.argv[2])
+          output_path = Path(sys.argv[3])
+          if not manifest_path.is_file():
+              raise SystemExit("approved manifest bytes are missing")
+          raw = manifest_path.read_bytes()
+          if not raw or len(raw) > 32768:
+              raise SystemExit("approved manifest must contain 1..32768 bytes")
+          approved_digest = os.environ["APPROVED_MANIFEST_DIGEST"]
+          if not re.fullmatch(r"[0-9a-f]{64}", approved_digest):
+              raise SystemExit("approved manifest digest must be lowercase SHA-256")
+          actual_digest = hashlib.sha256(raw).hexdigest()
+          if actual_digest != approved_digest:
+              raise SystemExit("approved manifest digest does not match reconstructed bytes")
+
+          def reject_duplicate_keys(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  result[key] = value
+              return result
+
+          try:
+              manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+          except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+              raise SystemExit(f"approved manifest is not strict UTF-8 JSON: {error}")
+          if not isinstance(manifest, dict):
+              raise SystemExit("approved manifest root must be an object")
+
+          version = os.environ["RELEASE_VERSION"]
+          tag = os.environ["RELEASE_TAG"]
+          source_sha = os.environ["SOURCE_SHA"]
+          match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-.][0-9A-Za-z.-]+)?", version)
+          if not match:
+              raise SystemExit("release version must be semver-like")
+          if tag != f"v{version}":
+              raise SystemExit("release tag does not match release version")
+          if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+              raise SystemExit("source SHA must be a lowercase 40-character commit")
+
+          version_source_repo_path = f"docs/sdd/AO-MISSION-V{match.group(1)}.{match.group(2)}.md"
+          if version_source_repo_path != "docs/sdd/AO-MISSION-V0.1.md":
+              raise SystemExit("repository version source for requested release line is absent")
+          if not version_source_path.is_file():
+              raise SystemExit("repository version source is missing")
+          version_source_bytes = version_source_path.read_bytes()
+          version_source_digest = hashlib.sha256(version_source_bytes).hexdigest()
+          first_line = version_source_bytes.decode("utf-8").splitlines()[0]
+          if first_line != f"# AO Mission v{match.group(1)}.{match.group(2)} SDD":
+              raise SystemExit("repository version source heading does not match release line")
+
+          top_level_keys = {
+              "artifacts",
+              "repository",
+              "schema_version",
+              "source_sha",
+              "tag",
+              "version",
+              "version_source",
+              "version_source_sha256",
+          }
+          if set(manifest) != top_level_keys:
+              raise SystemExit("approved manifest schema keys are missing or unexpected")
+          expected_scalars = {
+              "repository": "ao-mission",
+              "schema_version": "ao.release-rehearsal-manifest.v0.1",
+              "source_sha": source_sha,
+              "tag": tag,
+              "version": version,
+              "version_source": version_source_repo_path,
+              "version_source_sha256": version_source_digest,
+          }
+          for key, expected in expected_scalars.items():
+              if manifest.get(key) != expected:
+                  raise SystemExit(f"approved manifest {key} does not match bound release input")
+
+          expected_inventory = {
+              "linux-x86_64": {
+                  "archive": f"ao-mission-{version}-linux-x86_64.tar.gz",
+                  "architecture": "x86_64",
+                  "binary_format": "elf",
+                  "entry_point": "ao-mission",
+                  "goarch": "amd64",
+                  "goos": "linux",
+                  "machine": "x86_64",
+                  "os": "linux",
+                  "runner_arch": "X64",
+                  "runner_label": "ubuntu-24.04",
+                  "runner_os": "Linux",
+                  "target_label": "linux-x86_64",
+              },
+              "macos-aarch64": {
+                  "archive": f"ao-mission-{version}-macos-aarch64.tar.gz",
+                  "architecture": "aarch64",
+                  "binary_format": "macho",
+                  "entry_point": "ao-mission",
+                  "goarch": "arm64",
+                  "goos": "darwin",
+                  "machine": "arm64",
+                  "os": "macos",
+                  "runner_arch": "ARM64",
+                  "runner_label": "macos-15",
+                  "runner_os": "macOS",
+                  "target_label": "macos-aarch64",
+              },
+              "windows-x86_64": {
+                  "archive": f"ao-mission-{version}-windows-x86_64.zip",
+                  "architecture": "x86_64",
+                  "binary_format": "pe",
+                  "entry_point": "ao-mission.exe",
+                  "goarch": "amd64",
+                  "goos": "windows",
+                  "machine": "x86_64",
+                  "os": "windows",
+                  "runner_arch": "X64",
+                  "runner_label": "windows-2025",
+                  "runner_os": "Windows",
+                  "target_label": "windows-x86_64",
+              },
+          }
+          artifacts = manifest.get("artifacts")
+          if not isinstance(artifacts, list) or len(artifacts) != len(expected_inventory):
+              raise SystemExit("approved manifest must contain exactly three artifacts")
+          actual_inventory = {}
+          for artifact in artifacts:
+              if not isinstance(artifact, dict) or set(artifact) != set(next(iter(expected_inventory.values()))):
+                  raise SystemExit("approved manifest artifact schema is invalid")
+              label = artifact.get("target_label")
+              if label in actual_inventory:
+                  raise SystemExit(f"duplicate approved manifest target: {label}")
+              actual_inventory[label] = artifact
+          if actual_inventory != expected_inventory:
+              raise SystemExit("approved manifest candidate inventory is missing, substituted, or unexpected")
+
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+              output.write(f"tag={tag}\n")
+              output.write(f"source_sha={source_sha}\n")
+              output.write(f"approved_manifest_digest={actual_digest}\n")
+              output.write(f"version_source_path={version_source_repo_path}\n")
+              output.write(f"version_source_sha256={version_source_digest}\n")
+          # release-manifest-validator-end
+          PY
+
+      - id: release-notes
+        name: Bind committed release notes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          release_notes_path="docs/release/V${RELEASE_VERSION}-RELEASE-NOTES.md"
+          release_notes_blob=target/release-rehearsal/binding/release-notes.md
+          git cat-file blob "${SOURCE_SHA}:${release_notes_path}" > "$release_notes_blob"
+          [ -s "$release_notes_blob" ]
+          [ "$(wc -c < "$release_notes_blob")" -le 32768 ]
+          expected_heading="# AO Mission v${RELEASE_VERSION} Release Notes"
+          head -n 1 "$release_notes_blob" | grep -Fx "$expected_heading"
+          release_notes_sha256=$(sha256sum < "$release_notes_blob" | awk '{print $1}')
+          echo "release_notes_path=$release_notes_path" >> "$GITHUB_OUTPUT"
+          echo "release_notes_sha256=$release_notes_sha256" >> "$GITHUB_OUTPUT"
+
+      - id: release-verifier
+        name: Create strict candidate and plan verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          verifier=target/release-rehearsal/binding/strict-release-verifier.py
+          cat > "$verifier" <<'PY'
+          # strict-release-verifier-begin
+          import argparse
+          import datetime
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          import struct
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+          MAX_MEMBER_BYTES = 32 * 1024 * 1024
+          MAX_TOTAL_MEMBER_BYTES = 64 * 1024 * 1024
+          PACKAGE_MEMBERS = {
+              "LICENSE",
+              "NOTICE",
+              "approved-release-manifest.json",
+              "functional-smoke-evidence.json",
+              "functional-smoke-output.json",
+              "help-evidence.json",
+              "help.txt",
+              "provenance.json",
+              "sbom.json",
+              "version-evidence.json",
+              "version-output.txt",
+          }
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def sha256_bytes(raw):
+              return hashlib.sha256(raw).hexdigest()
+
+          def reject_duplicate_keys(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  result[key] = value
+              return result
+
+          def load_json_bytes(raw, description):
+              try:
+                  value = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+              except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                  fail(f"{description} is not strict UTF-8 JSON: {error}")
+              return value
+
+          def load_json_file(path, description):
+              if not path.is_file():
+                  fail(f"{description} is missing")
+              return load_json_bytes(path.read_bytes(), description)
+
+          def require_exact_keys(value, expected, description):
+              if not isinstance(value, dict) or set(value) != set(expected):
+                  fail(f"{description} keys are missing or unexpected")
+
+          def target_specs(version):
+              return {
+                  "linux-x86_64": {
+                      "archive": f"ao-mission-{version}-linux-x86_64.tar.gz",
+                      "architecture": "x86_64",
+                      "binary_format": "elf",
+                      "entry_point": "ao-mission",
+                      "goarch": "amd64",
+                      "goos": "linux",
+                      "machine": "x86_64",
+                      "os": "linux",
+                      "runner_arch": "X64",
+                      "runner_label": "ubuntu-24.04",
+                      "runner_os": "Linux",
+                      "target_label": "linux-x86_64",
+                  },
+                  "macos-aarch64": {
+                      "archive": f"ao-mission-{version}-macos-aarch64.tar.gz",
+                      "architecture": "aarch64",
+                      "binary_format": "macho",
+                      "entry_point": "ao-mission",
+                      "goarch": "arm64",
+                      "goos": "darwin",
+                      "machine": "arm64",
+                      "os": "macos",
+                      "runner_arch": "ARM64",
+                      "runner_label": "macos-15",
+                      "runner_os": "macOS",
+                      "target_label": "macos-aarch64",
+                  },
+                  "windows-x86_64": {
+                      "archive": f"ao-mission-{version}-windows-x86_64.zip",
+                      "architecture": "x86_64",
+                      "binary_format": "pe",
+                      "entry_point": "ao-mission.exe",
+                      "goarch": "amd64",
+                      "goos": "windows",
+                      "machine": "x86_64",
+                      "os": "windows",
+                      "runner_arch": "X64",
+                      "runner_label": "windows-2025",
+                      "runner_os": "Windows",
+                      "target_label": "windows-x86_64",
+                  },
+              }
+
+          def bindings():
+              required = {
+                  "APPROVED_MANIFEST_DIGEST",
+                  "RELEASE_NOTES_SHA256",
+                  "RELEASE_TAG",
+                  "RELEASE_VERSION",
+                  "SOURCE_SHA",
+                  "VERIFIER_SHA256",
+                  "VERSION_SOURCE_PATH",
+                  "VERSION_SOURCE_SHA256",
+                  "WORKFLOW_REF",
+              }
+              missing = sorted(key for key in required if not os.environ.get(key))
+              if missing:
+                  fail(f"release verifier bindings are missing: {missing}")
+              return {key: os.environ[key] for key in required}
+
+          def verify_self(bound):
+              actual = sha256_bytes(Path(__file__).read_bytes())
+              if actual != bound["VERIFIER_SHA256"]:
+                  fail("strict release verifier digest mismatch")
+
+          def verify_manifest(path, bound):
+              raw = path.read_bytes() if path.is_file() else fail("approved manifest is missing")
+              if sha256_bytes(raw) != bound["APPROVED_MANIFEST_DIGEST"]:
+                  fail("approved manifest digest mismatch")
+              manifest = load_json_bytes(raw, "approved manifest")
+              require_exact_keys(
+                  manifest,
+                  {
+                      "artifacts",
+                      "repository",
+                      "schema_version",
+                      "source_sha",
+                      "tag",
+                      "version",
+                      "version_source",
+                      "version_source_sha256",
+                  },
+                  "approved manifest",
+              )
+              expected_scalars = {
+                  "repository": "ao-mission",
+                  "schema_version": "ao.release-rehearsal-manifest.v0.1",
+                  "source_sha": bound["SOURCE_SHA"],
+                  "tag": bound["RELEASE_TAG"],
+                  "version": bound["RELEASE_VERSION"],
+                  "version_source": bound["VERSION_SOURCE_PATH"],
+                  "version_source_sha256": bound["VERSION_SOURCE_SHA256"],
+              }
+              for key, expected in expected_scalars.items():
+                  if manifest[key] != expected:
+                      fail(f"approved manifest {key} binding mismatch")
+              specs = target_specs(bound["RELEASE_VERSION"])
+              artifacts = manifest["artifacts"]
+              if not isinstance(artifacts, list) or len(artifacts) != len(specs):
+                  fail("approved manifest target inventory count mismatch")
+              inventory = {}
+              for artifact in artifacts:
+                  if not isinstance(artifact, dict) or artifact.get("target_label") in inventory:
+                      fail("approved manifest target inventory is malformed or duplicated")
+                  inventory[artifact["target_label"]] = artifact
+              if inventory != specs:
+                  fail("approved manifest target inventory is missing, substituted, or unexpected")
+              return raw, manifest, specs
+
+          def validate_member_name(name):
+              if not name or "\\" in name:
+                  fail(f"unsafe archive member name: {name!r}")
+              path = PurePosixPath(name)
+              if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+                  fail(f"unsafe archive member path: {name!r}")
+
+          def read_archive(path):
+              if not path.is_file() or path.stat().st_size > MAX_ARCHIVE_BYTES:
+                  fail(f"candidate archive missing or oversized: {path}")
+              files = {}
+              total = 0
+              if path.name.endswith(".zip"):
+                  try:
+                      with zipfile.ZipFile(path) as archive:
+                          for info in archive.infolist():
+                              validate_member_name(info.filename)
+                              mode = (info.external_attr >> 16) & 0xFFFF
+                              if info.is_dir() or stat.S_ISLNK(mode):
+                                  fail(f"non-regular zip member rejected: {info.filename}")
+                              if info.filename in files:
+                                  fail(f"duplicate zip member rejected: {info.filename}")
+                              if info.file_size > MAX_MEMBER_BYTES:
+                                  fail(f"oversized zip member rejected: {info.filename}")
+                              raw = archive.read(info)
+                              if len(raw) != info.file_size:
+                                  fail(f"zip member size mismatch: {info.filename}")
+                              files[info.filename] = raw
+                              total += len(raw)
+                  except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+                      fail(f"invalid candidate zip archive: {error}")
+              else:
+                  try:
+                      with tarfile.open(path, mode="r:gz") as archive:
+                          for member in archive.getmembers():
+                              validate_member_name(member.name)
+                              if not member.isfile() or member.name in files:
+                                  fail(f"non-regular or duplicate tar member rejected: {member.name}")
+                              if member.size > MAX_MEMBER_BYTES:
+                                  fail(f"oversized tar member rejected: {member.name}")
+                              stream = archive.extractfile(member)
+                              if stream is None:
+                                  fail(f"tar member cannot be read: {member.name}")
+                              raw = stream.read(MAX_MEMBER_BYTES + 1)
+                              if len(raw) != member.size:
+                                  fail(f"tar member size mismatch: {member.name}")
+                              files[member.name] = raw
+                              total += len(raw)
+                  except (OSError, tarfile.TarError) as error:
+                      fail(f"invalid candidate tar archive: {error}")
+              if total > MAX_TOTAL_MEMBER_BYTES:
+                  fail("candidate archive uncompressed size exceeds limit")
+              return files
+
+          def verify_binary(raw, spec):
+              if spec["binary_format"] == "elf":
+                  if len(raw) < 20 or raw[:6] != b"\x7fELF\x02\x01" or struct.unpack("<H", raw[18:20])[0] != 0x3E:
+                      fail("Linux candidate is not an ELF64 x86_64 executable")
+              elif spec["binary_format"] == "macho":
+                  if len(raw) < 8 or struct.unpack("<I", raw[:4])[0] != 0xFEEDFACF or struct.unpack("<I", raw[4:8])[0] != 0x0100000C:
+                      fail("macOS candidate is not a thin Mach-O arm64 executable")
+              elif spec["binary_format"] == "pe":
+                  if len(raw) < 0x40 or raw[:2] != b"MZ":
+                      fail("Windows candidate is not a PE executable")
+                  offset = struct.unpack("<I", raw[0x3C:0x40])[0]
+                  if offset + 6 > len(raw) or raw[offset:offset + 4] != b"PE\0\0" or struct.unpack("<H", raw[offset + 4:offset + 6])[0] != 0x8664:
+                      fail("Windows candidate is not a PE32+ x86_64 executable")
+              else:
+                  fail("unsupported binary format in target specification")
+
+          def verify_functional_smoke(raw):
+              smoke = load_json_bytes(raw, "functional smoke output")
+              require_exact_keys(
+                  smoke,
+                  {
+                      "approves_work",
+                      "blockers",
+                      "contract",
+                      "executes_work",
+                      "generated_at_utc",
+                      "mutates_repositories",
+                      "path",
+                      "read_only",
+                      "schema",
+                      "status",
+                  },
+                  "functional smoke output",
+              )
+              expected = {
+                  "approves_work": False,
+                  "blockers": [],
+                  "contract": "ao.mission.record.v0.1",
+                  "executes_work": False,
+                  "mutates_repositories": False,
+                  "path": "examples/valid/mission-record.json",
+                  "read_only": True,
+                  "schema": "ao.mission.contract-validation.v0.1",
+                  "status": "ready",
+              }
+              for key, value in expected.items():
+                  if smoke[key] != value:
+                      fail(f"functional smoke {key} mismatch")
+              try:
+                  datetime.datetime.fromisoformat(smoke["generated_at_utc"].replace("Z", "+00:00"))
+              except (AttributeError, ValueError):
+                  fail("functional smoke timestamp is invalid")
+
+          def verify_candidate(summary_path, manifest_raw, spec, bound):
+              summary = load_json_file(summary_path, "candidate summary")
+              summary_keys = {
+                  "approved_manifest_digest",
+                  "archive",
+                  "archive_sha256",
+                  "binary_format",
+                  "binary_sha256",
+                  "checksum_file",
+                  "functional_smoke",
+                  "goarch",
+                  "goos",
+                  "help",
+                  "machine",
+                  "provenance_sha256",
+                  "release_notes_sha256",
+                  "repository",
+                  "runner_arch",
+                  "runner_label",
+                  "runner_os",
+                  "schema_version",
+                  "source_sha",
+                  "target_label",
+                  "version",
+                  "version_evidence",
+              }
+              require_exact_keys(summary, summary_keys, "candidate summary")
+              expected_summary = {
+                  "approved_manifest_digest": bound["APPROVED_MANIFEST_DIGEST"],
+                  "archive": spec["archive"],
+                  "binary_format": spec["binary_format"],
+                  "checksum_file": "SHA256SUMS",
+                  "functional_smoke": {
+                      "command": "validate contract --path examples/valid/mission-record.json",
+                      "provider_calls": False,
+                      "status": "passed",
+                  },
+                  "goarch": spec["goarch"],
+                  "goos": spec["goos"],
+                  "help": {"command": "no-args-usage", "expected_exit": "nonzero", "status": "passed"},
+                  "machine": spec["machine"],
+                  "release_notes_sha256": bound["RELEASE_NOTES_SHA256"],
+                  "repository": "ao-mission",
+                  "runner_arch": spec["runner_arch"],
+                  "runner_label": spec["runner_label"],
+                  "runner_os": spec["runner_os"],
+                  "schema_version": "ao.release-rehearsal-candidate.v0.3",
+                  "source_sha": bound["SOURCE_SHA"],
+                  "target_label": spec["target_label"],
+                  "version": bound["RELEASE_VERSION"],
+                  "version_evidence": {
+                      "command": "--version",
+                      "output": f"ao-mission version={bound['RELEASE_VERSION']} source_sha={bound['SOURCE_SHA']}",
+                      "release_version": bound["RELEASE_VERSION"],
+                      "source_sha": bound["SOURCE_SHA"],
+                      "status": "passed",
+                      "version_source": bound["VERSION_SOURCE_PATH"],
+                      "version_source_sha256": bound["VERSION_SOURCE_SHA256"],
+                  },
+              }
+              for key, expected in expected_summary.items():
+                  if summary[key] != expected:
+                      fail(f"candidate summary {key} mismatch for {spec['target_label']}")
+
+              candidate_dir = summary_path.parent
+              expected_sidecars = {spec["archive"], "SHA256SUMS", "candidate-summary.json", "provenance.json"}
+              actual_sidecars = {path.name for path in candidate_dir.iterdir()}
+              if actual_sidecars != expected_sidecars or any(not path.is_file() for path in candidate_dir.iterdir()):
+                  fail(f"candidate sidecar inventory mismatch for {spec['target_label']}")
+              archive_path = candidate_dir / spec["archive"]
+              archive_raw = archive_path.read_bytes()
+              archive_digest = sha256_bytes(archive_raw)
+              if archive_digest != summary["archive_sha256"]:
+                  fail(f"candidate archive digest mismatch for {spec['target_label']}")
+              checksum_text = (candidate_dir / "SHA256SUMS").read_text(encoding="utf-8")
+              if checksum_text != f"{archive_digest}  {spec['archive']}\n":
+                  fail(f"standalone checksum mismatch for {spec['target_label']}")
+
+              files = read_archive(archive_path)
+              expected_members = set(PACKAGE_MEMBERS) | {spec["entry_point"]}
+              if set(files) != expected_members:
+                  fail(f"archive member inventory mismatch for {spec['target_label']}")
+              if files["approved-release-manifest.json"] != manifest_raw:
+                  fail(f"archive approved manifest bytes mismatch for {spec['target_label']}")
+              if b"usage: ao-mission" not in files["help.txt"]:
+                  fail(f"help output mismatch for {spec['target_label']}")
+              if load_json_bytes(files["help-evidence.json"], "help evidence") != summary["help"]:
+                  fail(f"help evidence mismatch for {spec['target_label']}")
+              expected_version = {
+                  "command": "--version",
+                  "output": f"ao-mission version={bound['RELEASE_VERSION']} source_sha={bound['SOURCE_SHA']}",
+                  "release_version": bound["RELEASE_VERSION"],
+                  "source_sha": bound["SOURCE_SHA"],
+                  "status": "passed",
+                  "version_source": bound["VERSION_SOURCE_PATH"],
+                  "version_source_sha256": bound["VERSION_SOURCE_SHA256"],
+              }
+              if load_json_bytes(files["version-evidence.json"], "version evidence") != expected_version:
+                  fail(f"version evidence mismatch for {spec['target_label']}")
+              if files["version-output.txt"] != (expected_version["output"] + "\n").encode("utf-8"):
+                  fail(f"candidate --version output mismatch for {spec['target_label']}")
+              if load_json_bytes(files["functional-smoke-evidence.json"], "functional smoke evidence") != summary["functional_smoke"]:
+                  fail(f"functional smoke evidence mismatch for {spec['target_label']}")
+              verify_functional_smoke(files["functional-smoke-output.json"])
+              sbom = load_json_bytes(files["sbom.json"], "SBOM")
+              if not isinstance(sbom, dict) or sbom.get("Path") != "github.com/uesugitorachiyo/ao-mission" or not sbom.get("GoVersion"):
+                  fail(f"SBOM identity mismatch for {spec['target_label']}")
+
+              binary_raw = files[spec["entry_point"]]
+              binary_digest = sha256_bytes(binary_raw)
+              if binary_digest != summary["binary_sha256"]:
+                  fail(f"binary digest mismatch for {spec['target_label']}")
+              verify_binary(binary_raw, spec)
+
+              provenance_raw = files["provenance.json"]
+              if provenance_raw != (candidate_dir / "provenance.json").read_bytes():
+                  fail(f"standalone provenance mismatch for {spec['target_label']}")
+              if sha256_bytes(provenance_raw) != summary["provenance_sha256"]:
+                  fail(f"provenance digest mismatch for {spec['target_label']}")
+              provenance = load_json_bytes(provenance_raw, "candidate provenance")
+              provenance_keys = {
+                  "approved_manifest_digest",
+                  "archive",
+                  "binary_format",
+                  "binary_sha256",
+                  "go_version",
+                  "goarch",
+                  "goos",
+                  "machine",
+                  "release_notes_sha256",
+                  "repository",
+                  "runner_arch",
+                  "runner_label",
+                  "runner_os",
+                  "schema_version",
+                  "source_sha",
+                  "target_label",
+                  "version",
+                  "workflow_ref",
+                  "workflow_sha",
+              }
+              require_exact_keys(provenance, provenance_keys, "candidate provenance")
+              expected_provenance = {
+                  "approved_manifest_digest": bound["APPROVED_MANIFEST_DIGEST"],
+                  "archive": spec["archive"],
+                  "binary_format": spec["binary_format"],
+                  "binary_sha256": binary_digest,
+                  "goarch": spec["goarch"],
+                  "goos": spec["goos"],
+                  "machine": spec["machine"],
+                  "release_notes_sha256": bound["RELEASE_NOTES_SHA256"],
+                  "repository": "ao-mission",
+                  "runner_arch": spec["runner_arch"],
+                  "runner_label": spec["runner_label"],
+                  "runner_os": spec["runner_os"],
+                  "schema_version": "ao.release-rehearsal-provenance.v0.3",
+                  "source_sha": bound["SOURCE_SHA"],
+                  "target_label": spec["target_label"],
+                  "version": bound["RELEASE_VERSION"],
+                  "workflow_sha": bound["SOURCE_SHA"],
+              }
+              for key, expected in expected_provenance.items():
+                  if provenance[key] != expected:
+                      fail(f"candidate provenance {key} mismatch for {spec['target_label']}")
+              go_version_pattern = rf"go version go1\.26\.4 {re.escape(spec['goos'])}/{re.escape(spec['goarch'])}"
+              if not isinstance(provenance["go_version"], str) or not re.fullmatch(go_version_pattern, provenance["go_version"]):
+                  fail(f"candidate Go version or target identity mismatch for {spec['target_label']}")
+              if provenance["workflow_ref"] != bound["WORKFLOW_REF"]:
+                  fail(f"candidate workflow ref mismatch for {spec['target_label']}")
+              return summary
+
+          def verify_candidates(manifest_path, candidates_root, bound):
+              manifest_raw, _, specs = verify_manifest(manifest_path, bound)
+              summary_paths = sorted(candidates_root.rglob("candidate-summary.json"))
+              if len(summary_paths) != len(specs):
+                  fail("candidate summary count mismatch")
+              verified = []
+              seen = set()
+              for summary_path in summary_paths:
+                  preview = load_json_file(summary_path, "candidate summary")
+                  label = preview.get("target_label") if isinstance(preview, dict) else None
+                  if label not in specs or label in seen:
+                      fail("candidate target is missing, duplicated, or unexpected")
+                  seen.add(label)
+                  verified.append(verify_candidate(summary_path, manifest_raw, specs[label], bound))
+              if seen != set(specs):
+                  fail("candidate target inventory mismatch")
+              return sorted(verified, key=lambda item: item["target_label"])
+
+          def verify_plan(args, manifest, candidates, bound):
+              checksum_path = Path(args.plan_checksum)
+              plan_path = Path(args.plan)
+              if not checksum_path.is_file() or not plan_path.is_file():
+                  fail("promotion plan or checksum sidecar is missing")
+              plan_raw = plan_path.read_bytes()
+              plan_digest = sha256_bytes(plan_raw)
+              if checksum_path.read_text(encoding="utf-8") != f"{plan_digest}  immutable-promotion-plan.json\n":
+                  fail("promotion plan checksum sidecar mismatch")
+              plan = load_json_bytes(plan_raw, "promotion plan")
+              plan_keys = {
+                  "approved_manifest_digest",
+                  "approved_manifest_inventory",
+                  "candidates",
+                  "immutable",
+                  "release_notes_sha256",
+                  "repository",
+                  "schema_version",
+                  "source_sha",
+                  "tag",
+                  "verifier_sha256",
+                  "version",
+              }
+              require_exact_keys(plan, plan_keys, "promotion plan")
+              expected = {
+                  "approved_manifest_digest": bound["APPROVED_MANIFEST_DIGEST"],
+                  "approved_manifest_inventory": manifest["artifacts"],
+                  "candidates": candidates,
+                  "immutable": True,
+                  "release_notes_sha256": bound["RELEASE_NOTES_SHA256"],
+                  "repository": "ao-mission",
+                  "schema_version": "ao.release-rehearsal-promotion-plan.v0.3",
+                  "source_sha": bound["SOURCE_SHA"],
+                  "tag": bound["RELEASE_TAG"],
+                  "verifier_sha256": bound["VERIFIER_SHA256"],
+                  "version": bound["RELEASE_VERSION"],
+              }
+              if plan != expected:
+                  fail("promotion plan semantic bindings or inventory mismatch")
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("mode", choices=("candidates", "plan"))
+          parser.add_argument("--manifest", required=True)
+          parser.add_argument("--candidates", required=True)
+          parser.add_argument("--output")
+          parser.add_argument("--plan")
+          parser.add_argument("--plan-checksum")
+          args = parser.parse_args()
+
+          bound = bindings()
+          verify_self(bound)
+          manifest_path = Path(args.manifest)
+          candidates_root = Path(args.candidates)
+          candidates = verify_candidates(manifest_path, candidates_root, bound)
+          _, manifest, _ = verify_manifest(manifest_path, bound)
+          if args.mode == "candidates":
+              if not args.output:
+                  fail("candidate verification output path is required")
+              output = {
+                  "candidates": candidates,
+                  "schema_version": "ao.release-rehearsal-candidate-verification.v0.1",
+                  "status": "passed",
+              }
+              Path(args.output).write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          else:
+              if not args.plan or not args.plan_checksum:
+                  fail("plan and plan checksum paths are required")
+              verify_plan(args, manifest, candidates, bound)
+          # strict-release-verifier-end
+          PY
+          chmod 0555 "$verifier"
+          verifier_sha256=$(sha256sum "$verifier" | awk '{print $1}')
+          echo "verifier_sha256=$verifier_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload validated release contract
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-approved-release-manifest-${{ inputs.source_sha }}
+          path: target/release-rehearsal/binding
+          retention-days: 14
+
+  native-candidates:
+    name: Native candidate (${{ matrix.target_label }})
+    needs: bind-release-inputs
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target_label: linux-x86_64
+            archive_extension: tar.gz
+            binary_suffix: ""
+            binary_format: elf
+            machine: x86_64
+            expected_runner_os: Linux
+            expected_runner_arch: X64
+            expected_goos: linux
+            expected_goarch: amd64
+          - os: macos-15
+            target_label: macos-aarch64
+            archive_extension: tar.gz
+            binary_suffix: ""
+            binary_format: macho
+            machine: arm64
+            expected_runner_os: macOS
+            expected_runner_arch: ARM64
+            expected_goos: darwin
+            expected_goarch: arm64
+          - os: windows-2025
+            target_label: windows-x86_64
+            archive_extension: zip
+            binary_suffix: ".exe"
+            binary_format: pe
+            machine: x86_64
+            expected_runner_os: Windows
+            expected_runner_arch: X64
+            expected_goos: windows
+            expected_goarch: amd64
+    steps:
+      - name: Check out the bound source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.bind-release-inputs.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Download validated approved manifest bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-approved-release-manifest-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/approved-manifest
+
+      - name: Verify exact source and approved manifest bytes
+        shell: bash
+        env:
+          APPROVED_MANIFEST_DIGEST: ${{ needs.bind-release-inputs.outputs.approved_manifest_digest }}
+          SOURCE_SHA: ${{ needs.bind-release-inputs.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          manifest=target/release-rehearsal/approved-manifest/approved-release-manifest.json
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual_manifest_digest=$(sha256sum "$manifest" | awk '{print $1}')
+          else
+            actual_manifest_digest=$(shasum -a 256 "$manifest" | awk '{print $1}')
+          fi
+          [ "$actual_manifest_digest" = "$APPROVED_MANIFEST_DIGEST" ]
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      - name: Verify Go toolchain
+        shell: bash
+        run: '[ "$(go env GOVERSION)" = "go1.26.4" ]'
+
+      - name: Build, package, and smoke the native candidate
+        shell: bash
+        env:
+          APPROVED_MANIFEST_DIGEST: ${{ needs.bind-release-inputs.outputs.approved_manifest_digest }}
+          ARCHIVE_EXTENSION: ${{ matrix.archive_extension }}
+          BINARY_FORMAT: ${{ matrix.binary_format }}
+          BINARY_SUFFIX: ${{ matrix.binary_suffix }}
+          EXPECTED_GOARCH: ${{ matrix.expected_goarch }}
+          EXPECTED_GOOS: ${{ matrix.expected_goos }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.expected_runner_arch }}
+          EXPECTED_RUNNER_OS: ${{ matrix.expected_runner_os }}
+          MACHINE: ${{ matrix.machine }}
+          RELEASE_NOTES_SHA256: ${{ needs.bind-release-inputs.outputs.release_notes_sha256 }}
+          RELEASE_VERSION: ${{ needs.bind-release-inputs.outputs.version }}
+          RUNNER_LABEL: ${{ matrix.os }}
+          SOURCE_SHA: ${{ needs.bind-release-inputs.outputs.source_sha }}
+          TARGET_LABEL: ${{ matrix.target_label }}
+          VERSION_SOURCE_PATH: ${{ needs.bind-release-inputs.outputs.version_source_path }}
+          VERSION_SOURCE_SHA256: ${{ needs.bind-release-inputs.outputs.version_source_sha256 }}
+        run: |
+          set -euo pipefail
+          artifact_dir="target/release-rehearsal/candidate-${TARGET_LABEL}"
+          package_dir="${RUNNER_TEMP}/ao-mission-package-${TARGET_LABEL}"
+          binary="ao-mission${BINARY_SUFFIX}"
+          archive="ao-mission-${RELEASE_VERSION}-${TARGET_LABEL}.${ARCHIVE_EXTENSION}"
+          rm -rf "$artifact_dir" "$package_dir"
+          mkdir -p "$artifact_dir"
+          mkdir -p "$package_dir"
+          artifact_dir_abs=$(cd "$artifact_dir" && pwd)
+          [ "$RUNNER_OS" = "$EXPECTED_RUNNER_OS" ]
+          [ "$RUNNER_ARCH" = "$EXPECTED_RUNNER_ARCH" ]
+          [ "$(go env GOOS)" = "$EXPECTED_GOOS" ]
+          [ "$(go env GOARCH)" = "$EXPECTED_GOARCH" ]
+          go build -trimpath \
+            -ldflags "-X github.com/uesugitorachiyo/ao-mission/internal/mission.BuildVersion=${RELEASE_VERSION} -X github.com/uesugitorachiyo/ao-mission/internal/mission.BuildSourceSHA=${SOURCE_SHA}" \
+            -o "$package_dir/$binary" \
+            ./cmd/ao-mission
+
+          set +e
+          "$package_dir/$binary" > "$package_dir/help.txt" 2>&1
+          help_exit=$?
+          set -e
+          [ "$help_exit" -ne 0 ]
+          grep -F "usage: ao-mission" "$package_dir/help.txt"
+          cat > "$package_dir/help-evidence.json" <<EOF
+          {"command":"no-args-usage","expected_exit":"nonzero","status":"passed"}
+          EOF
+
+          version_source_blob="$package_dir/version-source.txt"
+          git cat-file blob "${SOURCE_SHA}:${VERSION_SOURCE_PATH}" > "$version_source_blob"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual_version_source_sha256=$(sha256sum < "$version_source_blob" | awk '{print $1}')
+          else
+            actual_version_source_sha256=$(shasum -a 256 < "$version_source_blob" | awk '{print $1}')
+          fi
+          [ "$actual_version_source_sha256" = "$VERSION_SOURCE_SHA256" ]
+          head -n 1 "$version_source_blob" | grep -F "# AO Mission v0.1 SDD"
+          expected_version_output="ao-mission version=${RELEASE_VERSION} source_sha=${SOURCE_SHA}"
+          version_output=$("$package_dir/$binary" --version)
+          version_output=${version_output%$'\r'}
+          [ "$version_output" = "$expected_version_output" ]
+          printf '%s\n' "$version_output" > "$package_dir/version-output.txt"
+          cat > "$package_dir/version-evidence.json" <<EOF
+          {"command":"--version","output":"${version_output}","release_version":"${RELEASE_VERSION}","source_sha":"${SOURCE_SHA}","status":"passed","version_source":"${VERSION_SOURCE_PATH}","version_source_sha256":"${VERSION_SOURCE_SHA256}"}
+          EOF
+
+          "$package_dir/$binary" validate contract --path examples/valid/mission-record.json > "$package_dir/functional-smoke-output.json"
+          python3 - "$package_dir/functional-smoke-output.json" <<'PY'
+          import json
+          import sys
+
+          if json.load(open(sys.argv[1], encoding="utf-8")).get("status") != "ready":
+              raise SystemExit("functional smoke status is not ready")
+          PY
+          cat > "$package_dir/functional-smoke-evidence.json" <<EOF
+          {"command":"validate contract --path examples/valid/mission-record.json","provider_calls":false,"status":"passed"}
+          EOF
+
+          cp LICENSE "$package_dir/"
+          cp NOTICE "$package_dir/"
+          cp target/release-rehearsal/approved-manifest/approved-release-manifest.json "$package_dir/"
+          go list -m -json > "$package_dir/sbom.json"
+          if command -v sha256sum >/dev/null 2>&1; then
+            binary_sha256=$(sha256sum < "$package_dir/$binary" | awk '{print $1}')
+          else
+            binary_sha256=$(shasum -a 256 < "$package_dir/$binary" | awk '{print $1}')
+          fi
+          go_version=$(go version | sed 's/"/\\"/g')
+          cat > "$package_dir/provenance.json" <<EOF
+          {"approved_manifest_digest":"${APPROVED_MANIFEST_DIGEST}","archive":"${archive}","binary_format":"${BINARY_FORMAT}","binary_sha256":"${binary_sha256}","go_version":"${go_version}","goarch":"${EXPECTED_GOARCH}","goos":"${EXPECTED_GOOS}","machine":"${MACHINE}","release_notes_sha256":"${RELEASE_NOTES_SHA256}","repository":"ao-mission","runner_arch":"${RUNNER_ARCH}","runner_label":"${RUNNER_LABEL}","runner_os":"${RUNNER_OS}","schema_version":"ao.release-rehearsal-provenance.v0.3","source_sha":"${SOURCE_SHA}","target_label":"${TARGET_LABEL}","version":"${RELEASE_VERSION}","workflow_ref":"${GITHUB_WORKFLOW_REF}","workflow_sha":"${GITHUB_WORKFLOW_SHA}"}
+          EOF
+          if [ "$ARCHIVE_EXTENSION" = "zip" ]; then
+            (cd "$package_dir" && 7z a "$artifact_dir_abs/$archive" "$binary" LICENSE NOTICE approved-release-manifest.json help.txt help-evidence.json version-output.txt version-evidence.json functional-smoke-output.json functional-smoke-evidence.json sbom.json provenance.json)
+          else
+            (cd "$package_dir" && tar -czf "$artifact_dir_abs/$archive" "$binary" LICENSE NOTICE approved-release-manifest.json help.txt help-evidence.json version-output.txt version-evidence.json functional-smoke-output.json functional-smoke-evidence.json sbom.json provenance.json)
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            archive_sha256=$(sha256sum < "$artifact_dir/$archive" | awk '{print $1}')
+          else
+            archive_sha256=$(shasum -a 256 < "$artifact_dir/$archive" | awk '{print $1}')
+          fi
+          printf '%s  %s\n' "$archive_sha256" "$archive" > "$artifact_dir/SHA256SUMS"
+          cp "$package_dir/provenance.json" "$artifact_dir/provenance.json"
+          if command -v sha256sum >/dev/null 2>&1; then
+            provenance_sha256=$(sha256sum < "$artifact_dir/provenance.json" | awk '{print $1}')
+          else
+            provenance_sha256=$(shasum -a 256 < "$artifact_dir/provenance.json" | awk '{print $1}')
+          fi
+          cat > "$artifact_dir/candidate-summary.json" <<EOF
+          {"approved_manifest_digest":"${APPROVED_MANIFEST_DIGEST}","archive":"${archive}","archive_sha256":"${archive_sha256}","binary_format":"${BINARY_FORMAT}","binary_sha256":"${binary_sha256}","checksum_file":"SHA256SUMS","functional_smoke":{"command":"validate contract --path examples/valid/mission-record.json","provider_calls":false,"status":"passed"},"goarch":"${EXPECTED_GOARCH}","goos":"${EXPECTED_GOOS}","help":{"command":"no-args-usage","expected_exit":"nonzero","status":"passed"},"machine":"${MACHINE}","provenance_sha256":"${provenance_sha256}","release_notes_sha256":"${RELEASE_NOTES_SHA256}","repository":"ao-mission","runner_arch":"${RUNNER_ARCH}","runner_label":"${RUNNER_LABEL}","runner_os":"${RUNNER_OS}","schema_version":"ao.release-rehearsal-candidate.v0.3","source_sha":"${SOURCE_SHA}","target_label":"${TARGET_LABEL}","version":"${RELEASE_VERSION}","version_evidence":{"command":"--version","output":"${version_output}","release_version":"${RELEASE_VERSION}","source_sha":"${SOURCE_SHA}","status":"passed","version_source":"${VERSION_SOURCE_PATH}","version_source_sha256":"${VERSION_SOURCE_SHA256}"}}
+          EOF
+
+      - name: Upload private immutable native candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-release-candidate-${{ matrix.target_label }}-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/candidate-${{ matrix.target_label }}
+          retention-days: 14
+
+  assemble-promotion-plan:
+    name: Assemble immutable checksummed promotion plan
+    needs:
+      - bind-release-inputs
+      - native-candidates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download all bound native candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ao-mission-release-candidate-*-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/downloads
+
+      - name: Download validated approved manifest bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-approved-release-manifest-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/approved-manifest
+
+      - name: Strictly verify candidates and assemble immutable promotion plan
+        shell: bash
+        env:
+          APPROVED_MANIFEST_DIGEST: ${{ needs.bind-release-inputs.outputs.approved_manifest_digest }}
+          RELEASE_NOTES_SHA256: ${{ needs.bind-release-inputs.outputs.release_notes_sha256 }}
+          RELEASE_TAG: ${{ needs.bind-release-inputs.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.bind-release-inputs.outputs.version }}
+          SOURCE_SHA: ${{ needs.bind-release-inputs.outputs.source_sha }}
+          VERIFIER_SHA256: ${{ needs.bind-release-inputs.outputs.verifier_sha256 }}
+          VERSION_SOURCE_PATH: ${{ needs.bind-release-inputs.outputs.version_source_path }}
+          VERSION_SOURCE_SHA256: ${{ needs.bind-release-inputs.outputs.version_source_sha256 }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          out=target/release-rehearsal/promotion-plan
+          mkdir -p "$out"
+          python3 target/release-rehearsal/approved-manifest/strict-release-verifier.py \
+            candidates \
+            --manifest target/release-rehearsal/approved-manifest/approved-release-manifest.json \
+            --candidates target/release-rehearsal/downloads \
+            --output "$out/verified-candidates.json"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          manifest_path = Path("target/release-rehearsal/approved-manifest/approved-release-manifest.json")
+          out = Path("target/release-rehearsal/promotion-plan")
+          manifest_bytes = manifest_path.read_bytes()
+          manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+          manifest = json.loads(manifest_bytes)
+          verification = json.loads((out / "verified-candidates.json").read_text(encoding="utf-8"))
+          if verification.get("schema_version") != "ao.release-rehearsal-candidate-verification.v0.1" or verification.get("status") != "passed":
+              raise SystemExit("strict candidate verification readback is invalid")
+
+          plan = {
+              "approved_manifest_digest": manifest_digest,
+              "approved_manifest_inventory": manifest["artifacts"],
+              "candidates": verification["candidates"],
+              "immutable": True,
+              "release_notes_sha256": os.environ["RELEASE_NOTES_SHA256"],
+              "repository": "ao-mission",
+              "schema_version": "ao.release-rehearsal-promotion-plan.v0.3",
+              "source_sha": os.environ["SOURCE_SHA"],
+              "tag": os.environ["RELEASE_TAG"],
+              "verifier_sha256": os.environ["VERIFIER_SHA256"],
+              "version": os.environ["RELEASE_VERSION"],
+          }
+          plan_path = out / "immutable-promotion-plan.json"
+          plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          digest = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+          (out / "immutable-promotion-plan.sha256").write_text(f"{digest}  immutable-promotion-plan.json\n", encoding="utf-8")
+          PY
+
+      - name: Emit explicit dry-run no-publication boundary
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_TAG: ${{ needs.bind-release-inputs.outputs.tag }}
+          SOURCE_SHA: ${{ needs.bind-release-inputs.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python3 - target/release-rehearsal/promotion-plan/dry-run-boundary.json <<'PY'
+          # dry-run-boundary-writer-begin
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          boundary = {
+              "deployment_attempted": False,
+              "dry_run": os.environ["DRY_RUN"].lower() == "true",
+              "private_candidate_artifact_uploads_performed": True,
+              "private_plan_artifact_upload_authorized": True,
+              "publication_performed": False,
+              "public_release_asset_upload_attempted": False,
+              "release_creation_attempted": False,
+              "schema_version": "ao.release-rehearsal-dry-run-boundary.v0.2",
+              "source_sha": os.environ["SOURCE_SHA"],
+              "tag": os.environ["RELEASE_TAG"],
+              "tag_creation_attempted": False,
+          }
+          Path(sys.argv[1]).write_text(json.dumps(boundary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          # dry-run-boundary-writer-end
+          PY
+
+      - name: Upload private immutable promotion plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-release-rehearsal-plan-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/promotion-plan
+          retention-days: 14
+
+  publish-release:
+    name: Publish approved release
+    needs:
+      - bind-release-inputs
+      - assemble-promotion-plan
+    if: ${{ inputs.dry_run == false && inputs.live_confirmation == format('publish-ao-mission-{0}-{1}-{2}-{3}', inputs.version, inputs.tag, inputs.source_sha, inputs.approved_manifest_digest) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    environment: ao-mission-release
+    steps:
+      - name: Check out the bound source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.bind-release-inputs.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Download immutable promotion plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-release-rehearsal-plan-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/promotion-plan
+
+      - name: Download approved native candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ao-mission-release-candidate-*-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/candidates
+
+      - name: Download validated approved manifest bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-approved-release-manifest-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/approved-manifest
+
+      - name: Independently verify strict plan, manifest, and candidates
+        shell: bash
+        env:
+          APPROVED_MANIFEST_DIGEST: ${{ inputs.approved_manifest_digest }}
+          RELEASE_NOTES_SHA256: ${{ needs.bind-release-inputs.outputs.release_notes_sha256 }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERIFIER_SHA256: ${{ needs.bind-release-inputs.outputs.verifier_sha256 }}
+          VERSION_SOURCE_PATH: ${{ needs.bind-release-inputs.outputs.version_source_path }}
+          VERSION_SOURCE_SHA256: ${{ needs.bind-release-inputs.outputs.version_source_sha256 }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          python3 target/release-rehearsal/approved-manifest/strict-release-verifier.py \
+            plan \
+            --manifest target/release-rehearsal/approved-manifest/approved-release-manifest.json \
+            --candidates target/release-rehearsal/candidates \
+            --plan target/release-rehearsal/promotion-plan/immutable-promotion-plan.json \
+            --plan-checksum target/release-rehearsal/promotion-plan/immutable-promotion-plan.sha256
+
+      - name: Verify protected release environment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT: ao-mission-release
+        run: |
+          set -euo pipefail
+          mkdir -p target/release-rehearsal/publisher-readbacks
+          environment_state="$RUNNER_TEMP/release-environment.json"
+          set +e
+          environment_http_status=$(curl --silent --show-error \
+            --output "$environment_state" \
+            --write-out '%{http_code}' \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/environments/${RELEASE_ENVIRONMENT}")
+          curl_exit=$?
+          set -e
+          if [ "$curl_exit" -ne 0 ]; then
+            environment_http_status=0
+            printf '{"name":"","protection_rules":[]}\n' > "$environment_state"
+          fi
+          RELEASE_ENVIRONMENT_API_STATUS="$environment_http_status" python3 - \
+            "$environment_state" \
+            target/release-rehearsal/publisher-readbacks/environment-gate-readback.json <<'PY'
+          # environment-gate-validator-begin
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_environment = os.environ["RELEASE_ENVIRONMENT"]
+          api_status = int(os.environ.get("RELEASE_ENVIRONMENT_API_STATUS", "200"))
+          reviewer_count = 0
+          if isinstance(state, dict):
+              for rule in state.get("protection_rules", []):
+                  if isinstance(rule, dict) and rule.get("type") == "required_reviewers":
+                      reviewers = rule.get("reviewers", [])
+                      if isinstance(reviewers, list):
+                          reviewer_count += len(reviewers)
+          protected = (
+              api_status == 200
+              and isinstance(state, dict)
+              and state.get("name") == expected_environment
+              and reviewer_count > 0
+          )
+          readback = {
+              "api_http_status": api_status,
+              "environment": expected_environment,
+              "protected": protected,
+              "required_reviewer_count": reviewer_count,
+              "schema_version": "ao.release-environment-gate-readback.v0.1",
+              "status": "ready" if protected else "blocked",
+          }
+          Path(sys.argv[2]).write_text(json.dumps(readback, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          if not protected:
+              raise SystemExit("release environment is absent or lacks required reviewers")
+          # environment-gate-validator-end
+          PY
+
+      - name: Upload environment gate readback
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-release-environment-gate-${{ inputs.source_sha }}
+          path: target/release-rehearsal/publisher-readbacks/environment-gate-readback.json
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Fail closed on remote tag and release state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/release-rehearsal/publisher-readbacks
+          tag_refs="$RUNNER_TEMP/release-tag-refs"
+          tag_query_succeeded=true
+          set +e
+          git ls-remote --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" > "$tag_refs"
+          tag_query_exit=$?
+          set -e
+          if [ "$tag_query_exit" -ne 0 ]; then
+            tag_query_succeeded=false
+          fi
+          tag_exists=false
+          tag_source_sha=null
+          if [ "$tag_query_succeeded" = true ] && [ -s "$tag_refs" ]; then
+            tag_exists=true
+            set +e
+            git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            fetch_exit=$?
+            set -e
+            if [ "$fetch_exit" -ne 0 ]; then
+              tag_query_succeeded=false
+            else
+              resolved_tag_source=$(git rev-parse "$RELEASE_TAG^{commit}")
+              tag_source_sha="\"$resolved_tag_source\""
+            fi
+          fi
+
+          release_state="$RUNNER_TEMP/release-state.json"
+          set +e
+          release_http_status=$(curl --silent --show-error \
+            --output "$RUNNER_TEMP/release-api-response.json" \
+            --write-out '%{http_code}' \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")
+          release_curl_exit=$?
+          set -e
+          if [ "$release_curl_exit" -ne 0 ]; then
+            release_http_status=0
+          fi
+          printf '{"release_http_status":%s,"tag_exists":%s,"tag_query_succeeded":%s,"tag_source_sha":%s}\n' \
+            "$release_http_status" "$tag_exists" "$tag_query_succeeded" "$tag_source_sha" > "$release_state"
+          python3 - "$release_state" target/release-rehearsal/publisher-readbacks/release-preflight-readback.json <<'PY'
+          # release-state-validator-begin
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          source_sha = os.environ["SOURCE_SHA"]
+          tag = os.environ["RELEASE_TAG"]
+          tag_query_succeeded = state.get("tag_query_succeeded", True) is True
+          tag_exists = state.get("tag_exists") is True
+          tag_source_sha = state.get("tag_source_sha")
+          release_http_status = state.get("release_http_status")
+          tag_safe = tag_query_succeeded and not tag_exists and tag_source_sha is None
+          release_safe = release_http_status == 404
+          safe = tag_safe and release_safe
+          readback = {
+              "release_state": "absent" if release_http_status == 404 else ("existing" if release_http_status == 200 else "unknown"),
+              "safe_to_publish": safe,
+              "schema_version": "ao.release-remote-preflight-readback.v0.1",
+              "source_sha": source_sha,
+              "status": "ready" if safe else "blocked",
+              "tag": tag,
+              "tag_state": "absent" if not tag_exists else ("exact" if tag_source_sha == source_sha else "mismatch"),
+          }
+          Path(sys.argv[2]).write_text(json.dumps(readback, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          if not tag_query_succeeded:
+              raise SystemExit("remote tag state could not be established")
+          if not tag_safe:
+              raise SystemExit("release tag already exists or remote tag state is inconsistent")
+          if release_http_status == 200:
+              raise SystemExit("release already exists; refusing replacement or substitution")
+          if not release_safe:
+              raise SystemExit("remote release state is not explicitly absent")
+          # release-state-validator-end
+          PY
+
+      - name: Upload remote release preflight readback
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ao-mission-release-preflight-${{ inputs.source_sha }}
+          path: target/release-rehearsal/publisher-readbacks/release-preflight-readback.json
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish only the approved candidate archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES_PATH: ${{ needs.bind-release-inputs.outputs.release_notes_path }}
+          RELEASE_NOTES_SHA256: ${{ needs.bind-release-inputs.outputs.release_notes_sha256 }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          approved_release_notes="$RUNNER_TEMP/approved-release-notes.md"
+          git cat-file blob "${SOURCE_SHA}:${RELEASE_NOTES_PATH}" > "$approved_release_notes"
+          actual_release_notes_sha256=$(sha256sum < "$approved_release_notes" | awk '{print $1}')
+          [ "$actual_release_notes_sha256" = "$RELEASE_NOTES_SHA256" ]
+          mapfile -t archives < <(find target/release-rehearsal/candidates -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          [ "${#archives[@]}" -eq 3 ]
+          gh release create "$RELEASE_TAG" --target "$SOURCE_SHA" --title "AO Mission $RELEASE_VERSION" --notes-file "$approved_release_notes" "${archives[@]}"
+
+  verify-published-release:
+    name: Independently verify published assets
+    needs:
+      - bind-release-inputs
+      - publish-release
+    if: ${{ needs.publish-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download immutable promotion plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ao-mission-release-rehearsal-plan-${{ needs.bind-release-inputs.outputs.source_sha }}
+          path: target/release-rehearsal/promotion-plan
+
+      - name: Download and verify public release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.bind-release-inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir target/release-rehearsal/public-assets
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("target/release-rehearsal/promotion-plan/immutable-promotion-plan.json").read_text(encoding="utf-8"))
+          public_assets = Path("target/release-rehearsal/public-assets")
+          expected_names = {candidate["archive"] for candidate in plan["candidates"]}
+          actual_names = {path.name for path in public_assets.iterdir() if path.is_file()}
+          if actual_names != expected_names:
+              raise SystemExit("public release asset set is missing, substituted, or unexpected")
+          for candidate in plan["candidates"]:
+              asset = public_assets / candidate["archive"]
+              if hashlib.sha256(asset.read_bytes()).hexdigest() != candidate["archive_sha256"]:
+                  raise SystemExit(f"public asset verification failed for {candidate['archive']}")
+          PY

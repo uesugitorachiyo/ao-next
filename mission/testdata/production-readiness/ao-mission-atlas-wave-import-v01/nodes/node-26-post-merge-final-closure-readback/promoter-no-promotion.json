@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-26-post-merge-final-closure-readback",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node corrects final readback closure and does not request promotion."
+}

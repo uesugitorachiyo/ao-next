@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.scheduler-alert-summary.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "total", "alerts", "executes_work", "approves_work"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.scheduler-alert-summary.v0.1" },
+    "status": { "type": "string" },
+    "total": { "type": "integer" },
+    "fresh": { "type": "integer" },
+    "stale": { "type": "integer" },
+    "unknown": { "type": "integer" },
+    "alerts": { "type": "array" },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "generated_at_utc": { "type": "string" }
+  }
+}

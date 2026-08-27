@@ -1,0 +1,25 @@
+{
+  "schema": "ao.mission.a2a-agent-card.v0.1",
+  "name": "ao-mission",
+  "protocol_version": "a2a-local-fixture-v0.1",
+  "description": "Invalid fixture: SSE streaming is requested and must be denied.",
+  "endpoint": "/",
+  "methods": ["mission.status"],
+  "capabilities": ["streaming=true", "sse=true", "push_notifications=false", "mutation_authority=false"],
+  "capabilities_detail": {
+    "streaming": true,
+    "sse": true,
+    "push_notifications": false,
+    "state_transition_history": true,
+    "artifact_readbacks": true
+  },
+  "skills": [
+    {
+      "id": "mission-readback",
+      "name": "Mission readback",
+      "description": "Return mission status readback.",
+      "tags": ["mission", "readback", "intent-only"]
+    }
+  ],
+  "mutation_authority": false
+}

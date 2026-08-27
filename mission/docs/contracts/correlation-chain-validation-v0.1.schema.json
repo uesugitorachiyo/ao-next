@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.correlation-chain-validation.v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "artifact_count",
+    "safe_to_execute",
+    "executes_work",
+    "approves_work",
+    "mutates_repositories",
+    "widens_policy",
+    "publishes_artifacts"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ao.mission.correlation-chain-validation.v0.1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ready", "blocked"]
+    },
+    "mission_id": {
+      "type": "string"
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "chain_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifact_count": {
+      "type": "integer"
+    },
+    "safe_to_execute": {
+      "type": "boolean",
+      "const": false
+    },
+    "executes_work": {
+      "type": "boolean",
+      "const": false
+    },
+    "approves_work": {
+      "type": "boolean",
+      "const": false
+    },
+    "mutates_repositories": {
+      "type": "boolean",
+      "const": false
+    },
+    "widens_policy": {
+      "type": "boolean",
+      "const": false
+    },
+    "publishes_artifacts": {
+      "type": "boolean",
+      "const": false
+    }
+  }
+}

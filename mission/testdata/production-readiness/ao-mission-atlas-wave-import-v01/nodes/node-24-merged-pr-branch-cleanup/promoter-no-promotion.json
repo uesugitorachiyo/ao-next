@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-24-merged-pr-branch-cleanup",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node records branch cleanup evidence and does not request promotion."
+}

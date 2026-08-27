@@ -1,0 +1,31 @@
+{
+  "schema": "ao.mission.correlation-chain-reference.v0.1",
+  "mission_id": "mission-example",
+  "correlation_id": "corr-example",
+  "chain_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reference_digest": "sha256:b728b912d2abeff3e84ba80f89e75f7604185181f87bdf746fdb7ada6f166882",
+  "entries": [
+    {
+      "role": "authority",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "locator_state": "live",
+      "locator_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "producer": "ao-stack",
+      "binding_mode": "native_field",
+      "native_identifier": "corr-example",
+      "native_field": "/correlation_id",
+      "safe_to_execute": false,
+      "executes_work": false,
+      "approves_work": false,
+      "mutates_repositories": false,
+      "widens_policy": false,
+      "publishes_artifacts": false
+    }
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "widens_policy": false,
+  "publishes_artifacts": false
+}

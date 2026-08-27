@@ -1,0 +1,8 @@
+{
+  "schema": "ao.sentinel.public-safety-wording-readback.v0.1",
+  "node_id": "node-11-final-reconciliation-event-index",
+  "status": "full_local_scan_passed",
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "unsafe_public_wording_found": false
+}

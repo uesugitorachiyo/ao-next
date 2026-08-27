@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.objective-workflow-contract.v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "mission_id",
+    "correlation_id",
+    "objective_digest",
+    "routing_class",
+    "acceptance_status",
+    "initial_route",
+    "stages",
+    "lifecycle_commands",
+    "exact_next_action",
+    "safe_to_execute",
+    "executes_work",
+    "approves_work",
+    "mutates_repositories",
+    "generated_at_utc"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ao.mission.objective-workflow-contract.v0.1"
+    },
+    "status": {
+      "type": "string",
+      "const": "ready"
+    },
+    "mission_id": {
+      "type": "string",
+      "pattern": "^mission-[0-9a-f]{16}$"
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "objective_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "routing_class": {
+      "type": "string",
+      "enum": ["pending_blueprint", "complex", "reduced"]
+    },
+    "acceptance_status": {
+      "type": "string",
+      "enum": ["pending_blueprint", "accepted"]
+    },
+    "initial_route": {
+      "type": "string",
+      "enum": ["ao-blueprint", "ao-atlas", "ao-foundry"]
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "reason"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "ao-blueprint",
+              "ao-atlas",
+              "ao-foundry",
+              "ao-forge",
+              "ao-covenant",
+              "ao2",
+              "tests",
+              "ao-control-plane",
+              "ao-command",
+              "ao-mission-reconciliation"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["required", "conditional", "omitted"]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      }
+    },
+    "lifecycle_commands": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 12,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "exact_next_action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "safe_to_execute": {
+      "type": "boolean",
+      "const": false
+    },
+    "executes_work": {
+      "type": "boolean",
+      "const": false
+    },
+    "approves_work": {
+      "type": "boolean",
+      "const": false
+    },
+    "mutates_repositories": {
+      "type": "boolean",
+      "const": false
+    },
+    "generated_at_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

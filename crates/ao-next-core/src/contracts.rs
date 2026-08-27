@@ -677,6 +677,11 @@ pub fn generated_contract_schemas() -> BTreeMap<&'static str, Value> {
             serde_json::to_value(schema_for!(EffectEvent)).expect("schema serialization"),
         ),
         (
+            "execution-journal-prefix-v1.schema.json",
+            serde_json::to_value(schema_for!(crate::mission_exchange::ExecutionJournalPrefix))
+                .expect("schema serialization"),
+        ),
+        (
             "verifier-report-v1.schema.json",
             serde_json::to_value(schema_for!(VerifierReport)).expect("schema serialization"),
         ),

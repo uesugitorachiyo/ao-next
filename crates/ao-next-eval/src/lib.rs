@@ -1,6 +1,7 @@
 pub mod comparison;
 pub mod corpus;
 pub mod metrics;
+pub mod mission_corpus;
 
 /// Returns the schema family implemented by the evaluation crate.
 #[must_use]

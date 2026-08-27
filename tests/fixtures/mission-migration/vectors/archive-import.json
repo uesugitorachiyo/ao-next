@@ -1,0 +1,23 @@
+{
+  "archive": {
+    "schema": "ao.mission.archive.v0.1",
+    "objective": "archive import round trip",
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false
+  },
+  "validation": {
+    "schema": "ao.mission.archive-validation.v0.1",
+    "status": "ready",
+    "safe_to_execute": false,
+    "executes_work": false,
+    "approves_work": false
+  },
+  "import_readback": {
+    "schema": "ao.mission.archive-import-readback.v0.1",
+    "status": "ready"
+  },
+  "restored_record": {
+    "objective": "archive import round trip"
+  }
+}

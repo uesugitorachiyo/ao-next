@@ -1,0 +1,15 @@
+{
+  "schema": "ao.mission.gateway-replay-bundle-readback.v0.1",
+  "status": "ready",
+  "telegram_readbacks": 1,
+  "a2a_readbacks": 0,
+  "scheduler_readbacks": 0,
+  "total_intents": 1,
+  "replay_refs": [],
+  "safe_to_execute": false,
+  "executes_work": true,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "exact_next_action": "invalid fixture: replay bundle must not execute",
+  "generated_at_utc": "2026-07-03T00:00:00Z"
+}

@@ -1,0 +1,17 @@
+{
+  "schema": "ao.mission.event-search-production-smoke.v0.1",
+  "mission": "ao-mission-atlas-wave-import-v01",
+  "status": "passed",
+  "searched_kind": "final_reconciliation",
+  "total_matches_minimum": 1,
+  "covers_cli_commands": [
+    "ao-mission mission events index --out <event-index>",
+    "ao-mission mission events search --kind final_reconciliation --index <event-index> --json"
+  ],
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "claims_authority_advance": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "continue node 21 with final reconciliation mismatch fixture and readiness validation"
+}

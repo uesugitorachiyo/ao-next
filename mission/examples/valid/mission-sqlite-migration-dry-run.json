@@ -1,0 +1,51 @@
+{
+  "schema": "ao.mission.sqlite-migration-dry-run.v0.1",
+  "status": "ready",
+  "mission": "ao-stack-month6-recommendations",
+  "dry_run_only": true,
+  "source_store_kind": "json_ledger",
+  "target_store_kind": "sqlite",
+  "records_scanned": 3,
+  "records_planned": 3,
+  "records_written": 0,
+  "sqlite_file_created": false,
+  "source_mutated": false,
+  "migration_started": false,
+  "plan_digest": "sha256:a2bb567523eea1d277835e664a51a5bf13039707f57981cceb33efa0fd37b65b",
+  "migration_plan": [
+    {
+      "table": "missions",
+      "source": ".ao-mission/missions/*.json",
+      "records_planned": 1,
+      "write_mode": "dry_run"
+    },
+    {
+      "table": "mission_events",
+      "source": ".ao-mission/events/*.json",
+      "records_planned": 1,
+      "write_mode": "dry_run"
+    },
+    {
+      "table": "mission_artifacts",
+      "source": ".ao-mission/handoffs/**/*.json",
+      "records_planned": 1,
+      "write_mode": "dry_run"
+    }
+  ],
+  "rollback_receipt_ready": true,
+  "rollback_receipt": {
+    "required_before_live_migration": true,
+    "expected_action": "discard generated sqlite file and preserve json ledger source",
+    "validated_in_this_fixture": "plan_only_no_file_created"
+  },
+  "provider_calls": false,
+  "credential_use": false,
+  "release_or_publish": false,
+  "direct_main_mutation": false,
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "rsi_remains_denied": true,
+  "exact_next_action": "review SQLite migration plan, add an implementation migration only after separate authorization, and keep JSON ledger as source of truth until replay verification passes"
+}

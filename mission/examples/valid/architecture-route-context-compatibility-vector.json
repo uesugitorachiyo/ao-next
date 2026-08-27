@@ -1,0 +1,60 @@
+{
+  "schema_version": "ao.compatibility.architecture-route-context-vector.v1",
+  "vector_id": "ao-architecture-source-of-truth-to-ao-mission-route-context-v1",
+  "edge": "ao-architecture.source_of_truth -> ao-mission.route_context",
+  "producer": {
+    "repository": "ao-architecture",
+    "source": "stack/current-release-manifest.json",
+    "matrix": "stack/contract-compatibility-matrix.json"
+  },
+  "consumer": {
+    "repository": "ao-mission",
+    "expected_schema": "ao.mission.route-decision.v0.1"
+  },
+  "source_of_truth": {
+    "schema": "ao.architecture.current-release-manifest.v0.1",
+    "status": "current_public_release_pair",
+    "ao2_version": "v0.5.1",
+    "ao2_tag_target": "80ec5321f42d4bab17d5e64fdae6aa099ba59d4a",
+    "control_plane_version": "v0.1.16",
+    "control_plane_tag_target": "f4f5fea9fefa1081cebcbabac550b0e08b9f0e3d",
+    "compatibility_matrix_status": "proposed",
+    "canonical_vector_count": 3,
+    "consumer_test_count": 3,
+    "full_stack_compatibility_complete": false,
+    "external_beta_launched": false,
+    "promotion_requested": false,
+    "promotion_granted": false,
+    "provider_pilot": false,
+    "rsi_remains_denied": true
+  },
+  "route_context": {
+    "mission_id": "ao-stack-month2-compatibility-workgraph-wave-set-2",
+    "objective": "Coordinate Architecture current release source of truth through Mission route context for compatibility evidence.",
+    "expected_route": "ao-atlas",
+    "expected_reason_contains": "sequenced by AO Atlas",
+    "exact_next_action": "send objective to AO Atlas for workgraph sequencing",
+    "safe_to_request": true,
+    "safe_to_execute": false,
+    "safe_to_promote": false
+  },
+  "compatibility": {
+    "matrix_status": "proposed",
+    "tested_edge_count_before_vector": 3,
+    "full_stack_compatibility_complete": false
+  },
+  "boundaries": {
+    "release_or_publish": false,
+    "creates_tag": false,
+    "uploads_assets": false,
+    "deploys": false,
+    "contacts_external_users": false,
+    "provider_pilot": false,
+    "promotion_requested": false,
+    "promotion_granted": false,
+    "rsi_remains_denied": true,
+    "executes_work": false,
+    "approves_work": false,
+    "mutates_repositories": false
+  }
+}

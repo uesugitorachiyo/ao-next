@@ -1,0 +1,6 @@
+{
+  "jsonrpc": "2.0",
+  "id": "invalid-missing-mission-id",
+  "method": "mission.continue",
+  "params": {}
+}

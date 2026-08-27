@@ -56,7 +56,10 @@ preflight-live-input  -> read-only validation
 prepare-live          -> deterministic Git seed and non-authorizing receipt, zero provider calls
 run-live              -> exact receipt plus --authority issued after preparation
 recover-live          -> retained capture plus --authority, provider gate forbidden
+export-journal-prefix -> existing journal to new canonical read-only exchange file
 ```
+
+`export-journal-prefix --journal-root <existing-journal> --request <run-request.json> --out <new-prefix.json>` reads one existing request-bound journal without repair, verifies its complete immutable prefix, and creates one canonical output outside the journal root. It never resolves a provider or executes work.
 
 `preflight-live-input` requires operator-owned corpus and verifier-profile digest anchors outside its input. `prepare-live` creates the exact Git seed and writes a non-authorizing receipt. The envelope embedded in the input records requested scope; preparation checks its identity and exclusions without treating its timestamps as execution freshness. N7 `run-live --prepared-run <receipt> --authority <n7-authority.json>` requires a strict `ao.next.n7-execution-authority.v1` document issued after preparation. The document binds the receipt digest, input and request digests, observed Git base, workspace identity/root/digest, requested authority and write-scope digests, one provider process, and its own issue/expiry interval. `recover-live` requires the same authority document but does not resolve a provider. It returns unknown effect blockers before checking freshness and permits expired authority only when every effect is already complete. Provider intent without retained output remains terminally unknown. `qualify-live-campaign` executes the externally anchored 27-row local fake-provider campaign without live-provider authority. `qualify-recovery --corpus <corpus.json> --evidence-root <empty-directory>` derives a canonical provider-free checkpoint-replay and duplicate-effect receipt for one exact sealed-live corpus and its N7 adapter identities. `evaluate` and `evaluate-live` accept only a fresh empty `--recovery-evidence-root`; they run the probes themselves and emit the derived receipt digest instead of trusting caller-authored recovery claims. `evaluate` validates a complete repeated-trial comparison but cannot emit a live-passed decision. `evaluate-live` calls the live-authorized evaluator and requires the same exact operator gate as the live runners.
 
@@ -64,6 +67,12 @@ The provider-gated live commands accept one [strict sealed-trial input](docs/liv
 
 The hosted Linux, macOS, and Windows matrix runs provider-free retained-capture recovery checks. The additional physical Windows NTFS procedure is in [tests/cross-platform/README.md](tests/cross-platform/README.md).
 
-AO Mission's current canonical terminal-index consumer requires lease, root, and lineage evidence that a single AO Next readback does not contain. [The bounded compatibility proposal](docs/mission-compatibility.md) defines a separate read-only, digest-idempotent importer; this candidate does not change Mission or fabricate the missing artifacts.
+The [Mission source migration contract](docs/mission-source-migration.md)
+defines the imported Go Mission source, separate process and state boundaries,
+read-only journal-prefix exchange, and provider-free equivalence procedure.
+Stage 1 remains incomplete until the exact candidate head passes reviewed
+native CI and physical macOS, Ubuntu, and Windows qualification. Source
+co-location alone grants no packaging, release, deployment, publication,
+provider, adoption, or AO2-retirement authority.
 
 Offline harness qualification may establish `AO_NEXT_LIVE_HARNESS_READY`. This means the harness is ready for a separately authorized pilot. It is not a live result, a superiority finding, or permission to replace current AO.

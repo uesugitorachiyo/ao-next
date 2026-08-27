@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.gateway-replay-bundle-readback.v0.1",
+  "type": "object",
+  "required": ["schema", "status", "telegram_readbacks", "a2a_readbacks", "scheduler_readbacks", "total_intents", "replay_refs", "safe_to_execute", "executes_work", "approves_work", "mutates_repositories", "exact_next_action", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.gateway-replay-bundle-readback.v0.1" },
+    "status": { "type": "string" },
+    "telegram_readbacks": { "type": "integer" },
+    "a2a_readbacks": { "type": "integer" },
+    "scheduler_readbacks": { "type": "integer" },
+    "total_intents": { "type": "integer" },
+    "denied": { "type": "integer" },
+    "invalid": { "type": "integer" },
+    "replay_refs": { "type": "array" },
+    "safe_to_execute": { "type": "boolean", "const": false },
+    "executes_work": { "type": "boolean", "const": false },
+    "approves_work": { "type": "boolean", "const": false },
+    "mutates_repositories": { "type": "boolean", "const": false },
+    "exact_next_action": { "type": "string" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.a2a-jsonrpc-response.v0.1",
+  "type": "object",
+  "required": [
+    "jsonrpc",
+    "result"
+  ],
+  "properties": {
+    "jsonrpc": { "type": "string", "const": "2.0" },
+    "result": { "type": "object" }
+  }
+}

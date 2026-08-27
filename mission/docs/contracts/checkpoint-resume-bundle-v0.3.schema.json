@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.checkpoint-resume-bundle.v0.3",
+  "type": "object",
+  "required": ["schema", "mission_id", "status", "checkpoint_count", "resume_prompt", "safe_to_execute", "executes_work", "approves_work", "mutates_repositories", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.checkpoint-resume-bundle.v0.3" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "status": { "type": "string" },
+    "checkpoint_count": { "type": "integer" },
+    "latest_checkpoint": { "type": "object" },
+    "return_gate": { "type": "object" },
+    "resume_prompt": { "type": "string" },
+    "safe_to_execute": { "type": "boolean" },
+    "executes_work": { "type": "boolean" },
+    "approves_work": { "type": "boolean" },
+    "mutates_repositories": { "type": "boolean" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

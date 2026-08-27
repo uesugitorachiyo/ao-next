@@ -1,0 +1,5 @@
+{
+  "kind": "symlink",
+  "path": "escape",
+  "target": "outside.txt"
+}

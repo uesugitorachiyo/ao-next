@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.telegram-config.v0.1",
+  "type": "object",
+  "required": ["schema", "token_env", "allowed_chats"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.telegram-config.v0.1" },
+    "token_env": { "type": "string" },
+    "allowed_chats": { "type": "object" }
+  }
+}

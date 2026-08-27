@@ -1,0 +1,8 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-08-runbook-next-prompt",
+  "status": "no_promotion",
+  "promotion_claimed": false,
+  "rsi_remains_denied": true,
+  "reason": "The node documents continuation gates; it does not claim promotion."
+}

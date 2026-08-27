@@ -1,0 +1,91 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.4'
+      - shell: bash
+        run: '[ "$(go env GOVERSION)" = "go1.26.4" ]'
+      - name: Run test suite with bounded diagnostics
+        shell: pwsh
+        run: |
+          $helper = Join-Path $env:RUNNER_TEMP 'ao-mission-ci-go-test'
+          if ($IsWindows) { $helper += '.exe' }
+          $buildExit = $null
+          $global:LASTEXITCODE = $null
+          try {
+          go build -o $helper ./scripts/ci-go-test
+          $buildSucceeded = $?
+          $buildExit = $LASTEXITCODE
+          } catch {
+          Write-Error 'CI test helper build failed to start'
+          exit 1
+          }
+          if ($null -eq $buildExit) { exit 1 }
+          if ($buildSucceeded -ne ($buildExit -eq 0)) { exit 1 }
+          if ($buildExit -ne 0) { exit $buildExit }
+          $childExit = $null
+          $global:LASTEXITCODE = $null
+          try {
+          & $helper
+          $commandSucceeded = $?
+          $childExit = $LASTEXITCODE
+          } catch {
+          Write-Error 'CI test helper failed to launch'
+          exit 1
+          }
+          if ($null -eq $childExit) { exit 1 }
+          if ($commandSucceeded -ne ($childExit -eq 0)) { exit 1 }
+          exit $childExit
+      - run: go vet ./...
+      - run: go build ./cmd/ao-mission
+
+  windows-default-environment:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: '0'
+    steps:
+      - name: Configure default Windows Git conversion
+        shell: pwsh
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v4
+        with:
+          path: 'AO Mission Default Environment'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.4'
+      - name: Verify default Windows environment
+        shell: pwsh
+        working-directory: '${{ github.workspace }}/AO Mission Default Environment'
+        run: |
+          if ((git config --global --get core.autocrlf) -ne 'true') { exit 1 }
+          if ($env:PYTHONUTF8 -ne '0') { exit 1 }
+          $goFiles = Get-ChildItem -Path cmd, internal -Recurse -Filter '*.go' -File
+          $formatDiff = gofmt -d -- $goFiles.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($formatDiff) { $formatDiff; exit 1 }
+          python scripts/test_public_safety_scan.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test ./internal/mission -count=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test ./... -count=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build ./cmd/ao-mission
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+          exit $LASTEXITCODE

@@ -1,0 +1,93 @@
+{
+  "schema": "ao.mission.soak-canary-invalid-matrix.v1",
+  "cases": [
+    {
+      "id": "altered-plan-digest",
+      "expected_conflict_code": "plan_input_digest_mismatch"
+    },
+    {
+      "id": "altered-policy-digest",
+      "expected_conflict_code": "policy_digest_mismatch"
+    },
+    {
+      "id": "wrong-source-head",
+      "expected_conflict_code": "source_head_mismatch"
+    },
+    {
+      "id": "modified-build-provenance",
+      "expected_conflict_code": "source_provenance_mismatch"
+    },
+    {
+      "id": "changed-repository-snapshot",
+      "expected_conflict_code": "repository_snapshot_digest_mismatch"
+    },
+    {
+      "id": "altered-command-catalog",
+      "expected_conflict_code": "command_catalog_digest_mismatch"
+    },
+    {
+      "id": "altered-partition-binding",
+      "expected_conflict_code": "activation_partition_mismatch"
+    },
+    {
+      "id": "altered-activation-digest",
+      "expected_conflict_code": "activation_manifest_digest_mismatch"
+    },
+    {
+      "id": "unplanned-test",
+      "expected_conflict_code": "activation_catalog_bijection_mismatch"
+    },
+    {
+      "id": "regular-before-scale",
+      "expected_conflict_code": "scale_partition_not_first"
+    },
+    {
+      "id": "scale-repeat-amplification",
+      "expected_conflict_code": "scale_repeat_above_one"
+    },
+    {
+      "id": "changed-scale-dimension",
+      "expected_conflict_code": "command_scale_dimension_mismatch"
+    },
+    {
+      "id": "second-retry",
+      "expected_conflict_code": "second_retry_requested"
+    },
+    {
+      "id": "failed-attempt-restart",
+      "expected_conflict_code": "failed_attempt_terminal"
+    },
+    {
+      "id": "changed-retry-binding",
+      "expected_conflict_code": "controlled_retry_binding_invalid"
+    },
+    {
+      "id": "free-form-shell-command",
+      "expected_conflict_code": "free_form_shell_command"
+    },
+    {
+      "id": "changed-executable-provenance",
+      "expected_conflict_code": "executable_provenance_mismatch"
+    },
+    {
+      "id": "symlinked-runtime-root",
+      "expected_conflict_code": "unsafe_runtime_path"
+    },
+    {
+      "id": "malformed-json",
+      "expected_error": "invalid JSON"
+    },
+    {
+      "id": "oversized-input",
+      "expected_error": "exceeds"
+    },
+    {
+      "id": "fifo-or-device-input",
+      "expected_error": "regular"
+    },
+    {
+      "id": "resigned-false-go-event-counts",
+      "expected_error": "Go test event counts mismatch"
+    }
+  ]
+}

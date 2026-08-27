@@ -10,7 +10,9 @@ AO Next is not established as superior, production-ready, released, published, d
 
 - `README.md` defines the operator surface and qualification boundary.
 - `docs/architecture.md` defines the thin-envelope architecture and non-goals.
-- `docs/superpowers/specs/2026-08-23-ao-next-dual-process-cross-platform-successor-design.md` defines the proposed repair-first Engine/Mission monorepo target. It does not authorize implementation, provider use, release, adoption, or AO2 retirement.
+- `docs/superpowers/specs/2026-08-23-ao-next-dual-process-cross-platform-successor-design.md` defines the approved repair-first Engine/Mission target. It grants no provider, release, adoption, or AO2-retirement authority.
+- `docs/mission-source-migration.md` owns the public Stage 1 history-import, process-separation, journal-prefix, projection, equivalence, rollback, and source-ownership contract.
+- `tests/fixtures/mission-migration/corpus-v1.json` freezes the exact canonical Go Mission source inventory and behavior operations that old/new equivalence must preserve.
 - `docs/contracts/*.schema.json` and Rust types in `ao-next-core` jointly own checked-in wire contracts; drift must fail verification.
 - `docs/evaluation/` owns paired comparison protocol and decision policy.
 - Core module tests own state, policy, effect, evidence, recovery, and terminal behavior.
@@ -28,9 +30,12 @@ AO Next is not established as superior, production-ready, released, published, d
 - Treat the authority envelope embedded in an N7 preparation input as requested scope only. `prepare-live` validates its identity and exclusions without granting execution freshness.
 - Require an unexpired prepared receipt and a strict `ao.next.n7-execution-authority.v1` document issued after preparation before N7 provider spawn. Bind the document to the receipt digest, preparation input/request, observed Git base, workspace, requested scope, one provider process, and issue/expiry interval. Record provider intent before process creation.
 - `recover-live` uses retained capture and the separately issued N7 authority only. It must not resolve a provider and must reject the provider gate and provider-program overrides; provider intent without retained output and effect intent without completion are terminally unknown. Completed effects remain eligible for verification after authority expiry.
+- `export-journal-prefix` opens one existing request-bound journal without creation or repair, verifies the complete immutable prefix, and creates one canonical output outside the journal root. It must not inspect provider settings, resolve a provider, execute an effect, run a verifier, or grant authority.
 - Keep N0 bound to AO2's existing sandbox and digest-approved patch path. Never relabel an N4 or N7 row as current AO.
 - Retain raw provider captures only under the input's empty operator-owned private capture directory outside every worker authority root.
 - Keep sealed hidden tests outside worker workspaces and authority roots. Never copy hidden bytes or paths into prompts, effect observations, logs, or public evidence.
+- Repository co-location grants no authority. Keep Rust Engine and Go Mission as separate binaries, processes, state roots, and failure domains; neither process may discover or open the other's private state.
+- Mission may import only an explicitly supplied, immutable, digest-bound `ao.next.execution-journal-prefix.v1` file at a clean absolute local locator outside its state root. Reject relative, non-normal, symlink, reparse, and non-regular components. Preserve the exact accepted locator as provenance. Import and projection are read-only: they never scan Engine state, call a provider, execute an effect, or change durable Mission source status.
 
 ## Working Method
 
@@ -45,6 +50,10 @@ AO Next is not established as superior, production-ready, released, published, d
 - The functional N7 sentinel may replace only `greenfield-engineering-app` with `greenfield-native-write-sentinel` in an otherwise exact sealed live corpus. Keep that alternate validator out of evaluation and campaign qualification paths.
 - Before live workspace preparation or provider spawn, derive `2 * context_limit + 2 * output_limit` with checked arithmetic and reject a lower `max_tokens`. After the provider returns, retain exact bounded stdout and stderr, synchronize an owner-only canonical incomplete index, journal `provider_output_retained`, publish and verify the staged final index, then normalize one trusted terminal usage envelope. Reject contradictory or overflowed counters and enforce `max_tokens` before AO2 preview/apply, admitted N7 effects, verification, or public evidence assembly. N4 may mutate its workspace inside the native provider process; the gate still precedes its verifier and evidence assembly. Preserve private failure-stage metadata without treating retained output as a successful measurement.
 - Reject duplicate keys, unknown contract fields, oversized input, stale authority, unsafe paths, symlinks, non-regular files, identity drift, digest mismatch, and terminal contradictions.
+- Preserve canonical Go Mission ancestry during migration. Import the exact source as a two-parent merge under `mission/` without squash, cherry-pick replay, or path-history rewriting; verify the second parent and imported tree object before changing imported bytes.
+- Keep `ao-next-mission` behavior equivalent to the temporary `ao-mission` compatibility command through the frozen corpus. Resolve generic contract discriminators consistently across `schema`, `schema_version`, and `contract_version`, and reject conflicting values.
+- Decode journal prefixes with the duplicate-aware exact decoder, then apply exact field whitelists, nullable type unions, lowercase names, typed unknown-field denial, and an EOF check. Preserve casing-error precedence and test duplicate, casing, trailing, type, and unknown failures separately.
+- Detect an existing-run prefix conflict before retaining candidate bytes. A rejected changed digest must leave the Mission record and artifact directory byte-identical with no orphan content-addressed object.
 - Keep native effects and deterministic Git workspace preparation functional on Linux, macOS, and Windows. Reject Windows reparse points at workspace and provider-visible roots and every nested entry. Preserve descriptor-relative Unix traversal and handle-anchored Windows identity checks; never replace either with unchecked canonical-path access.
 - Publication changes require physical Windows qualification on a new empty NTFS root whose path contains spaces, with result JSON outside the checkout.
 - Store retained evidence beneath digest-addressed paths and preserve the original locator separately.
@@ -64,8 +73,61 @@ cargo build --workspace --release
 git diff --check
 ```
 
+Windows PowerShell 5.1 equivalents for the root Rust verification sequence
+are:
+
+```powershell
+cargo fmt --check
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo test --workspace
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo clippy --workspace --all-targets -- -D warnings
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo build --workspace --release
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git diff --check
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
+When `mission/` exists, also run:
+
+```sh
+(cd mission && gofmt -d cmd internal)
+(cd mission && go test ./... -count=1)
+(cd mission && go vet ./...)
+(cd mission && go build ./cmd/ao-mission)
+(cd mission && go build ./cmd/ao-next-mission)
+(cd mission && python3 scripts/test_public_safety_scan.py)
+```
+
+On Windows PowerShell 5.1, use the same Mission checks without changing the
+caller location:
+
+```powershell
+Push-Location mission
+try {
+    gofmt -d cmd internal
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go test ./... -count=1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go vet ./...
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go build ./cmd/ao-mission
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    go build ./cmd/ao-next-mission
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    py -3 scripts/test_public_safety_scan.py
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+finally {
+    Pop-Location
+}
+```
+
 Run schema drift, deterministic replay, recovery, Mission compatibility, and independent evidence-manifest checks when their surfaces change. Record skipped, unavailable, networked, credentialed, or failed checks explicitly.
 
 ## Completion
 
 Local harness completion requires every local contract, negative fixture, verifier, evidence, recovery, CLI, adapter, corpus, repeated-trial, manifest, and reconciliation gate to pass at one exact source head. The terminal state `AO_NEXT_LIVE_HARNESS_READY` means only that a separately authorized live pilot can begin. It does not imply superiority, promotion, production readiness, or a live evaluation result.
+
+Mission source migration reaches `MISSION_SOURCE_MIGRATION_READY_FOR_PACKAGING` only after canonical ancestry, frozen old/new behavior, journal-prefix import and projection, and required three-platform provider-free gates pass at one exact head. That result authorizes only the next packaging-entry check; it grants no release, deployment, provider, adoption, publication, or AO2-retirement authority.

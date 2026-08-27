@@ -1,0 +1,7 @@
+{
+  "status": "ready",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false
+}

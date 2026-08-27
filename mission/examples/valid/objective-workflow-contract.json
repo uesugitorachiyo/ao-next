@@ -1,0 +1,76 @@
+{
+  "schema": "ao.mission.objective-workflow-contract.v0.1",
+  "status": "ready",
+  "mission_id": "mission-0123456789abcdef",
+  "correlation_id": "corr-month3-reference-001",
+  "objective_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "routing_class": "complex",
+  "acceptance_status": "accepted",
+  "initial_route": "ao-atlas",
+  "stages": [
+    {
+      "name": "ao-blueprint",
+      "status": "omitted",
+      "reason": "the accepted routing class does not require this stage"
+    },
+    {
+      "name": "ao-atlas",
+      "status": "required",
+      "reason": "the routing class requires this stage"
+    },
+    {
+      "name": "ao-foundry",
+      "status": "conditional",
+      "reason": "the stage is required only when the objective or resulting evidence activates it"
+    },
+    {
+      "name": "ao-forge",
+      "status": "conditional",
+      "reason": "the stage is required only when the objective or resulting evidence activates it"
+    },
+    {
+      "name": "ao-covenant",
+      "status": "conditional",
+      "reason": "the stage is required only when the objective or resulting evidence activates it"
+    },
+    {
+      "name": "ao2",
+      "status": "conditional",
+      "reason": "the stage is required only when the objective or resulting evidence activates it"
+    },
+    {
+      "name": "tests",
+      "status": "required",
+      "reason": "the routing class requires this stage"
+    },
+    {
+      "name": "ao-control-plane",
+      "status": "conditional",
+      "reason": "the stage is required only when the objective or resulting evidence activates it"
+    },
+    {
+      "name": "ao-command",
+      "status": "required",
+      "reason": "the routing class requires this stage"
+    },
+    {
+      "name": "ao-mission-reconciliation",
+      "status": "required",
+      "reason": "the routing class requires this stage"
+    }
+  ],
+  "lifecycle_commands": [
+    "ao-mission status --mission mission-0123456789abcdef --json",
+    "ao-mission continue --mission mission-0123456789abcdef",
+    "ao-mission pause --mission mission-0123456789abcdef",
+    "ao-mission resume --mission mission-0123456789abcdef",
+    "ao-mission mission verification-bundle --mission mission-0123456789abcdef --json",
+    "ao-mission final reconcile --mission mission-0123456789abcdef"
+  ],
+  "exact_next_action": "send accepted objective to AO Atlas for workgraph sequencing",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "mutates_repositories": false,
+  "generated_at_utc": "2026-07-20T00:00:00Z"
+}

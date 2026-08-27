@@ -1,0 +1,47 @@
+{
+  "schema": "ao.mission.soak-plan-input.v1",
+  "plan_id": "plan-invalid-scale-amplification",
+  "mission_id": "mission-bounded-mixed-fixture",
+  "source_head": "80b13d15da82ac75fc12c4e4ece5ee71a4de19ee",
+  "execution_profile": {
+    "id": "darwin-arm64-go1.26.4-race",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "mode": "race",
+    "race": true
+  },
+  "classification_bound_before_partitioning": true,
+  "test_catalog": [
+    {"id": "regular-alpha", "classification": "regular", "requested_repeat_count": 3},
+    {"id": "scale-index-10000", "classification": "scale", "requested_repeat_count": 2, "scale_dimension": {"unit": "records", "value": 10000}}
+  ],
+  "duration_history": [
+    {"test_id": "regular-alpha", "source_head": "80b13d15da82ac75fc12c4e4ece5ee71a4de19ee", "execution_profile_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "unit": "milliseconds", "samples": [100, 120, 110]},
+    {"test_id": "scale-index-10000", "source_head": "80b13d15da82ac75fc12c4e4ece5ee71a4de19ee", "execution_profile_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "unit": "milliseconds", "samples": [1100, 1200, 1150]}
+  ],
+  "partitions": [{"partition_id": "partition-01", "node_id": "node-01", "test_ids": ["regular-alpha", "scale-index-10000"]}],
+  "partition_budgets": [{"partition_id": "partition-01", "node_budget_ms": 10000}],
+  "budgets": {"maximum_tests": 16, "maximum_partitions": 16, "setup_overhead_ms": 100, "safety_overhead_ms": 200},
+  "repeat_policy": {"maximum_regular_repeat_count": 3, "scale_repeat_count": 1, "apply_partition_repeat_to_all": false},
+  "retry_policy": {
+    "maximum_attempts": 2,
+    "retryable_outcome_classes": ["timeout", "transient_infrastructure"],
+    "non_retryable_outcome_classes": ["test_failure", "contract_violation"],
+    "checkpoint_behavior": "preserve_failed_attempt_evidence",
+    "preserves_node_identity": true,
+    "preserves_test_set": true,
+    "preserves_scale_dimension": true,
+    "preserves_repeat_count": true,
+    "preserves_source_head": true,
+    "preserves_execution_profile": true,
+    "preserves_phase_start": true,
+    "preserves_authority_boundaries": true,
+    "preserves_side_effect_boundaries": true,
+    "phase_clock_reset_prohibited": true,
+    "evidence_required_after_failure": "exit_code_stdout_stderr_duration_and_fixture_digest"
+  },
+  "timeout_policy": {"per_attempt_timeout_ms": 2000, "total_node_timeout_ms": 4000},
+  "lease": {"minimum_ms": 1000, "target_ms": 7000, "maximum_ms": 8000},
+  "activation": {"state": "pre_activation", "policy_bound_before_activation": true, "bound_policy_digest": "sha256:0013f205813eea89870773080ffde100026a4592ea14c033ff596837e6ae28b0"},
+  "policy_digest": "sha256:0013f205813eea89870773080ffde100026a4592ea14c033ff596837e6ae28b0",
+  "safety_boundaries": {"safe_to_execute": false, "executes_work": false, "approves_work": false, "mutates_repositories": false, "calls_providers": false, "publishes": false, "releases": false, "deploys": false, "advances_authority": false, "rsi_remains_denied": true}
+}

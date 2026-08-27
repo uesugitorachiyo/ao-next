@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.artifact-ref.v0.1",
+  "type": "object",
+  "required": [
+    "schema",
+    "ref",
+    "digest"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.artifact-ref.v0.1" },
+    "ref": { "type": "string" },
+    "digest": { "type": "string" },
+    "kind": { "type": "string" }
+  }
+}

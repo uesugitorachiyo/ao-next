@@ -1,0 +1,7 @@
+{
+  "schema": "ao.promoter.no-promotion-readback.v0.1",
+  "node_id": "node-18-command-compact-timeline-fixture",
+  "status": "no_promotion_requested",
+  "promotion_claimed": false,
+  "reason": "The node adds Command readback evidence and does not request promotion."
+}

@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "req-1",
+  "result": {
+    "schema": "ao.mission.a2a-task.v0.1",
+    "task_id": "task-mission-status",
+    "method": "mission.status",
+    "status": "intent_recorded",
+    "mutation_authority": false
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ao.mission.route-reconciliation.v0.3",
+  "type": "object",
+  "required": ["schema", "mission_id", "status", "current_route", "latest_route", "atlas_ready_nodes", "command_readback_bound", "promoter_readback_bound", "exact_next_action", "generated_at_utc"],
+  "properties": {
+    "schema": { "type": "string", "const": "ao.mission.route-reconciliation.v0.3" },
+    "mission_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "status": { "type": "string" },
+    "current_route": { "type": "string" },
+    "latest_route": { "type": "string" },
+    "foundry_terminal_status": { "type": "string" },
+    "atlas_ready_nodes": { "type": "integer" },
+    "command_readback_bound": { "type": "boolean" },
+    "promoter_readback_bound": { "type": "boolean" },
+    "exact_next_action": { "type": "string" },
+    "generated_at_utc": { "type": "string" }
+  }
+}

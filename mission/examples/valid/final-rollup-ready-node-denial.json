@@ -1,0 +1,185 @@
+{
+  "schema": "ao.mission.final-rollup.v0.1",
+  "mission_id": "mission-ready-node-denial",
+  "status": "active",
+  "completed_steps": 10,
+  "artifact_refs": [],
+  "highest_proven_live_class": "public_safe_unrestricted_self_modification_authority_request_dry_run_four_attempts",
+  "next_denied_class": "unrestricted_self_modification",
+  "safe_to_execute": false,
+  "executes_work": false,
+  "approves_work": false,
+  "provider_calls": false,
+  "final_response_allowed": false,
+  "return_gate_status": "early_return_denied",
+  "ready_nodes_remaining": 2,
+  "completed_nodes": 10,
+  "total_nodes": 12,
+  "atlas_continuation_prompt": "AO Atlas: load Mission record, event index, final rollup, and current readiness; select exactly one ready bounded node; return Foundry import material and no-authority readback.",
+  "feature_depth_recommendations": [
+    {
+      "id": "ready-node-denial-gate",
+      "owner": "ao-mission",
+      "task": "Verify final response remains denied while ready nodes remain in the Atlas workgraph.",
+      "gate": "Final response is blocked when ready_nodes_remaining is greater than zero.",
+      "evidence_required": [
+        "final rollup",
+        "Atlas workgraph counts",
+        "return gate"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "ao-mission final rollup --mission mission-ready-node-denial",
+      "exact_next_action": "continue because ready nodes remain",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "atlas-ready-node-selection",
+      "owner": "ao-atlas",
+      "task": "Select exactly one ready Atlas node for the next bounded implementation handoff.",
+      "gate": "Only one executable mutation node can be active.",
+      "evidence_required": [
+        "Atlas workgraph",
+        "node gate",
+        "Foundry import"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "atlas workgraph next --mission mission-ready-node-denial",
+      "exact_next_action": "select one ready node",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "foundry-single-node-import",
+      "owner": "ao-foundry",
+      "task": "Consume the selected ready node and return a run-link or terminal blocker.",
+      "gate": "Foundry returns exactly one run-link or blocker for the selected node.",
+      "evidence_required": [
+        "Foundry import",
+        "run-link",
+        "rollback record"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "foundry run --mission mission-ready-node-denial --one-node",
+      "exact_next_action": "execute one bounded Foundry node",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "checkpoint-resume",
+      "owner": "ao-mission",
+      "task": "Inspect the latest checkpoint/resume bundle before any final response.",
+      "gate": "Checkpoint bundle records route, phase, return gate, and resume prompt.",
+      "evidence_required": [
+        "checkpoint bundle",
+        "resume command",
+        "return gate"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "ao-mission checkpoint inspect --mission mission-ready-node-denial",
+      "exact_next_action": "inspect checkpoint bundle",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "event-index-binding",
+      "owner": "ao-mission",
+      "task": "Index route, node, CI, PR, rollup, and blocker evidence for the active mission.",
+      "gate": "Event index contains searchable evidence for the active route and ready-node blocker.",
+      "evidence_required": [
+        "event index",
+        "search readback",
+        "blocker event"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "ao-mission mission events index --out tmp/mission-ready-node-denial-event-index.json",
+      "exact_next_action": "refresh event index evidence",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "command-compact-readback",
+      "owner": "ao-command",
+      "task": "Render compact Mission status showing ready-node denial and exact next action.",
+      "gate": "Command compact readback reports final_response_allowed=false and ready_nodes_remaining=2.",
+      "evidence_required": [
+        "Command readback",
+        "Mission status",
+        "exact next action"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "ao command mission status --mission mission-ready-node-denial --compact",
+      "exact_next_action": "bind compact command readback",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "promoter-no-promotion",
+      "owner": "ao-promoter",
+      "task": "Record no-promotion summary while ready nodes remain.",
+      "gate": "Promoter does not evaluate promotion while final response is denied.",
+      "evidence_required": [
+        "Promoter summary",
+        "denied surface list",
+        "RSI denial"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "ao-promoter summarize --mission mission-ready-node-denial",
+      "exact_next_action": "record no-promotion summary",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "sentinel-wording-scan",
+      "owner": "ao-sentinel",
+      "task": "Scan changed public readbacks for unsafe wording before node closure.",
+      "gate": "Sentinel scan finds no broad capability or RSI wording.",
+      "evidence_required": [
+        "public readbacks",
+        "wording scan",
+        "safety flags"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "ao-sentinel scan examples/valid/final-rollup-ready-node-denial.json",
+      "exact_next_action": "record public-safety scan",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "branch-cleanup-evidence",
+      "owner": "ao-mission",
+      "task": "Record branch cleanup evidence after the node PR merges.",
+      "gate": "No local or remote codex branch remains for the node after merge.",
+      "evidence_required": [
+        "local branch list",
+        "remote branch list",
+        "merge head"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "git fetch --prune",
+      "exact_next_action": "verify branch cleanup",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    },
+    {
+      "id": "production-readiness",
+      "owner": "ao-mission",
+      "task": "Run tests, vet, build, readiness, and public-safety scans over the fixture.",
+      "gate": "Verification output is recorded before node closure.",
+      "evidence_required": [
+        "go test output",
+        "go vet output",
+        "production readiness output"
+      ],
+      "estimated_minutes": 6,
+      "continuation_command": "scripts/production-readiness.sh",
+      "exact_next_action": "record verification output",
+      "stop_condition": "mission_done_or_true_hard_blocker_or_no_ready_work_and_no_exact_next_action"
+    }
+  ],
+  "exact_next_action": "continue because ready nodes remain: send the first ready Atlas node to AO Foundry",
+  "remaining_denied_surfaces": [
+    "unrestricted_self_modification",
+    "hidden_instruction_mutation",
+    "policy_changing_autonomy",
+    "provider_calls",
+    "credential_use",
+    "release_deploy_publish_upload_tag",
+    "dependency_updates",
+    "direct_main_mutation",
+    "concurrent_mutation",
+    "broad_RSI"
+  ],
+  "generated_at_utc": "2026-07-05T00:00:00Z"
+}

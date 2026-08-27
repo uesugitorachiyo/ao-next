@@ -1,0 +1,7 @@
+{
+  "schema": "ao.mission.telegram-command.v0.1",
+  "chat_id": "123456",
+  "command": "/continue",
+  "role": "admin",
+  "token": "REDACTED_DO_NOT_USE_REAL_TOKEN"
+}

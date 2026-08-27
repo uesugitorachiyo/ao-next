@@ -439,6 +439,20 @@ fn generated_schema_matches_the_shared_nullable_and_event_boundaries() {
         schema["properties"]["terminal_record"]["type"],
         json!(["object", "null"])
     );
+    let event_kinds = schema["definitions"]["JournalEventKind"]["oneOf"]
+        .as_array()
+        .expect("journal event variants");
+    for discriminator in ["effect_intent", "effect_committed"] {
+        let variant = event_kinds
+            .iter()
+            .find(|variant| variant["properties"]["kind"]["enum"][0] == json!(discriminator))
+            .expect("effect event variant");
+        assert_eq!(variant["properties"]["effect_id"]["pattern"], json!(r"\S"));
+    }
+    assert_eq!(
+        schema["definitions"]["EffectObservation"]["properties"]["effect_id"]["pattern"],
+        json!(r"\S")
+    );
 }
 
 #[test]
@@ -514,6 +528,8 @@ fn checked_in_negative_vectors_fail_closed() {
         Err(StrictJsonError::Deserialize(message)) if message.contains("unknown field")
     ));
     for (name, expected) in [
+        ("invalid-empty-legacy-effect-id.json", "lifecycle"),
+        ("invalid-whitespace-effect-lifecycle.json", "lifecycle"),
         ("invalid-sequence-gap.json", "sequence"),
         ("invalid-digest-drift.json", "event-digest"),
         ("invalid-identity-drift.json", "identity"),
@@ -534,11 +550,72 @@ fn checked_in_negative_vectors_fail_closed() {
                 "event-digest" => matches!(error, MissionExchangeError::EventsDigestMismatch),
                 "identity" => matches!(error, MissionExchangeError::JournalIdentityMismatch),
                 "terminal" => matches!(error, MissionExchangeError::TerminalContradiction),
+                "lifecycle" => matches!(
+                    error,
+                    MissionExchangeError::Recovery(
+                        ao_next_core::recovery::RecoveryError::EventSequenceInvalid
+                    )
+                ),
                 _ => unreachable!(),
             },
             "{name} reached {error}"
         );
     }
+}
+
+#[test]
+fn shared_blank_effect_id_vectors_fail_lifecycle() {
+    let request: RunRequest =
+        decode_strict_json(&fixture("run-request.json"), 1024 * 1024).expect("strict request");
+    let accepted: Vec<_> = [
+        "invalid-empty-legacy-effect-id.json",
+        "invalid-whitespace-effect-lifecycle.json",
+    ]
+    .into_iter()
+    .filter(|name| {
+        let prefix: ExecutionJournalPrefix =
+            decode_strict_json(&fixture(name), MAXIMUM_PREFIX_BYTES).expect("strict fixture");
+        verify_execution_journal_prefix(&prefix, &request).is_ok()
+    })
+    .collect();
+
+    assert!(
+        accepted.is_empty(),
+        "Rust accepted lifecycle-invalid fixtures: {accepted:?}"
+    );
+}
+
+#[test]
+fn effect_ids_with_surrounding_whitespace_remain_valid() {
+    let effect_id = " effect-01 ";
+    let mut prefix = built_prefix(PrefixState::Prepared);
+    prefix.events = vec![
+        JournalEvent {
+            schema_version: "ao.next.journal-event.v1".into(),
+            sequence: 0,
+            kind: JournalEventKind::EffectIntent {
+                effect_id: effect_id.into(),
+                effect_digest: digest(ONE_DIGEST),
+            },
+        },
+        JournalEvent {
+            schema_version: "ao.next.journal-event.v1".into(),
+            sequence: 1,
+            kind: JournalEventKind::EffectCompleted {
+                observation: EffectObservation {
+                    effect_id: effect_id.into(),
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    output_digest: digest(ZERO_DIGEST),
+                },
+            },
+        },
+    ];
+    prefix.last_sequence = Some(1);
+    refresh_event_and_prefix_digests(&mut prefix);
+
+    verify_execution_journal_prefix(&prefix, &request()).expect("surrounded effect identity");
 }
 
 #[test]

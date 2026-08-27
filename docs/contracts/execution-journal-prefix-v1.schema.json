@@ -38,6 +38,7 @@
       "additionalProperties": false,
       "properties": {
         "effect_id": {
+          "pattern": "\\S",
           "type": "string"
         },
         "output_digest": {
@@ -222,6 +223,7 @@
               "type": "string"
             },
             "effect_id": {
+              "pattern": "\\S",
               "type": "string"
             },
             "kind": {
@@ -242,6 +244,7 @@
           "additionalProperties": false,
           "properties": {
             "effect_id": {
+              "pattern": "\\S",
               "type": "string"
             },
             "kind": {

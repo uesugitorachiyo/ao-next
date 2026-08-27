@@ -17,6 +17,8 @@ use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::Schema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -80,13 +82,16 @@ pub enum JournalEventKind {
         turn_digest: Digest,
     },
     EffectIntent {
+        #[schemars(regex(pattern = r"\S"))]
         effect_id: String,
         effect_digest: Digest,
     },
     EffectCommitted {
+        #[schemars(regex(pattern = r"\S"))]
         effect_id: String,
     },
     EffectCompleted {
+        #[schemars(schema_with = "journal_effect_observation_schema")]
         observation: EffectObservation,
     },
     VerificationStarted {
@@ -98,6 +103,22 @@ pub enum JournalEventKind {
     TerminalPublished {
         record_digest: Digest,
     },
+}
+
+fn journal_effect_observation_schema(generator: &mut SchemaGenerator) -> Schema {
+    let schema = generator.subschema_for::<EffectObservation>();
+    let Some(Schema::Object(observation)) = generator
+        .definitions_mut()
+        .get_mut(&EffectObservation::schema_name())
+    else {
+        return schema;
+    };
+    let Some(Schema::Object(effect_id)) = observation.object().properties.get_mut("effect_id")
+    else {
+        return schema;
+    };
+    effect_id.string().pattern = Some(r"\S".into());
+    schema
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -290,7 +311,8 @@ fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycl
                 effect_id,
                 effect_digest,
             } => {
-                if verification_seen
+                if effect_id.trim().is_empty()
+                    || verification_seen
                     || (provider_step != 0 && provider_step != 6)
                     || legacy_committed_effects.contains(effect_id)
                     || effects
@@ -302,7 +324,8 @@ fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycl
                 effect_seen = true;
             }
             JournalEventKind::EffectCommitted { effect_id } => {
-                if verification_seen
+                if effect_id.trim().is_empty()
+                    || verification_seen
                     || (provider_step != 0 && provider_step != 6)
                     || effects.contains_key(effect_id)
                     || !legacy_committed_effects.insert(effect_id.clone())
@@ -312,6 +335,9 @@ fn validate_journal_lifecycle(events: &[JournalEvent]) -> Result<JournalLifecycl
                 effect_seen = true;
             }
             JournalEventKind::EffectCompleted { observation } => {
+                if observation.effect_id.trim().is_empty() {
+                    return Err(RecoveryError::EventSequenceInvalid);
+                }
                 let Some((_, completion)) = effects.get_mut(&observation.effect_id) else {
                     return Err(RecoveryError::EventSequenceInvalid);
                 };

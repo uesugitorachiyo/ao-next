@@ -274,10 +274,12 @@ func TestAONextJournalImportFailuresDoNotMutateMission(t *testing.T) {
 	fixtures := []string{
 		"invalid-digest-drift.json",
 		"invalid-duplicate-key.json",
+		"invalid-empty-legacy-effect-id.json",
 		"invalid-identity-drift.json",
 		"invalid-sequence-gap.json",
 		"invalid-terminal-contradiction.json",
 		"invalid-unknown-field.json",
+		"invalid-whitespace-effect-lifecycle.json",
 	}
 	for _, name := range fixtures {
 		t.Run(name, func(t *testing.T) {
@@ -337,6 +339,38 @@ func TestAONextJournalImportFailuresDoNotMutateMission(t *testing.T) {
 			t.Fatalf("changed-run conflict left orphan object: %v", err)
 		}
 	})
+}
+
+func TestAONextJournalSharedBlankEffectIDVectorsFailLifecycle(t *testing.T) {
+	for _, name := range []string{
+		"invalid-empty-legacy-effect-id.json",
+		"invalid-whitespace-effect-lifecycle.json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseAONextJournalPrefix(readJournalPrefixFixture(t, name)); err == nil ||
+				err.Error() != "AO Next journal lifecycle is invalid" {
+				t.Fatalf("error=%v want lifecycle rejection", err)
+			}
+		})
+	}
+}
+
+func TestAONextJournalEffectIDsWithSurroundingWhitespaceRemainValid(t *testing.T) {
+	document := journalTestDocument(t, validAONextJournalPrefix(t, "effects_pending"))
+	for _, event := range document["events"].([]any) {
+		kind := event.(map[string]any)["kind"].(map[string]any)
+		switch kind["kind"] {
+		case "effect_intent":
+			kind["effect_id"] = " effect-1 "
+		case "effect_completed":
+			kind["observation"].(map[string]any)["effect_id"] = " effect-1 "
+		}
+	}
+	journalTestRefreshPrefix(t, document)
+
+	if _, err := parseAONextJournalPrefix(journalTestJSON(t, document)); err != nil {
+		t.Fatalf("surrounded effect identity rejected: %v", err)
+	}
 }
 
 func TestAONextJournalImportPathBoundary(t *testing.T) {

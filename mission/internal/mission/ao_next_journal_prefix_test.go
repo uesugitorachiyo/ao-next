@@ -276,6 +276,7 @@ func TestAONextJournalImportFailuresDoNotMutateMission(t *testing.T) {
 		"invalid-duplicate-key.json",
 		"invalid-empty-legacy-effect-id.json",
 		"invalid-identity-drift.json",
+		"invalid-nel-effect-lifecycle.json",
 		"invalid-sequence-gap.json",
 		"invalid-terminal-contradiction.json",
 		"invalid-unknown-field.json",
@@ -344,6 +345,7 @@ func TestAONextJournalImportFailuresDoNotMutateMission(t *testing.T) {
 func TestAONextJournalSharedBlankEffectIDVectorsFailLifecycle(t *testing.T) {
 	for _, name := range []string{
 		"invalid-empty-legacy-effect-id.json",
+		"invalid-nel-effect-lifecycle.json",
 		"invalid-whitespace-effect-lifecycle.json",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -352,6 +354,16 @@ func TestAONextJournalSharedBlankEffectIDVectorsFailLifecycle(t *testing.T) {
 				t.Fatalf("error=%v want lifecycle rejection", err)
 			}
 		})
+	}
+}
+
+func TestAONextJournalSharedFEFFEffectIDVectorRemainsValid(t *testing.T) {
+	prefix, err := parseAONextJournalPrefix(readJournalPrefixFixture(t, "valid-feff-effect-lifecycle.json"))
+	if err != nil {
+		t.Fatalf("FEFF effect identity rejected: %v", err)
+	}
+	if got := prefix.Events[0].Kind.EffectID; got != "\uFEFF" {
+		t.Fatalf("effect identity=%q want FEFF", got)
 	}
 }
 

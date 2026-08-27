@@ -82,12 +82,16 @@ pub enum JournalEventKind {
         turn_digest: Digest,
     },
     EffectIntent {
-        #[schemars(regex(pattern = r"\S"))]
+        #[schemars(regex(
+            pattern = r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"
+        ))]
         effect_id: String,
         effect_digest: Digest,
     },
     EffectCommitted {
-        #[schemars(regex(pattern = r"\S"))]
+        #[schemars(regex(
+            pattern = r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"
+        ))]
         effect_id: String,
     },
     EffectCompleted {
@@ -117,7 +121,10 @@ fn journal_effect_observation_schema(generator: &mut SchemaGenerator) -> Schema 
     else {
         return schema;
     };
-    effect_id.string().pattern = Some(r"\S".into());
+    effect_id.string().pattern = Some(
+        r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"
+            .into(),
+    );
     schema
 }
 

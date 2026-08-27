@@ -38,7 +38,7 @@
       "additionalProperties": false,
       "properties": {
         "effect_id": {
-          "pattern": "\\S",
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
           "type": "string"
         },
         "output_digest": {
@@ -223,7 +223,7 @@
               "type": "string"
             },
             "effect_id": {
-              "pattern": "\\S",
+              "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
               "type": "string"
             },
             "kind": {
@@ -244,7 +244,7 @@
           "additionalProperties": false,
           "properties": {
             "effect_id": {
-              "pattern": "\\S",
+              "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
               "type": "string"
             },
             "kind": {

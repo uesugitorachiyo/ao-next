@@ -350,6 +350,7 @@ fn checked_in_positive_vectors_verify() {
         "valid-passed.json",
         "valid-event-limit.json",
         "valid-unicode-separators.json",
+        "valid-feff-effect-lifecycle.json",
     ] {
         let prefix: ExecutionJournalPrefix =
             decode_strict_json(&fixture(name), 16 * 1024 * 1024).expect("strict prefix");
@@ -410,6 +411,8 @@ fn shared_event_limit_vector_accepts_4096_and_rejects_4097() {
 
 #[test]
 fn generated_schema_matches_the_shared_nullable_and_event_boundaries() {
+    const EFFECT_ID_PATTERN: &str =
+        r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]";
     let schema = serde_json::to_value(schema_for!(ExecutionJournalPrefix))
         .expect("execution journal prefix schema");
     let required = schema["required"].as_array().expect("required fields");
@@ -447,11 +450,19 @@ fn generated_schema_matches_the_shared_nullable_and_event_boundaries() {
             .iter()
             .find(|variant| variant["properties"]["kind"]["enum"][0] == json!(discriminator))
             .expect("effect event variant");
-        assert_eq!(variant["properties"]["effect_id"]["pattern"], json!(r"\S"));
+        assert_eq!(
+            variant["properties"]["effect_id"]["pattern"],
+            json!(EFFECT_ID_PATTERN)
+        );
     }
     assert_eq!(
         schema["definitions"]["EffectObservation"]["properties"]["effect_id"]["pattern"],
-        json!(r"\S")
+        json!(EFFECT_ID_PATTERN)
+    );
+    assert!("\u{0085}".trim().is_empty(), "NEL must remain whitespace");
+    assert!(
+        !"\u{feff}".trim().is_empty(),
+        "BOM must remain a nonblank effect identity"
     );
 }
 
@@ -529,6 +540,7 @@ fn checked_in_negative_vectors_fail_closed() {
     ));
     for (name, expected) in [
         ("invalid-empty-legacy-effect-id.json", "lifecycle"),
+        ("invalid-nel-effect-lifecycle.json", "lifecycle"),
         ("invalid-whitespace-effect-lifecycle.json", "lifecycle"),
         ("invalid-sequence-gap.json", "sequence"),
         ("invalid-digest-drift.json", "event-digest"),
@@ -569,6 +581,7 @@ fn shared_blank_effect_id_vectors_fail_lifecycle() {
         decode_strict_json(&fixture("run-request.json"), 1024 * 1024).expect("strict request");
     let accepted: Vec<_> = [
         "invalid-empty-legacy-effect-id.json",
+        "invalid-nel-effect-lifecycle.json",
         "invalid-whitespace-effect-lifecycle.json",
     ]
     .into_iter()
